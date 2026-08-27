@@ -1,0 +1,32 @@
+# Local configuration (created from config.example.toml on first run)
+config.toml
+
+# Secrets
+hf_token
+*.token
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# uv.lock is intentionally committed — single machine, reproducible env.
+
+# Logs and local state
+logs/
+*.log
+
+# Recordings must never end up in the repo
+*.wav
+*.flac
+*.mp3
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

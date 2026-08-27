@@ -1,0 +1,46 @@
+# Referat configuration.
+#
+# This file is the template. On first run Referat copies it to `config.toml`
+# in the repository root, which is gitignored and is the file you actually edit.
+# Set REFERAT_CONFIG to point somewhere else if you need to.
+
+[hotkeys]
+# Combos in the `keyboard` library's syntax, e.g. "ctrl+alt+f9", "ctrl+shift+r".
+# These are what the programmable USB buttons should emit.
+toggle_record = "ctrl+alt+f9"
+toggle_pause = "ctrl+alt+f10"
+
+[audio]
+# Case-insensitive substring match against the device name; "" = system default.
+mic_device = ""
+# WASAPI loopback source; "" = loopback of the current default output device.
+loopback_device = ""
+# Microphone is captured mono at this rate (what Whisper wants).
+mic_samplerate = 16000
+# The loopback stream is captured at the output device's native mix rate,
+# downmixed to mono, and resampled at transcription time.
+
+[paths]
+# One subfolder per meeting is created here.
+meetings_dir = "~/Meetings"
+# Plain text file containing a Hugging Face token, needed only for diarization.
+hf_token_file = "~/.referat/hf_token"
+
+[transcription]
+# faster-whisper model used when CUDA is available.
+model = "large-v3"
+# Smaller model used when falling back to CPU.
+cpu_fallback_model = "medium"
+# auto | cuda | cpu
+device = "auto"
+# float16 on GPU, int8 on CPU. "auto" picks per device.
+compute_type = "auto"
+# Language hint; "" means autodetect.
+language = "en"
+# Diarize the loopback channel into SPEAKER_01, SPEAKER_02, ...
+# Falls back to undifferentiated "REMOTE:" labels when no HF token is present.
+diarization = true
+
+[app]
+# DEBUG | INFO | WARNING | ERROR
+log_level = "INFO"

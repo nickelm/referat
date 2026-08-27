@@ -91,3 +91,6 @@ or under "Surfaced later".
       loopback capture to `soundcard` — 0.2.12.8 installs cleanly on 3.12
 - [ ] `uv` installed to a WinGet Packages path that is not on this shell's PATH;
       note the full path in SETUP.md or add it to PATH
+- [x] Pin the VS Code interpreter to the uv venv and set
+      `python-envs.alwaysUseUv` — the extension had selected system Python 3.14
+      and was failing `python -m pip list` (uv venvs have no pip)

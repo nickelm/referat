@@ -42,4 +42,11 @@ library needs no substitute. Config bootstrap, meeting-folder collision
 suffixing, atomic JSON writes, unknown-key warnings, and enum validation were
 all exercised directly. `git init` plus a first commit; `uv.lock` committed.
 
+Also added `.vscode/settings.json` (tracked; `.gitignore` now excludes the rest
+of `.vscode/`). VS Code had auto-selected the system Python 3.14 for this
+workspace before the venv existed, and the Python Envs extension was failing
+`python -m pip list` because uv creates venvs without pip. The settings pin
+the interpreter to `.venv\Scripts\python.exe` and set
+`python-envs.alwaysUseUv`.
+
 No tray, audio capture, or transcription code yet — that starts at build step 2.

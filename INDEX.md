@@ -23,6 +23,7 @@ whenever files are added, removed, or repurposed.
 | [.python-version](.python-version)               | Pins the project to Python 3.12 for `uv`.                                   |
 | [.gitignore](.gitignore)                         | Excludes `config.toml`, tokens, logs, and any stray audio files.            |
 | `uv.lock`                                        | Resolved dependency lock, committed deliberately — one machine, reproducible env. |
+| `.vscode/settings.json`                          | Pins the VS Code interpreter to the uv venv and tells the Python Envs extension to use uv rather than pip. |
 
 ## Package — [referat/](referat/)
 

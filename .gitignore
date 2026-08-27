@@ -26,7 +26,9 @@ logs/
 *.mp3
 
 # Editors / OS
-.vscode/
+# .vscode/settings.json is tracked; it pins the interpreter to the uv venv.
+.vscode/*
+!.vscode/settings.json
 .idea/
 Thumbs.db
 desktop.ini

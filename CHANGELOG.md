@@ -35,4 +35,11 @@ Build step 1. Created the repository from scratch.
   Claude Code sessions opened there know the transcript format, the `ME` /
   `SPEAKER_NN` labels, and that the raw files are not to be edited.
 
+Verified: `uv sync` provisions CPython 3.12.14 and installs 10 base packages
+with no torch pulled in; `uv run referat config` prints the loaded config;
+`pyaudiowpatch` 0.2.12.8 has a working 3.12 wheel, so the loopback capture
+library needs no substitute. Config bootstrap, meeting-folder collision
+suffixing, atomic JSON writes, unknown-key warnings, and enum validation were
+all exercised directly. `git init` plus a first commit; `uv.lock` committed.
+
 No tray, audio capture, or transcription code yet — that starts at build step 2.

@@ -14,8 +14,8 @@ or under "Surfaced later".
 - [x] `logging_setup.py`: rotating file log, console handler when stderr exists
 - [x] `CLAUDE.md`, `INDEX.md`, `CHANGELOG.md`, `TODO.md`, `README.md`
 - [x] `templates/meetings-CLAUDE.md` for the meetings folder
-- [ ] `git init` and first commit
-- [ ] `uv sync` and verify `uv run referat config`
+- [x] `git init` and first commit
+- [x] `uv sync` and verify `uv run referat config`
 
 ## 2. Tray app with state machine and hotkeys
 
@@ -87,5 +87,7 @@ or under "Surfaced later".
 
 - [ ] Decide whether `keyboard` hotkeys need an elevated process to fire while
       an admin window has focus
-- [ ] Confirm `PyAudioWPatch` publishes a Python 3.12 wheel; otherwise switch the
-      loopback capture to `soundcard`
+- [x] Confirm `PyAudioWPatch` publishes a Python 3.12 wheel; otherwise switch the
+      loopback capture to `soundcard` — 0.2.12.8 installs cleanly on 3.12
+- [ ] `uv` installed to a WinGet Packages path that is not on this shell's PATH;
+      note the full path in SETUP.md or add it to PATH

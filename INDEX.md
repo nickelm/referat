@@ -22,6 +22,7 @@ whenever files are added, removed, or repurposed.
 | [config.example.toml](config.example.toml)       | Annotated configuration template; copied to gitignored `config.toml` on first run. |
 | [.python-version](.python-version)               | Pins the project to Python 3.12 for `uv`.                                   |
 | [.gitignore](.gitignore)                         | Excludes `config.toml`, tokens, logs, and any stray audio files.            |
+| `uv.lock`                                        | Resolved dependency lock, committed deliberately — one machine, reproducible env. |
 
 ## Package — [referat/](referat/)
 

@@ -54,6 +54,7 @@ class TranscriptionConfig:
     compute_type: str = "auto"
     language: str = "en"
     diarization: bool = True
+    diarization_model: str = "pyannote/speaker-diarization-community-1"
 
 
 @dataclass(frozen=True)
@@ -76,12 +77,20 @@ class Config:
 
         Diarization needs it; everything else works without. Callers degrade to
         undifferentiated REMOTE labels rather than failing.
+
+        Read as bytes and decoded leniently, because the encoding is whatever
+        wrote the file. `Set-Content` and `>` in Windows PowerShell 5.1 produce
+        UTF-16 with a BOM, which is how this file was in fact first created
+        here; Notepad produces UTF-8 with one. A token is ASCII either way, so
+        the BOM decides and anything undecodable is dropped rather than raising
+        into a transcription job.
         """
         try:
-            token = self.paths.hf_token_file.read_text(encoding="utf-8").strip()
+            raw = self.paths.hf_token_file.read_bytes()
         except OSError:
             return None
-        return token or None
+        encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+        return raw.decode(encoding, errors="ignore").strip() or None
 
 
 _SECTIONS: dict[str, type] = {

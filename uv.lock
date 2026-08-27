@@ -3797,7 +3797,7 @@ requires-dist = [
     { name = "keyboard", specifier = ">=0.13.5" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pillow", specifier = ">=10.4" },
-    { name = "pyannote-audio", marker = "extra == 'transcribe'", specifier = ">=3.3" },
+    { name = "pyannote-audio", marker = "extra == 'transcribe'", specifier = ">=4.0" },
     { name = "pyaudiowpatch", specifier = ">=0.2.12.7" },
     { name = "pystray", specifier = ">=0.19.5" },
     { name = "sounddevice", specifier = ">=0.5" },

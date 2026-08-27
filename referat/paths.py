@@ -108,23 +108,29 @@ def list_meeting_dirs(meetings_dir: Path) -> list[Path]:
 # --- Crash-safe writes ------------------------------------------------------
 
 
-def write_json_atomic(path: Path, payload: dict[str, object]) -> None:
-    """Write JSON via a temp file plus `os.replace`, so readers never see a partial file.
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write text via a temp file plus `os.replace`, so readers never see a partial file.
 
     Referat's guiding rule is that a crash must never lose captured audio or
-    corrupt the metadata that describes it, so every metadata write goes through
-    here rather than truncating the target in place.
+    corrupt what describes it, so every write of a file the user or Claude Code
+    will read goes through here rather than truncating the target in place. It
+    also makes `referat rerun` safe: a failed re-transcription leaves the
+    previous `transcript.md` intact rather than a truncated one.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, ensure_ascii=False)
-            fh.write("\n")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    """Write JSON through :func:`write_text_atomic`."""
+    write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")

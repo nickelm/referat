@@ -19,6 +19,10 @@ loopback_device = ""
 mic_samplerate = 16000
 # The loopback stream is captured at the output device's native mix rate,
 # downmixed to mono, and resampled at transcription time.
+# Windows delivers no loopback frames while nothing is playing, so quiet
+# stretches are written as real silence. That keeps a position in system.wav
+# and the same position in mic.wav meaning the same moment of the meeting,
+# at the cost of roughly 345 MB per hour.
 
 [paths]
 # One subfolder per meeting is created here.
@@ -38,8 +42,14 @@ compute_type = "auto"
 # Language hint; "" means autodetect.
 language = "en"
 # Diarize the loopback channel into SPEAKER_01, SPEAKER_02, ...
-# Falls back to undifferentiated "REMOTE:" labels when no HF token is present.
+# Falls back to undifferentiated "REMOTE:" labels whenever diarization cannot
+# run: no HF token, an unaccepted gated repository, or any error in the pipeline.
+# The transcript is never at risk; only the speaker names are.
 diarization = true
+# The pyannote checkpoint. community-1 is the one that matches pyannote.audio 4;
+# it is gated, so the token above must belong to an account that has accepted its
+# conditions at https://hf.co/pyannote/speaker-diarization-community-1
+diarization_model = "pyannote/speaker-diarization-community-1"
 
 [app]
 # DEBUG | INFO | WARNING | ERROR

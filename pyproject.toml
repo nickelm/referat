@@ -24,13 +24,18 @@ transcribe = [
     "faster-whisper>=1.1",
     "torch>=2.7",
     "torchaudio>=2.7",
-    "pyannote.audio>=3.3",
+    # 4.x, not 3.x: `Pipeline.from_pretrained` takes `token=` where 3.x took
+    # `use_auth_token=`, and the checkpoint is speaker-diarization-community-1.
+    "pyannote.audio>=4.0",
 ]
 
 [project.scripts]
 referat = "referat.cli:main"
-# referat-tray is added under [project.gui-scripts] at build step 2, so that
-# autostart can launch it via pythonw.exe with no console window.
+
+# Launched by pythonw.exe, so autostart brings up the tray with no console
+# window. Use `python -m referat.tray` when you want the console output.
+[project.gui-scripts]
+referat-tray = "referat.tray:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -25,6 +25,10 @@ logs/
 *.flac
 *.mp3
 
+# Shortcuts. install_autostart.py writes into the Startup folder, not here,
+# but a .lnk dragged in to look at should never be committed.
+*.lnk
+
 # Editors / OS
 # .vscode/settings.json is tracked; it pins the interpreter to the uv venv.
 .vscode/*

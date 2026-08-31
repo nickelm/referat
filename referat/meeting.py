@@ -18,9 +18,12 @@ import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from referat import __version__, paths
+
+if TYPE_CHECKING:
+    from referat.config import Config
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +111,13 @@ class Meeting:
     pauses: list[Pause] = field(default_factory=list)
     audio: dict[str, ChannelAudio] = field(default_factory=dict)
     transcription: dict[str, Any] = field(default_factory=dict)
+    speaker_names: dict[str, str] = field(default_factory=dict)
+    """`SPEAKER_NN` to the name it was resolved to, for the speakers that have one.
+
+    Kept here rather than only in the rewritten Markdown because it is the only
+    way back to the number: `referat label --forget <name>` has to know which
+    label to revert, and a `referat rerun` re-diarizes and renumbers from scratch.
+    """
     referat_version: str = __version__
 
     # --- Files in the folder ------------------------------------------------
@@ -128,17 +138,29 @@ class Meeting:
     def transcript_path(self) -> Path:
         return self.dir / paths.TRANSCRIPT_MD
 
+    @property
+    def speakers_dir(self) -> Path:
+        """Where the snippets of not-yet-named speakers live. See :data:`referat.paths.SPEAKERS_DIR`."""
+        return self.dir / paths.SPEAKERS_DIR
+
     # --- Lifecycle ----------------------------------------------------------
 
     @classmethod
-    def create(cls, meetings_dir: Path, started_at: dt.datetime | None = None) -> Meeting:
+    def create(cls, config: Config, started_at: dt.datetime | None = None) -> Meeting:
         """Make the folder and return the meeting, without writing `meta.json` yet.
 
+        Created in the **staging** folder, never in the meetings folder: recording
+        writes WAVs, and the meetings folder may be synced. See
+        :meth:`referat.config.Config.staging_dir`.
+
         The id is the folder name, so it carries any `_2` collision suffix
-        :func:`referat.paths.new_meeting_dir` had to add.
+        :func:`referat.paths.new_meeting_dir` had to add — and that suffix accounts
+        for both roots, so the id survives the later move unchanged.
         """
         started_at = started_at or dt.datetime.now()
-        folder = paths.new_meeting_dir(meetings_dir, started_at)
+        folder = paths.new_meeting_dir(
+            config.staging_dir(), started_at, avoid=config.meeting_roots()
+        )
         log.info("meeting folder %s", folder)
         return cls(dir=folder, id=folder.name, started_at=started_at)
 
@@ -188,6 +210,9 @@ class Meeting:
             pauses=[Pause.from_json(p) for p in raw.get("pauses", []) if isinstance(p, dict)],
             audio=audio,
             transcription=raw.get("transcription") or {},
+            speaker_names={
+                str(k): str(v) for k, v in (raw.get("speaker_names") or {}).items()
+            },
             referat_version=str(raw.get("referat_version", "")),
         )
 
@@ -204,8 +229,25 @@ class Meeting:
             "pauses": [p.to_json() for p in self.pauses],
             "audio": {name: channel.to_json() for name, channel in self.audio.items()},
             "transcription": self.transcription,
+            "speaker_names": self.speaker_names,
             "referat_version": self.referat_version,
         }
+
+
+def format_duration(seconds: float) -> str:
+    """`M:SS`, or `H:MM:SS` once a meeting runs past the hour.
+
+    Lives here rather than in :mod:`referat.cli` because `referat list` and the
+    meetings folder's generated `INDEX.md` both print it, and two copies would
+    eventually disagree about the same meeting. Deliberately not
+    :func:`referat.transcribe.format_timestamp`, which is the same three lines at
+    the cost of importing the whole transcription stack into commands that only
+    read JSON.
+    """
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
 def _parse_time(value: Any) -> dt.datetime | None:
@@ -225,7 +267,14 @@ def _folder_time(meeting_dir: Path) -> dt.datetime:
         return dt.datetime.fromtimestamp(meeting_dir.stat().st_mtime)
 
 
-def load_meetings(meetings_dir: Path) -> list[Meeting]:
-    """Every readable meeting in the meetings folder, oldest first."""
-    found = [Meeting.load(d) for d in paths.list_meeting_dirs(meetings_dir)]
+def load_meetings(config: Config) -> list[Meeting]:
+    """Every readable meeting, oldest first, across both roots.
+
+    Takes the config rather than a folder because a meeting lives in the staging
+    folder until its audio is released and in the meetings folder afterwards — see
+    :meth:`referat.config.Config.meeting_roots`. Listing only one of the two would
+    hide exactly the meetings that need attention.
+    """
+    dirs = [d for root in config.meeting_roots() for d in paths.list_meeting_dirs(root)]
+    found = [Meeting.load(d) for d in sorted(dirs, key=lambda p: p.name)]
     return [m for m in found if m is not None]

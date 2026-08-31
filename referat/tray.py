@@ -25,7 +25,7 @@ from pathlib import Path
 import pystray
 from PIL import Image, ImageDraw
 
-from referat import paths, status
+from referat import paths, status, voices
 from referat.config import Config, ConfigError, load_config
 from referat.hotkeys import Hotkeys
 from referat.logging_setup import setup_logging
@@ -208,16 +208,42 @@ class App:
     def _transcribe(self, meeting: Meeting) -> None:
         """The background job. Deliberately survives a new recording starting."""
         try:
-            transcribe_meeting(meeting, self.config)
+            self._notify_transcribed(transcribe_meeting(meeting, self.config))
         except Exception:
             # Already recorded as `failed` in meta.json; the tray carries on and
             # `referat rerun` can try again at build step 8.
             log.exception("transcription job for %s failed", meeting.id)
+            self._notify(f"Transcription of {meeting.id} failed")
         finally:
             self.machine.end_job()
             # Ending a job while a new meeting records changes no state, but the
             # job count in status.json is still worth keeping honest.
             status.write_status(self.machine)
+
+    # --- Notifications ------------------------------------------------------
+
+    def _notify_transcribed(self, meeting: Meeting) -> None:
+        """Say the meeting is done, and how many voices nobody has named yet.
+
+        The count is the whole point of the message: a speaker only becomes a
+        name if somebody runs `referat label`, and nothing else in Referat ever
+        asks. With everybody recognised it says nothing extra.
+        """
+        unknown = voices.unknown_speakers(meeting)
+        message = f"Transcribed {meeting.id}"
+        if unknown:
+            message += (
+                f" ({len(unknown)} unknown voice{'s' if len(unknown) > 1 else ''} — "
+                f"run: referat label {meeting.id})"
+            )
+        self._notify(message)
+
+    def _notify(self, message: str) -> None:
+        """A balloon from the tray icon. Never raises: a notification is not the work."""
+        try:
+            self.icon.notify(message, "Referat")
+        except Exception:
+            log.debug("could not show a notification", exc_info=True)
 
     # --- Menu ---------------------------------------------------------------
 

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.voices/**)",
+      "Read(**/.voices/**)",
+      "Edit(**/.voices/**)"
+    ]
+  }
+}

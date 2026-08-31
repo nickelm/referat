@@ -12,27 +12,42 @@ written afterwards, on demand, by running Claude Code against the transcripts.
 
 ## Status
 
-Build step 5 of 9 — the tray app runs, the two hotkeys drive the state machine,
-and meetings are recorded into a folder holding `mic.wav`, `system.wav` and a
-`meta.json`, written crash-safely and left playable even if the process is killed
-mid-meeting. Windows will not idle-sleep out from under a meeting either — the
-hold is taken while recording or paused and dropped on stop, so a long
-transcription never keeps the laptop awake.
+Build step 9 of 9 for the recorder itself. The tray app runs and autostarts, the
+two hotkeys drive the state machine, and a meeting is recorded as `mic.wav` plus
+`system.wav` written crash-safely — left playable even if the process is killed
+mid-meeting — and Windows will not idle-sleep out from under it.
 
-Stopping a meeting now transcribes it: `faster-whisper` large-v3 on the GPU,
-falling back to CPU + medium, on a background thread that a new meeting can start
+Stopping a meeting transcribes it: `faster-whisper` large-v3 on the GPU, falling
+back to CPU + medium, on a background thread that a new meeting can start
 straight through. Both channels go through it, and `transcript.md` interleaves
-them chronologically with elapsed `[HH:MM:SS]` timestamps — the microphone
-labeled `ME`, the system-audio channel `REMOTE`. Step 7 splits `REMOTE` into
-individual speakers.
-See [TODO.md](TODO.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for what
-has landed.
+them chronologically with elapsed `[HH:MM:SS]` timestamps.
+
+The system-audio channel is diarized with `pyannote.audio`, and its speakers are
+given **names** rather than numbers: each one is matched against a database of
+voices learned from meetings already labeled, so there is no enrollment step —
+`referat label` plays a voice, asks who it was, and every meeting after that one
+knows it. A name is only written when the match clears both a similarity
+threshold and a margin over the runner-up, because a wrong name is worse than
+`SPEAKER_02`.
+
+The `referat` CLI is the rest of it: `list` (the inventory and the queue),
+`status`, `devices`, `rerun`, `label` and `config`.
+
+Steps 10-13 are next, and gated on all of the above working on real meetings:
+the lazy `/cleanup` pass that writes `notes.md`, a VS Code browsing layer, and
+per-project digests pushed into a Google Doc. See [TODO.md](TODO.md) for the
+plan and [CHANGELOG.md](CHANGELOG.md) for what has landed.
 
 ## Quick start
+
+Installing on a machine that has none of this: **[SETUP.md](SETUP.md)**, which
+covers the CUDA driver, the Hugging Face token and the gated pyannote model,
+microphone selection, the synced-folder rules, and autostart. The short version:
 
 ```powershell
 uv sync
 uv run referat config
+uv run python scripts/install_autostart.py
 ```
 
 `uv sync` provisions Python 3.12 and installs the tray and audio dependencies.

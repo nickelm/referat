@@ -44,6 +44,23 @@ class AudioConfig:
 class PathsConfig:
     meetings_dir: Path = Path("~/Meetings")
     hf_token_file: Path = Path("~/.referat/hf_token")
+    staging_dir: Path | None = None
+    r"""Where a meeting is recorded and transcribed. Unset means
+    `%LOCALAPPDATA%\Referat\recording`.
+
+    Recording never writes into the meetings folder, and the meeting only moves
+    there once its WAVs are gone — see :meth:`Config.staging_dir`.
+    """
+    voices_dir: Path | None = None
+    """Where the known-voices database lives. Unset means `<meetings_dir>/.voices`.
+
+    Set it when the meetings folder is inside Dropbox, OneDrive or any other sync
+    client. The transcripts and notes are worth syncing; the voiceprints are
+    biometric data about people who never asked to be in a database, and they must
+    stay on this machine. Pointing this somewhere local keeps that true by
+    configuration, rather than by a per-folder sync exclusion that nobody will
+    remember to re-apply after the folder is recreated.
+    """
 
 
 @dataclass(frozen=True)
@@ -58,6 +75,31 @@ class TranscriptionConfig:
 
 
 @dataclass(frozen=True)
+class SpeakersConfig:
+    """Putting names on the numbers diarization produced. See :mod:`referat.voices`.
+
+    The two thresholds are the only place a wrong name can get written into a
+    transcript, so they start strict and are loosened only against real voices.
+    """
+
+    identify: bool = True
+    owner_name: str = ""
+    """Who the microphone channel is. Empty until you fill it in by hand — Referat
+    never writes this file back — and the automatic mic-channel additions to the
+    known-voices database start from the moment you do."""
+    match_threshold: float = 0.70
+    """Cosine similarity a cluster must reach before it is called by a name."""
+    match_margin: float = 0.15
+    """...and by how much it must beat the runner-up *name*. Both, or the speaker
+    stays `SPEAKER_NN`: putting the wrong name on someone's words is worse than
+    leaving a number."""
+    snippets_per_speaker: int = 3
+    snippet_seconds: float = 6.0
+    """How much audio `referat label` gets to play back per unknown speaker.
+    Three six-second clips of 16 kHz mono is under 600 KB."""
+
+
+@dataclass(frozen=True)
 class AppConfig:
     log_level: str = "INFO"
 
@@ -68,6 +110,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
+    speakers: SpeakersConfig = field(default_factory=SpeakersConfig)
     app: AppConfig = field(default_factory=AppConfig)
     source: Path | None = None
     """The file this config was read from, or None for pure defaults."""
@@ -92,12 +135,50 @@ class Config:
         encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
         return raw.decode(encoding, errors="ignore").strip() or None
 
+    def voices_dir(self) -> Path:
+        """The known-voices folder: `[paths].voices_dir`, or `<meetings_dir>/.voices`.
+
+        Resolved here rather than at each call site so there is exactly one answer
+        to where the voiceprints are — see :attr:`PathsConfig.voices_dir` for why
+        the override exists.
+        """
+        return paths.voices_dir(self.paths.meetings_dir, self.paths.voices_dir)
+
+    def staging_dir(self) -> Path:
+        """Where meetings are recorded and transcribed, before their audio is gone.
+
+        **The WAVs must never be written into a folder anything syncs.** They are
+        ~460 MB an hour and are deleted once the transcript is judged trustworthy,
+        but a sync client would upload every one of them on the way past and then
+        keep the "deleted" audio in its own trash and version history for weeks —
+        recordings of people who never asked to be recorded, on somebody else's
+        servers, after Referat reported them gone. Syncing a file that is still
+        being appended to is its own hazard besides.
+
+        So a meeting is recorded here, transcribed here, and moved into
+        `meetings_dir` by :func:`referat.paths.move_meeting_dir` only once
+        `release_audio_if_clean` has deleted the WAVs. A meeting whose audio was
+        kept stays here, and `referat list` still shows it.
+        """
+        return self.paths.staging_dir or paths.default_staging_dir()
+
+    def meeting_roots(self) -> list[Path]:
+        """Every folder a meeting may be in, meetings folder first.
+
+        Anything that lists meetings or resolves an id has to look in both, or a
+        meeting that kept its audio becomes invisible to `list`, `label` and
+        `rerun` — which are exactly the commands that would fix it.
+        """
+        roots = [self.paths.meetings_dir, self.staging_dir()]
+        return list(dict.fromkeys(roots))
+
 
 _SECTIONS: dict[str, type] = {
     "hotkeys": HotkeysConfig,
     "audio": AudioConfig,
     "paths": PathsConfig,
     "transcription": TranscriptionConfig,
+    "speakers": SpeakersConfig,
     "app": AppConfig,
 }
 
@@ -164,12 +245,15 @@ def _build(cls: type, values: dict[str, Any], section: str) -> Any:
 
 def _coerce(value: Any, declared: Any, section: str, key: str) -> Any:
     """Coerce a TOML scalar to the field's declared type. Only Path needs work."""
-    if declared in (Path, "Path"):
+    if declared in (Path, "Path", "Path | None"):
         if not isinstance(value, str):
             raise ConfigError(f"[{section}].{key} must be a path string")
         return Path(value).expanduser()
     if declared in (int, "int") and isinstance(value, bool):
         raise ConfigError(f"[{section}].{key} must be an integer")
+    if declared in (float, "float") and isinstance(value, int) and not isinstance(value, bool):
+        # TOML tells 1 and 1.0 apart; the config file should not have to.
+        return float(value)
     return value
 
 
@@ -198,14 +282,37 @@ def _validate(config: Config) -> None:
             raise ConfigError(f"[hotkeys].{name} must not be empty")
     if config.hotkeys.toggle_record.lower() == config.hotkeys.toggle_pause.lower():
         raise ConfigError("[hotkeys].toggle_record and toggle_pause must differ")
+    _validate_speakers(config.speakers)
+
+
+def _validate_speakers(s: SpeakersConfig) -> None:
+    """Check the identification knobs. Imported lazily to keep this module light."""
+    from referat.voices import name_complaint
+
+    for name, value in (("match_threshold", s.match_threshold), ("match_margin", s.match_margin)):
+        if not 0.0 <= float(value) <= 1.0:
+            raise ConfigError(f"[speakers].{name} must be between 0.0 and 1.0, got {value!r}")
+    if s.snippets_per_speaker < 1:
+        raise ConfigError("[speakers].snippets_per_speaker must be at least 1")
+    if s.snippet_seconds <= 0:
+        raise ConfigError("[speakers].snippet_seconds must be positive")
+    # An owner called REMOTE or SPEAKER_01 would collide with the labels the
+    # pipeline generates, and the collision would be silent.
+    if s.owner_name.strip() and (complaint := name_complaint(s.owner_name)):
+        raise ConfigError(f"[speakers].owner_name {complaint}")
 
 
 def ensure_meetings_dir(config: Config) -> Path:
-    """Create the meetings folder and seed its CLAUDE.md if absent."""
+    """Create the meetings folder and seed the parts of its scaffold that are missing.
+
+    The scaffold is `templates/meetings/`: the folder's `CLAUDE.md`, the
+    `/cleanup` slash command, the rule denying that pass access to `.voices/`, and
+    the workspace setting that opens Markdown rendered. Seeded file by file and
+    never overwritten, so a prompt refined in place survives — see
+    :func:`referat.paths.seed_tree`.
+    """
     meetings = config.paths.meetings_dir
     meetings.mkdir(parents=True, exist_ok=True)
-    guide = meetings / "CLAUDE.md"
-    if not guide.exists() and paths.MEETINGS_CLAUDE_TEMPLATE.exists():
-        shutil.copyfile(paths.MEETINGS_CLAUDE_TEMPLATE, guide)
-        log.info("seeded %s", guide)
+    for created in paths.seed_tree(paths.MEETINGS_TEMPLATE_DIR, meetings):
+        log.info("seeded %s", created)
     return meetings

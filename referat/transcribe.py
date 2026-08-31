@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 import wave
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import gcd
 from pathlib import Path
 from types import ModuleType
@@ -39,7 +39,7 @@ from typing import Any
 
 import numpy as np
 
-from referat import diarize, merge, paths
+from referat import diarize, index, merge, paths, voices
 from referat.config import Config
 from referat.meeting import Meeting, MeetingStatus
 
@@ -52,7 +52,16 @@ SAMPLE_WIDTH = 2
 """Both channels are 16-bit PCM, as written by :mod:`referat.recorder`."""
 
 ME_LABEL = "ME"
-"""The microphone channel is one speaker by definition: the owner of the laptop."""
+"""The owner of the laptop, on whichever channel their voice was recognised.
+
+Not "the microphone channel", which is what this used to mean. Referat is
+primarily for meetings held **in person**, where the room's other voices arrive
+through the same microphone as the owner's — so the mic is diarized like the
+loopback is, and a cluster earns `ME` by matching the owner's voiceprint rather
+than by which file it came out of. An undiarized mic channel still falls back to
+this label, because one channel of unattributed speech is better read as the
+owner than as nobody.
+"""
 
 REMOTE_LABEL = "REMOTE"
 """Everyone on the loopback channel, when diarization did not name them."""
@@ -233,9 +242,10 @@ class ChannelTranscript:
     peak: float
     segments: list[Segment] = field(default_factory=list)
     language: str = ""
-    speakers: list[str] = field(default_factory=list)
-    """The `SPEAKER_NN` labels diarization found here, in order of first
-    appearance. Empty on the mic channel and on any undiarized run."""
+    speakers: dict[str, voices.Cluster] = field(default_factory=dict)
+    """The `SPEAKER_NN` diarization found here, each with the embedding that
+    identifies it and the snippets `referat label` will play. Empty on the mic
+    channel and on any undiarized run."""
     diarization: diarize.Diarization | None = None
     """What the diarizer did, or None when it was never asked — the mic channel."""
 
@@ -250,9 +260,16 @@ class ChannelTranscript:
             **self.quality.to_json(),
         }
         if self.diarization is not None:
-            meta["speakers"] = self.speakers
+            meta["speakers"] = {
+                label: cluster.to_json() for label, cluster in sorted(self.speakers.items())
+            }
             meta["diarization"] = self.diarization.to_json()
         return meta
+
+    @property
+    def speaker_names(self) -> dict[str, str]:
+        """The `SPEAKER_NN` to name mapping identification accepted on this channel."""
+        return {label: c.name for label, c in self.speakers.items() if c.name}
 
 
 # --- Reading the audio ------------------------------------------------------
@@ -493,20 +510,27 @@ def load_model(backend: Backend) -> Any:
 
 
 def transcribe_channel(
+    meeting: Meeting,
     path: Path,
     model: Any,
     config: Config,
     label: str,
     *,
     diarize_channel: bool = False,
+    speaker_start: int = 1,
     device: str = "cpu",
 ) -> ChannelTranscript:
     """Run one WAV file through the model and collect its segments.
 
-    `diarize_channel` additionally asks :mod:`referat.diarize` who spoke, which
-    only the loopback channel wants: the microphone is one speaker by
-    definition. `device` is the transcription backend's, so diarization follows
-    Whisper onto the GPU or the CPU rather than choosing for itself.
+    `diarize_channel` additionally asks :mod:`referat.diarize` who spoke and
+    :mod:`referat.voices` who they are, which **both** channels want: the
+    microphone hears the whole room in a meeting held in person, so it is no more
+    one speaker than the loopback is. `speaker_start` is the first `SPEAKER_NN`
+    number free for this channel, since the numbering runs across the meeting
+    rather than restarting per channel. `device` is the transcription
+    backend's, so both follow Whisper onto the GPU or the CPU rather than
+    choosing for themselves. `meeting` is here for the same reason — the speaker
+    snippets are written into its folder.
     """
     language = config.transcription.language.strip() or None
     started = time.monotonic()
@@ -563,14 +587,38 @@ def transcribe_channel(
     )
     if diarize_channel:
         # On the array that is still in scope, so the WAV is decoded once.
-        _diarize_into(transcript, audio, config, device)
+        _diarize_into(meeting, transcript, audio, config, device, speaker_start)
     return transcript
 
 
+def _owner_to_me(names: dict[str, str], config: Config) -> dict[str, str]:
+    """Render the owner's own cluster as `ME` rather than by name.
+
+    The owner is identified exactly as everybody else is — by matching their
+    voiceprint — and is then written as `ME`, because a transcript reading
+    `Niklas:` for one's own lines is a stranger way to read one's own meeting
+    than `ME:` is.
+
+    This is presentation only. `meta.json` keeps the real name in
+    `speaker_names`, which is what `referat label --forget <name>` needs in order
+    to find and revert the owner's labels like anybody else's, and what keeps the
+    per-channel `name` honest about who the match actually was.
+    """
+    owner = config.speakers.owner_name.strip()
+    if not owner:
+        return names
+    return {label: (ME_LABEL if name == owner else name) for label, name in names.items()}
+
+
 def _diarize_into(
-    transcript: ChannelTranscript, audio: np.ndarray, config: Config, device: str
+    meeting: Meeting,
+    transcript: ChannelTranscript,
+    audio: np.ndarray,
+    config: Config,
+    device: str,
+    speaker_start: int = 1,
 ) -> None:
-    """Name the speakers of one channel, in place. Never raises.
+    """Split one channel into speakers and name the ones it can, in place. Never raises.
 
     One cheap refusal comes first: a channel that transcribed to nothing has no
     lines to label, so there is nothing for a pipeline to do but spend minutes
@@ -584,6 +632,8 @@ def _diarize_into(
     reports failure rather than raising: a diarization error must not reach
     :func:`transcribe_meeting`, which cannot tell one from a dying GPU and would
     re-transcribe the whole meeting on the CPU.
+    :func:`referat.voices.identify` is held to the same contract for the same
+    reason, so this function has no error handling of its own to do.
     """
     if not transcript.segments:
         transcript.diarization = diarize.Diarization(
@@ -596,12 +646,20 @@ def _diarize_into(
     result = diarize.diarize(audio, SAMPLE_RATE, config, device)
     transcript.diarization = result
     if result.ok:
-        transcript.segments, transcript.speakers = diarize.assign(
-            transcript.segments, result.turns, transcript.label
+        transcript.segments, found, renaming = diarize.assign(
+            transcript.segments, result.turns, transcript.label, speaker_start
         )
-        log.info(
-            "%s: %s", transcript.channel, ", ".join(transcript.speakers) or "no speakers found"
-        )
+        log.info("%s: %s", transcript.channel, ", ".join(found) or "no speakers found")
+        names = voices.identify(meeting, transcript, renaming, audio, SAMPLE_RATE, config)
+        names = _owner_to_me(names, config)
+        if names:
+            # The label is metadata on the segment, so putting a name on it here
+            # means `merge` and `render_transcript` need to know nothing about
+            # identification at all: they already prefer a segment's own speaker.
+            transcript.segments = [
+                replace(segment, speaker=names.get(segment.speaker, segment.speaker))
+                for segment in transcript.segments
+            ]
     else:
         log.info(
             "%s: keeping %s labels, diarization %s (%s)",
@@ -633,32 +691,42 @@ def transcribe_channels(
     cannot cost you a perfectly good microphone transcript. Raises only when
     nothing at all came back.
     """
-    # Only the loopback channel is diarized: the microphone is the owner of the
-    # laptop and nobody else, so there is nothing in it to tell apart.
+    # Both channels are diarized. The microphone used to be taken as one speaker
+    # by definition -- the owner and nobody else -- which is true of a Zoom call
+    # and false of the meetings this is mostly used for: in a room, everybody
+    # goes through the one microphone, and that assumption merged a whole meeting
+    # into `ME`. The mic goes first so its speakers number from SPEAKER_01 and
+    # read down the transcript in order.
     channels = (
-        (meeting.mic_path, ME_LABEL, False),
-        (meeting.system_path, REMOTE_LABEL, True),
+        (meeting.mic_path, ME_LABEL),
+        (meeting.system_path, REMOTE_LABEL),
     )
     with _RUN_LOCK:
         model = load_model(backend)
         try:
             results: list[ChannelTranscript] = []
             errors: dict[str, str] = {}
-            for path, label, diarize_channel in channels:
+            # Numbering is per meeting, not per channel: two channels each
+            # starting at SPEAKER_01 would put two different people behind one
+            # label in the same transcript.
+            speakers_used = 0
+            for path, label in channels:
                 if not path.exists():
                     log.warning("no %s in %s", path.name, meeting.dir)
                     continue
                 try:
-                    results.append(
-                        transcribe_channel(
-                            path,
-                            model,
-                            config,
-                            label,
-                            diarize_channel=diarize_channel,
-                            device=backend.device,
-                        )
+                    transcript = transcribe_channel(
+                        meeting,
+                        path,
+                        model,
+                        config,
+                        label,
+                        diarize_channel=True,
+                        speaker_start=speakers_used + 1,
+                        device=backend.device,
                     )
+                    speakers_used += len(transcript.speakers or {})
+                    results.append(transcript)
                 except Exception as exc:
                     if not tolerate_failures:
                         raise
@@ -710,7 +778,9 @@ def release_audio_if_clean(meeting: Meeting) -> bool:
     otherwise pin every recording to the disk forever.
 
     The `audio` block itself stays — frames, duration and device remain on record
-    — and `audio_released` says the files are gone deliberately.
+    — and `audio_released` says the files are gone deliberately. The `speakers/`
+    snippets stay too: they are cut precisely because this function is about to
+    delete the audio they were cut from, and they go when their speaker is named.
     """
     if meeting.status is not MeetingStatus.DONE:
         return False
@@ -801,6 +871,13 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
     status = MeetingStatus.FAILED if errors else MeetingStatus.DONE
     meeting.status = status
     meeting.transcription = _transcription_meta(backend, transcripts, elapsed, status=status)
+    # Re-derived from this run rather than carried over: `referat rerun`
+    # re-diarizes and renumbers from scratch, so last week's SPEAKER_02 is not
+    # this run's. The names survive anyway, because they are looked up in the
+    # database each time rather than remembered here.
+    meeting.speaker_names = {
+        label: name for t in transcripts for label, name in t.speaker_names.items()
+    }
     if errors:
         meeting.transcription["errors"] = errors
     meeting.save()
@@ -817,8 +894,56 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
         )
     log.info("transcribed %s in %.1fs with %s", meeting.id, elapsed, backend)
 
-    release_audio_if_clean(meeting)
+    # Before the release, not after: this reads `mic.wav`, which the release
+    # deletes. It writes only to the voices database, and it costs nothing when
+    # it declines — which is every meeting held in person.
+    voices.bootstrap_owner(meeting, transcripts, config)
+    if release_audio_if_clean(meeting):
+        promote_meeting(meeting, config)
+    # After the promotion, so the meeting that just finished is already in the
+    # folder being indexed — and unconditional, because a meeting that stayed in
+    # staging still changes the footer. `write_index` never raises: the dashboard
+    # may not cost a transcript, the same rule diarization runs under.
+    index.write_index(config)
     return meeting
+
+
+def promote_meeting(meeting: Meeting, config: Config) -> bool:
+    """Move a finished meeting out of staging and into the meetings folder.
+
+    Called only once the WAVs are gone, which is the whole point: the meetings
+    folder may be synced, and audio must never be written into it — see
+    :meth:`referat.config.Config.staging_dir`. A meeting that kept its audio stays
+    in staging and is promoted by a later `referat rerun` that comes out clean.
+
+    Never raises. A meeting that cannot be moved is still a finished meeting with
+    a transcript in it; it stays where it is, `referat list` still shows it, and
+    the next rerun tries again. Losing the folder to a half-handled error would be
+    a far worse outcome than leaving it in the wrong place.
+    """
+    if meeting.dir.parent == config.paths.meetings_dir:
+        return False
+    if meeting.mic_path.exists() or meeting.system_path.exists():
+        # Enforced here and not only at the call site: "no WAV ever reaches the
+        # meetings folder" is the invariant this whole split exists for, and it
+        # should not depend on every future caller remembering the order.
+        log.debug("%s keeps its audio; staying in %s", meeting.id, meeting.dir.parent)
+        return False
+    try:
+        moved = paths.move_meeting_dir(meeting.dir, config.paths.meetings_dir)
+    except OSError:
+        log.warning("could not move %s into the meetings folder", meeting.id, exc_info=True)
+        return False
+    meeting.dir = moved
+    if moved.name != meeting.id:
+        # new_meeting_dir reserves the id in both roots, so this should be
+        # unreachable. If it ever fires, the folder name is the authority — that
+        # is what `referat label <id>` and `find_meeting_dir` resolve against.
+        log.warning("meeting %s was renamed to %s on the way in", meeting.id, moved.name)
+        meeting.id = moved.name
+        meeting.save()
+    log.info("moved %s into %s", meeting.id, config.paths.meetings_dir)
+    return True
 
 
 def _transcription_meta(

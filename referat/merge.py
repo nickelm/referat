@@ -7,9 +7,12 @@ Merging is therefore an ordering problem, not an alignment one, and this module
 is correspondingly small.
 
 It exists as its own module anyway, for two reasons. `transcript.md` should have
-exactly one author, and the loopback channel's lines are relabeled per speaker
-here: :mod:`referat.diarize` writes a `speaker` onto each segment it could
-attribute, and that wins over the channel's own label when the line is rendered.
+exactly one author, and lines are relabeled per speaker here: :mod:`referat.diarize`
+writes a `speaker` onto each segment it could attribute, and that wins over the
+channel's own label when the line is rendered. **Both channels are diarized**, so
+that applies as much to the microphone as to the loopback — a meeting held in
+person puts the whole room through the mic, and its lines are no more one
+speaker's than the loopback's are.
 
 **No runtime import of :mod:`referat.transcribe`.** It is the other way round:
 `transcribe` imports this module at top level, and the type it passes in comes in
@@ -49,9 +52,10 @@ def merge(transcripts: list[ChannelTranscript]) -> list[tuple[float, str, str]]:
     start time, then by channel, then by end time, so the result is fully
     determined by the input rather than by dict or list order.
 
-    A segment's own `speaker` is used when diarization gave it one, and the
-    channel's label otherwise — `ME` for the microphone always, `REMOTE` for a
-    loopback line that was never attributed to anybody.
+    A segment's own `speaker` is used when diarization gave it one — a
+    `SPEAKER_NN`, a name, or `ME` where the owner's voiceprint matched — and the
+    channel's label otherwise: `ME` for a microphone line nobody could attribute,
+    `REMOTE` for a loopback one.
     """
     entries = [
         (

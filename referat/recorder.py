@@ -396,7 +396,7 @@ class Recorder:
     def start(self, started_at: dt.datetime | None = None) -> Meeting:
         """Create the meeting folder and begin writing both WAVs."""
         started_at = started_at or dt.datetime.now()
-        meeting = Meeting.create(self.config.paths.meetings_dir, started_at)
+        meeting = Meeting.create(self.config, started_at)
         self.meeting = meeting
         self.clock = RecordingClock()
 

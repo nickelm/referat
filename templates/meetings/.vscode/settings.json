@@ -1,0 +1,9 @@
+{
+  // Markdown opens rendered in this workspace only. INDEX.md is the dashboard
+  // for this folder, and transcripts and notes are read far more often than
+  // they are edited. Ctrl+Shift+V still toggles, and "Open With..." on a file
+  // still offers the plain text editor.
+  "workbench.editorAssociations": {
+    "*.md": "vscode.markdown.preview.editor"
+  }
+}

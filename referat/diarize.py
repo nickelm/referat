@@ -1,9 +1,14 @@
-r"""Splitting the loopback channel into speakers, with `pyannote.audio`.
+r"""Splitting a channel into speakers, with `pyannote.audio`.
 
-`mic.wav` is one speaker by definition — the owner of the laptop — but
-`system.wav` carries everyone else on the call in a single mono stream. This
-module says who spoke when in it, so :mod:`referat.merge` can label the remote
-lines `SPEAKER_01`, `SPEAKER_02`, ... instead of an undifferentiated `REMOTE`.
+Both of them. `system.wav` carries everyone on a remote call in a single mono
+stream, and `mic.wav` carries everyone **in the room** — Referat is mostly used
+for meetings held in person, where one microphone hears the lot. This module says
+who spoke when in a channel, so :mod:`referat.merge` can label the lines
+`SPEAKER_01`, `SPEAKER_02`, ... instead of an undifferentiated `REMOTE` or a
+`ME` that quietly swallows everybody who was sitting at the same table.
+
+The numbering runs across the *meeting* rather than per channel — see
+:func:`assign`'s `start` argument — because the same transcript carries both.
 
 **Nothing here ever raises.** Diarization is a nicety layered on a pipeline that
 already works: a missing token, a gated repository, an out-of-memory, a pyannote
@@ -92,6 +97,14 @@ class Diarization:
     device: str = ""
     seconds: float = 0.0
     turns: list[Turn] = field(default_factory=list)
+    embeddings: dict[str, np.ndarray] = field(default_factory=dict)
+    """One clustering centroid per speaker, keyed by *pyannote's* own label.
+
+    The raw material :mod:`referat.voices` matches against. Not written to
+    `meta.json` from here: the vectors belong in the channel's `speakers` block,
+    beside the snippets they go with, and only after :func:`assign` has renumbered
+    the labels they are keyed by.
+    """
 
     @property
     def ok(self) -> bool:
@@ -135,7 +148,7 @@ def diarize(audio: np.ndarray, sample_rate: int, config: Config, device: str) ->
 
     started = time.monotonic()
     try:
-        turns = _run(audio, sample_rate, model, token, device)
+        turns, embeddings = _run(audio, sample_rate, model, token, device)
     except Exception as exc:
         # Deliberately bare. Anything at all going wrong here — a gated
         # repository, a network failure, an out-of-memory, a pyannote release
@@ -152,14 +165,22 @@ def diarize(audio: np.ndarray, sample_rate: int, config: Config, device: str) ->
     elapsed = time.monotonic() - started
     speakers = sorted({t.speaker for t in turns})
     log.info(
-        "diarized %.1fs of audio in %.1fs: %d turns, %d speaker(s) on %s",
+        "diarized %.1fs of audio in %.1fs: %d turns, %d speaker(s), %d embedding(s) on %s",
         audio.size / sample_rate if sample_rate else 0.0,
         elapsed,
         len(turns),
         len(speakers),
+        len(embeddings),
         device,
     )
-    return Diarization(status=DONE, model=model, device=device, seconds=elapsed, turns=turns)
+    return Diarization(
+        status=DONE,
+        model=model,
+        device=device,
+        seconds=elapsed,
+        turns=turns,
+        embeddings=embeddings,
+    )
 
 
 def _reason(exc: Exception) -> str:
@@ -170,8 +191,8 @@ def _reason(exc: Exception) -> str:
 
 def _run(
     audio: np.ndarray, sample_rate: int, model: str, token: str, device: str
-) -> list[Turn]:
-    """Load the pipeline, run it over the array, and read the turns back out."""
+) -> tuple[list[Turn], dict[str, np.ndarray]]:
+    """Load the pipeline, run it over the array, and read the result back out."""
     # Same ordering rule as `transcribe.load_model`: torch cleanly first, before
     # anything else can import it halfway through its own import.
     import torch
@@ -192,41 +213,138 @@ def _run(
         # FFmpeg — blocked here by Smart App Control — out of the picture.
         waveform = torch.from_numpy(np.ascontiguousarray(audio)).unsqueeze(0)
         result = pipeline({"waveform": waveform, "sample_rate": sample_rate})
-        return _turns_of(result)
+        return _read_output(result)
     finally:
         # Dropped rather than held warm, for the same reason the Whisper model
         # is: meetings are minutes apart at best, and the VRAM is worth more.
         del pipeline
 
 
-def _turns_of(result: Any) -> list[Turn]:
-    """The speaker turns of a pipeline result, across pyannote's output shapes.
+def _read_output(result: Any) -> tuple[list[Turn], dict[str, np.ndarray]]:
+    """The speaker turns and per-speaker embeddings, across pyannote's output shapes.
 
     `pyannote.audio` 4 returns a `DiarizeOutput` dataclass carrying both an
     overlapping `speaker_diarization` and an `exclusive_speaker_diarization`,
     the latter documented as the one "adapted to downstream transcription" —
     which is precisely this. A checkpoint configured `legacy` returns a bare
-    `Annotation` instead, as all of 3.x did.
+    `Annotation` instead, as all of 3.x did, and no embeddings with it.
     """
     annotation = getattr(result, "exclusive_speaker_diarization", None)
     if annotation is None:
         annotation = getattr(result, "speaker_diarization", result)
-    return [
+    turns = [
         Turn(start=float(segment.start), end=float(segment.end), speaker=str(speaker))
         for segment, _track, speaker in annotation.itertracks(yield_label=True)
     ]
+    return turns, _embeddings_of(result)
+
+
+def _embeddings_of(result: Any) -> dict[str, np.ndarray]:
+    """One clustering centroid per speaker, keyed by pyannote's label. Empty on doubt.
+
+    Three traps live in these five lines, and each of them files a voice under
+    somebody else's name if it is missed.
+
+    The rows are ordered by **`speaker_diarization.labels()`**, while the turns
+    above are read out of `exclusive_speaker_diarization`. That is safe — pyannote
+    applies the same rename mapping to both annotations — but it means the order
+    has to come from `speaker_diarization` and from nowhere else.
+
+    The array may be `None`, which is what `OracleClustering` returns, and it may
+    be **zero-padded** when the clustering produced fewer centroids than the
+    annotation has labels. A zero-norm row is not an embedding; it is filler, and
+    filing it under a name would make every later meeting match against noise.
+
+    `exclusive_speaker_diarization` can also hold *fewer* labels than
+    `speaker_diarization` — a speaker only ever heard talking over somebody else.
+    Such a label simply never reaches :func:`assign` and its embedding is dropped
+    there rather than here.
+    """
+    embeddings = getattr(result, "speaker_embeddings", None)
+    source = getattr(result, "speaker_diarization", None)
+    if embeddings is None or source is None:
+        return {}
+    try:
+        rows = np.asarray(embeddings, dtype=np.float32)
+        labels = [str(label) for label in source.labels()]
+    except Exception:
+        log.warning("could not read the speaker embeddings back", exc_info=True)
+        return {}
+    if rows.ndim != 2:
+        return {}
+
+    kept: dict[str, np.ndarray] = {}
+    for label, row in zip(labels, rows):
+        if float(np.linalg.norm(row)) <= 0.0 or not np.isfinite(row).all():
+            log.info("dropping the padding embedding pyannote returned for %s", label)
+            continue
+        kept[label] = row
+    if len(labels) != rows.shape[0]:
+        log.info(
+            "pyannote returned %d embedding(s) for %d label(s); using the ones that line up",
+            rows.shape[0],
+            len(labels),
+        )
+    return kept
+
+
+def _embed(
+    clips: list[np.ndarray], sample_rate: int, model: str, token: str, device: str
+) -> np.ndarray | None:
+    """The body of :func:`embed`, free to raise into its handler."""
+    import torch
+    from pyannote.audio import Pipeline
+
+    pipeline = Pipeline.from_pretrained(model, token=token)
+    if pipeline is None:
+        raise RuntimeError(f"could not load {model}; check the token and the repo conditions")
+    try:
+        pipeline.to(torch.device(device))
+        embedder = pipeline._embedding
+        if embedder.sample_rate != sample_rate:
+            # Not resampled here on purpose: every caller already hands over
+            # 16 kHz audio, and silently feeding a model the wrong rate would
+            # produce a plausible embedding of the wrong voice.
+            log.warning(
+                "the embedding model wants %d Hz and the clips are %d Hz; skipping",
+                embedder.sample_rate,
+                sample_rate,
+            )
+            return None
+
+        floor = getattr(embedder, "min_num_samples", 0)
+        vectors = []
+        for clip in clips:
+            if clip.size < floor:
+                continue
+            waveform = torch.from_numpy(np.ascontiguousarray(clip)).reshape(1, 1, -1)
+            vector = np.asarray(embedder(waveform), dtype=np.float32).reshape(-1)
+            norm = float(np.linalg.norm(vector))
+            if norm > 0.0 and np.isfinite(vector).all():
+                # Normalized before averaging, so a loud clip cannot outvote a
+                # quiet one: only the direction carries the identity.
+                vectors.append(vector / norm)
+        if not vectors:
+            return None
+        return np.mean(vectors, axis=0).astype(np.float32)
+    finally:
+        # Dropped rather than held warm, for the same reason `_run` drops it.
+        del pipeline
 
 
 # --- Aligning turns to segments ---------------------------------------------
 
 
 def assign(
-    segments: list[Segment], turns: list[Turn], fallback: str
-) -> tuple[list[Segment], list[str]]:
+    segments: list[Segment], turns: list[Turn], fallback: str, start: int = 1
+) -> tuple[list[Segment], list[str], dict[str, str]]:
     """Label each transcribed segment with the speaker who talked through most of it.
 
-    Returns the relabeled segments and the speakers that actually appear, in
-    order of first appearance.
+    Returns the relabeled segments, the speakers that actually appear in order of
+    first appearance, and the map from pyannote's own label to the `SPEAKER_NN`
+    it became. That last one is what lets :mod:`referat.voices` permute the
+    embeddings with the labels — pyannote orders them by *its* names, and
+    renumbering one without the other files every voice under somebody else.
 
     Alignment is by overlap and nothing else. Whisper and pyannote cut the
     channel at different places and neither is authoritative, so a segment goes
@@ -239,9 +357,15 @@ def assign(
     particular, and the folder contract promises one-based labels that read down
     the transcript in order. The numbering is per meeting and means nothing
     across meetings — the same person is a different number next week.
+
+    `start` is the first number to hand out, because **both channels are diarized
+    now** and the numbering is per *meeting*, not per channel: the microphone
+    picks up everybody in the room, so it is clustered too, and a second channel
+    starting again at `SPEAKER_01` would give two different people the same label
+    in one transcript. The caller passes the count already used.
     """
     if not turns:
-        return segments, []
+        return segments, [], {}
 
     ordered = sorted(turns, key=lambda t: t.start)
     renamed: dict[str, str] = {}
@@ -252,9 +376,9 @@ def assign(
             labeled.append(replace(segment, speaker=fallback))
             continue
         if raw not in renamed:
-            renamed[raw] = f"{SPEAKER_PREFIX}{len(renamed) + 1:02d}"
+            renamed[raw] = f"{SPEAKER_PREFIX}{start + len(renamed):02d}"
         labeled.append(replace(segment, speaker=renamed[raw]))
-    return labeled, list(renamed.values())
+    return labeled, list(renamed.values()), renamed
 
 
 def _dominant_speaker(start: float, end: float, turns: list[Turn]) -> str | None:

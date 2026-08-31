@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import sys
 from dataclasses import asdict
 from types import ModuleType
+from typing import Any
 
-from referat import __version__, index, status, voices
+from referat import __version__, index, paths, status, voices
 from referat.config import Config, ConfigError, load_config
 from referat.meeting import Meeting, format_duration, load_meetings
 
@@ -41,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser("config", help="show the loaded configuration")
-    subcommands.add_parser(
+    listing = subcommands.add_parser(
         "list",
         help="every meeting: duration, status, and who still needs a name",
         description=(
@@ -49,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
             "queue for `referat label`; AUDIO says whether the WAVs are still on "
             "disk or were released once the transcript came out clean."
         ),
+    )
+    listing.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit the same meetings as JSON, for the VS Code extension",
     )
     subcommands.add_parser(
         "status",
@@ -119,6 +127,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="delete this person from the known-voices database and revert their "
         "labels to SPEAKER_NN in every transcript",
     )
+    # The three flags below are what the VS Code extension's labeling webview
+    # drives. They exist because the prompt above cannot be driven from a
+    # subprocess: it reads `input()`, and `--forget`'s confirmation answers *no*
+    # on EOF, so a caller with no terminal is told "Nothing was deleted."
+    label.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit this meeting's unnamed speakers, their snippets and the known "
+        "names as JSON, instead of prompting",
+    )
+    label.add_argument(
+        "--speaker",
+        metavar="SPEAKER_NN",
+        help="name this speaker without prompting; needs --name and a meeting id",
+    )
+    label.add_argument(
+        "--name",
+        metavar="NAME",
+        help="the name to give --speaker",
+    )
+    label.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip --forget's confirmation. Deleting a person is not reversible",
+    )
 
     return parser
 
@@ -169,8 +203,52 @@ def render_table(
     return "\n".join(lines)
 
 
-def run_list(config: Config) -> int:
+def list_document(config: Config) -> dict[str, Any]:
+    """Every meeting, as the JSON the VS Code extension reads.
+
+    The extension needs six things it would otherwise have to work out for
+    itself: the two roots, the duration formatter, `audio_state`, the title rule,
+    the staged/promoted distinction, and which speakers are still numbers. All
+    six already exist exactly once in Python and are shared by three or more
+    callers *so that they cannot disagree* — so the extension is given the
+    answers rather than the ingredients. A second implementation in TypeScript
+    would be a seventh reader of `meta.json` with its own opinions about all of
+    them.
+
+    Deliberately not sorted here: this is `referat list`'s document, so it keeps
+    `list`'s oldest-first order, and the dashboard that wants newest-first
+    reverses it the way `referat.index` already does.
+    """
+    meetings = load_meetings(config)
+    return {
+        "meetings_dir": str(config.paths.meetings_dir),
+        "staging_dir": str(config.staging_dir()),
+        "meetings": [
+            {
+                "id": m.id,
+                "dir": str(m.dir),
+                "started_at": m.started_at.isoformat(timespec="seconds"),
+                "duration_seconds": m.duration_seconds,
+                "duration": format_duration(m.duration_seconds),
+                "status": str(m.status),
+                "audio": audio_state(m),
+                "staged": m.dir.parent != config.paths.meetings_dir,
+                "title": index.meeting_title(m),
+                "transcript": m.transcript_path.exists(),
+                "notes": (m.dir / paths.NOTES_MD).exists(),
+                "unnamed": voices.unknown_speakers(m),
+            }
+            for m in meetings
+        ],
+    }
+
+
+def run_list(config: Config, as_json: bool = False) -> int:
     """`referat list`. Oldest first, so the newest meeting lands next to the prompt."""
+    if as_json:
+        print(json.dumps(list_document(config), indent=2))
+        return 0
+
     meetings = load_meetings(config)
     if not meetings:
         print(f"No meetings in {config.paths.meetings_dir} yet.")
@@ -362,6 +440,37 @@ def run_devices(config: Config) -> int:
     return 0
 
 
+# --- referat label ----------------------------------------------------------
+
+
+def _label_complaint(args: argparse.Namespace) -> str | None:
+    """What is wrong with this combination of `label` flags, or None.
+
+    `label` has grown three non-interactive modes beside the prompt, and they do
+    not compose: naming one speaker, dumping the meeting as JSON, and deleting a
+    person are three different operations that happen to share a subcommand.
+    Saying so in a sentence beats argparse naming the flags and leaving the
+    caller to work out which pair it objected to.
+    """
+    modes = sum(bool(x) for x in (args.forget, args.speaker, args.as_json))
+    if modes > 1:
+        return "--forget, --speaker and --json are three different operations; pick one"
+    if args.speaker and not args.name:
+        return "--speaker needs --name"
+    if args.name and not args.speaker:
+        return "--name is only meaningful with --speaker"
+    if (args.speaker or args.as_json) and not args.meeting_id:
+        flag = "--speaker" if args.speaker else "--json"
+        return f"{flag} needs a meeting id"
+    if args.forget and args.meeting_id:
+        # Forgetting is global by definition: it reverts the labels in *every*
+        # transcript, so a meeting id here means the caller expects it not to.
+        return "--forget acts on every meeting; it takes no meeting id"
+    if args.yes and not args.forget:
+        return "--yes only answers --forget's confirmation"
+    return None
+
+
 # --- Entry point ------------------------------------------------------------
 
 
@@ -393,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "list":
-        return run_list(config)
+        return run_list(config, as_json=args.as_json)
 
     if args.command == "index":
         return index.run(config)
@@ -407,8 +516,21 @@ def main(argv: list[str] | None = None) -> int:
         # cost the rest of the CLI.
         from referat import label as labelling
 
+        complaint = _label_complaint(args)
+        if complaint:
+            # Checked here rather than through argparse's mutually-exclusive
+            # groups, whose generated messages name flags without saying what
+            # the combination would have meant.
+            print(f"referat label: {complaint}", file=sys.stderr)
+            return 2
         if args.forget:
-            return labelling.run_forget(config, args.forget)
+            return labelling.run_forget(config, args.forget, assume_yes=args.yes)
+        if args.speaker:
+            assert args.meeting_id and args.name
+            return labelling.run_apply(config, args.meeting_id, args.speaker, args.name)
+        if args.as_json:
+            assert args.meeting_id
+            return labelling.run_json(config, args.meeting_id)
         return labelling.run(config, args.meeting_id)
 
     if args.command == "rerun":

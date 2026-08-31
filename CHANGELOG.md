@@ -2,6 +2,349 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-08-31 — Smart App Control takes the interpreter too, and F5 never started
+
+The VS Code extension would not launch. Two unrelated faults were stacked under
+that one symptom, and the noisier one was not the fatal one.
+
+**The workaround recorded earlier today is dead.** That entry ends by saying the
+venv's own Python "is what actually runs everything and is still admitted". It is
+not, any more. The interpreter uv provisioned is a python-build-standalone build,
+`NotSigned` file by file exactly like `uv.exe`, and SAC moved on to the files
+inside it:
+
+```
+ImportError: DLL load failed while importing _ctypes:
+    An Application Control policy has blocked this file.
+```
+
+`_ctypes.pyd` and `winsound.pyd` blocked; every other stdlib extension module
+still loading; no file modified since 2026-08-27. That is per-file cloud
+reputation, and there is nothing stable about the two files it happened to pick.
+It is fatal rather than annoying because `ctypes` is imported by `status.py`,
+`tray.py` and `power.py`, and `cli.py` imports `status` — so **every** subcommand
+died at import, `referat --version` included, and the tray with it, and the
+extension, which drives the same interpreter.
+
+The real lesson is that the earlier entry named the wrong culprit. The problem
+was never *uv*; it is *unsigned binaries*, and it propagates to everything uv
+provisioned. **The fix is provenance, not version:** a PSF-signed Python 3.12
+from the Python install manager (`py install 3.12`), whose `python312.dll` and
+every `.pyd` are Authenticode-signed individually — verified against the 3.14
+already installed, which imports `ctypes` without complaint where the uv build
+cannot. Still 3.12, for the same torch / CTranslate2 / pyannote reason as always.
+The venv is rebuilt on it with `site-packages` moved aside and moved back rather
+than reinstalled: ~5 GB of wheels, the same `cp312-win_amd64` ABI on both sides,
+and an unchanged venv path, so the console shims and `.pth` files stay valid.
+SETUP.md section 2 is rewritten around this, and now opens by pointing at it.
+
+`"python-envs.alwaysUseUv": true` came out of `.vscode/settings.json`. It is what
+produced `Running: uv --version` and then `Error refreshing packages A system
+error occurred (spawn UNKNOWN)` on every package refresh — a *spawn* failure
+rather than an exit code, because the block lands at `CreateProcess`. Its
+justification (uv venvs ship without pip) is now false twice: pip was
+bootstrapped this morning, and `py -m venv` seeds it anyway.
+
+**Separately, F5 could never have worked.** Three faults, each fatal on its own,
+all of them upstream of the extension host — the bundle itself was fine and
+loaded when required by hand.
+
+- `.vscode/tasks.json` had `"path": "referat-vscode"`. VS Code's npm task
+  provider joins that onto `package.json` with no separator, looks for
+  `referat-vscodepackage.json`, and contributes no task — so `preLaunchTask`
+  could not resolve. One character: a trailing slash.
+- The same file's problem matcher captured a `message` and no `file`. VS Code
+  rejects a message-only pattern, which invalidates the matcher, which means the
+  `beginsPattern`/`endsPattern` tracking never arms and F5 hangs waiting for a
+  steady state it cannot detect — the exact failure the file's own comment was
+  written to prevent. Fixed in `esbuild.mjs` rather than by taking a dependency
+  on an external matcher extension: the `onEnd` hook now also prints one compact
+  `[watch] error file:line:col: message` line per error, because esbuild's own
+  format puts the message and the location on different lines *with a blank line
+  between them*, and a multi-line VS Code pattern matches only consecutive lines.
+- `~/.vscode/extensions/niklas-elmqvist.referat-vscode-0.1.0` was a directory
+  symlink pointing at the live source tree — the very path
+  `--extensionDevelopmentPath` targets — listed in `.obsolete` but absent from
+  `extensions.json`. VS Code was trying to reap an extension it had never
+  registered while the dev-path load presented the same publisher, name and
+  version. Removed with `rmdir` on the link, never `Remove-Item -Recurse`, which
+  would have followed it into the source.
+
+**And every context menu in the extension was inert.** All five `when` clauses
+read `/\bhasTranscript\b/`. In JSON `\b` is a valid escape for **U+0008
+backspace**, not a regex word boundary — parsing the manifest and printing the
+strings shows character code 8 sitting where the boundary was meant to be. Every
+clause compiled to a regex that could never match the space-joined `contextValue`
+`tree.ts` builds, so right-clicking a meeting offered nothing. They need `\\b`.
+Not a launch blocker, but the extension is useless without it.
+
+CLAUDE.md's Commands section is inverted to match: the venv interpreter is the
+documented path, `uv sync` is the historical one, and the note explains that the
+signature is what SAC discriminates on.
+
+**Then it was actually done, and measured.** `py install 3.12` fetched a signed
+3.12.10; the venv was rebuilt on it with `site-packages` moved aside and moved
+back, and the ~5 GB of wheels transferred intact — `torch 2.11.0+cu128` with
+`cuda True`, `faster_whisper`, `pyannote.audio`, `sounddevice` and
+`pyaudiowpatch` all import, and so do `ctypes` and `winsound`. Every subcommand
+works again. The `site-packages` swap needed three attempts: Dropbox held handles
+open on the freshly written `pip/_internal` for a few seconds, which is worth a
+retry loop rather than a diagnosis.
+
+**Two things changed that were not predicted.**
+
+`.venv\Scripts\pythonw.exe` is no longer the interpreter. CPython's `venv`
+copies its *redirector* (`Lib\venv\scripts\nt\pythonw.exe`, 263 kB
+against the real 104 kB) which spawns the base interpreter and waits on it, so
+the tray is now a ~6 MB stub plus a ~46 MB interpreter. uv's venv was a genuine
+copy, and `install_autostart.py`'s docstring argued the shortcut target on
+exactly that — "`pythonw.exe` is the venv itself" — so the reasoning was
+corrected rather than left to read as still true. Nothing depends on the process
+count: `tray.py` writes its own pid, so `referat status` reports the interpreter.
+Verified by launching the tray, which came up `idle` at pid 1176.
+
+And **a signed Python does not clear the machine of unsigned binaries** — the
+question worth being precise about, since the last two entries have each been
+too optimistic. Measured with `Get-AuthenticodeSignature`: the base install is 39
+signed files and 8 unsigned, and all 8 are bundled tools nothing imports — pip's
+`t64.exe`/`w64.exe` launcher templates, a tcl mingw helper, `tix84.dll`. The venv
+`python.exe` and `pythonw.exe` are `Valid`. Unsigned and load-bearing are only
+the console-script stubs pip stamps from those templates (`referat.exe`,
+`referat-tray.exe`) and the native DLLs in `site-packages` — torch alone is 26 of
+38. The stubs cost nothing, because everything here already uses `python.exe -m`
+for the unrelated Dropbox reason; the DLLs would cost transcription, which is a
+degraded mode this codebase has, not the total failure an unsigned interpreter
+caused. So the fix is real but bounded: **keep the import-critical path signed,
+let the rest fail soft.** PyPI wheels cannot be signed and there is no per-file
+allow, so there is no third option short of turning SAC off. SETUP.md carries
+this as a table.
+
+**And then Smart App Control gave `uv` back.** Later the same day, nothing
+reinstalled, still `NotSigned`: `uv --version` answers again, and the Python
+extension's log shows `uv pip list` succeeding against the new venv. The
+reputation for that exact build was restored the way it had been withdrawn.
+Recorded because it is the same mechanism in the other direction and it is the
+best evidence for the rule this entry started with: a build that runs today is
+not one to depend on tomorrow, in either direction, with nothing local to tell
+you which way it went. Nothing is reverted — the interpreter stays signed, and
+the tray, the CLI and the extension keep routing through it.
+
+**`tsconfig.json` lost its emit settings.** VS Code's bundled TypeScript is
+ahead of the pinned 5.9.3 that `npm run typecheck` runs, and TypeScript 6
+requires an explicit `rootDir` wherever `outDir` is set — so the editor reported
+"The common source directory of 'tsconfig.json' is './src'. The 'rootDir'
+setting must be explicitly set" while `tsc --noEmit` passed cleanly on the
+command line. Adding `rootDir` would have silenced it. Deleting `outDir` and
+`sourceMap` is the better answer: esbuild does every emit here, `out/` has never
+existed, and the file was describing an output layout for files this project
+does not write. It now sets `noEmit` and nothing about output, so the class of
+error cannot come back.
+
+**The tray got a Start menu entry.** `install_autostart.py --start-menu` writes
+the same shortcut into `Start Menu\Programs`, so pressing Start and typing
+"Referat" launches it, and it can be pinned from there — the answer to "the tray
+is not running and I do not want a terminal". The two locations are one `Location`
+record each rather than a second script: the target, the read-back verification
+and the refusal to overwrite a shortcut Referat did not write are the same
+operation in both folders. `--status` now reports both regardless of flags,
+because "is the tray set up" is one question and answering half of it is how
+somebody concludes the Start menu entry is missing when it is the autostart one
+that is. SETUP.md section 9 covers both, and its `uv run` commands — fifteen of
+them, all unrunnable here — are now `.venv\Scripts\python.exe -m referat.cli`.
+
+## 2026-08-31 — Smart App Control takes uv, and the venv is repaired without it
+
+No feature work. `uv` stopped running on this machine, and the tool that would
+have repaired the damage was the tool that stopped running.
+
+**`uv.exe` is unsigned, and Smart App Control withdrew its benefit of the
+doubt.** `uvx.exe` says so in as many words — `An Application Control policy has
+blocked this file. (os error 4551)` — while through bash `uv.exe` surfaces as the
+much less informative `Permission denied`, exit 126. All three binaries report
+`NotSigned`, SAC is still enforcing, and uv 0.12.6 had been working here for a
+week. Nothing local changed: SAC admits an unsigned binary only on Microsoft's
+cloud reputation for that exact build, and reputation can be withdrawn.
+
+**There is nothing to whitelist.** SAC has no exclusion list, deliberately —
+that is the difference between it and SmartScreen — so there is no per-file
+allow, and reinstalling uv from scoop, from Astral's installer or from PyPI
+fetches the same unsigned bytes and hits the same wall. This is the third time
+SAC has shaped this project, after PyAV's FFmpeg at step 5 and the `torchcodec`
+scare at step 7, and the answer is the same one both times: work around it rather
+than turn it off, because turning it off is one-way, system-wide and the user's
+call.
+
+**The workaround is to stop needing uv.** The venv's own Python is what actually
+runs everything and is still admitted, so `.venv/Scripts/python.exe -m
+referat.cli ...` replaces `uv run referat ...`, and `pythonw.exe -m referat.tray`
+is what autostart has been doing since step 9 anyway. For dependencies,
+`ensurepip` — which ships inside Python and needs neither network nor uv —
+bootstraps pip, and pip replaces `uv sync`. With one thing pip cannot infer:
+**the CUDA 12.8 torch pin lives in `[tool.uv.sources]`, which only uv reads**, so
+the transcribe extra needs an explicit
+`--extra-index-url https://download.pytorch.org/whl/cu128` or pip installs a
+torch that does not support this GPU.
+
+**And the venv turned out to be already broken, silently.** The Dropbox problem
+recorded at step 9 had recurred: no console scripts at all — `referat.exe`,
+`referat-tray.exe`, `pip.exe`, all gone — and `referat-0.1.0.dist-info` reduced to
+a *completely empty directory*. The symptom is nasty because it is not obviously
+a broken install: `import referat` still works from the repository root, because
+the working directory is on `sys.path`, and fails everywhere else. Everything
+this session and the last had run from the repo root, so it never showed.
+
+Repairing it needed the husk removed first. `pip install -e .` refuses while an
+empty `dist-info` is present — *"Cannot uninstall referat None: no RECORD file
+was found"* — the directory claiming the package is installed while holding no
+record of what it installed. `rmdir` then `pip install -e . --no-deps` restored
+both the import and the console scripts, without touching the three gigabytes of
+torch already on disk. Verified from outside the repository root, which is the
+case that was broken.
+
+**Written down and not fixed:** the venv's `python.exe` is unsigned too, and is
+running on exactly the reputation that was withdrawn from `uv.exe`. If it is ever
+withdrawn from the interpreter, the fallback above goes with it and there is no
+third layer. Also unfixed, and now more expensive than it was: the checkout still
+lives inside the Dropbox tree, so this will happen again — the repair is cheaper
+than it was an hour ago, but the cause is untouched.
+
+SETUP.md gains both procedures under section 2 — the SAC fallback and the
+eaten-venv repair — because the document tells you to run `uv sync` a dozen times
+and would otherwise be wrong on the machine it was written from. `CLAUDE.md`'s
+Commands block says the same in three lines.
+
+## 2026-08-31 — The browsing layer: a VS Code extension
+
+Build step 11. Referat gets the surface it has been deferring to `INDEX.md` since
+step 10: a `referat-vscode/` extension with a meetings tree, the four things you
+do to a meeting, and a panel for naming the speakers identification could not
+place. With the tray icon it is now the whole of Referat above the command line,
+and it is the last graphical surface this project will grow — a webview is part
+of an extension; a localhost server would be a web UI, and there is none.
+
+**The extension reimplements nothing, and that decided its shape.** The tree
+needs seven things: the two meeting roots, `format_duration`, `audio_state`,
+`index.meeting_title`, `voices.unknown_speakers`, and whether a meeting is still
+in staging. Every one exists exactly once in Python and is shared by three or
+more callers *precisely so they cannot disagree*, so reading `meta.json` from
+TypeScript would have made the extension a seventh reader of it with its own
+opinions about all of them. Instead:
+
+- **`referat list --json`** — every meeting with its duration, status, audio
+  state, title, unnamed speakers and folder, across both roots, built from the
+  same helpers the ASCII table is built from. The table is untouched and stays
+  the default.
+- **`referat label <id> --json`** — one meeting's unnamed speakers with their
+  snippet paths, sample lines and whether an embedding was stored. That last
+  flag is the case naming cannot repair, and the panel shows it as unnameable
+  rather than offering a field that is guaranteed to be refused.
+
+**`referat label` could not be driven from a subprocess at all**, which was the
+one real prerequisite this step had. The prompt reads `input()`, and `--forget`'s
+confirmation answers *no* on EOF — so anything without a terminal was told
+"Nothing was deleted." It now takes `--speaker SPEAKER_NN --name <name>`,
+`--forget <name> --yes`, and the `--json` above. All three are thin wrappers over
+`label.apply_name` and `label.forget`, which the module docstring reserved for
+"step 11's labeling webview" back at step 7b; the primitives were right and only
+the CLI surface was missing.
+
+**The wrappers duplicate none of the rules.** `voices.name_complaint` still
+decides what a name may be, so `--name ME` is refused by the same code the prompt
+uses. `--speaker` refuses a speaker who already has a name, because renaming is a
+different operation from naming and should not be reachable by accident. And
+`run_apply` calls `index.write_index` itself: `apply_name` deliberately does not
+— it is a primitive the pipeline also calls — so every *entry point* that names
+somebody has to, or the dashboard's Unnamed column goes stale the first time the
+panel is used. `_label_complaint` rejects the flag combinations that do not mean
+anything, in a sentence rather than through argparse's mutually-exclusive groups,
+which name the flags without saying what the pair would have meant.
+
+**`--allowedTools "Read,Write"` was wrong, and step 11 is where it showed.**
+`CLAUDE.md` and `TODO.md` both specified those two for the `/cleanup` spawn, but
+the slash command's own frontmatter declares `Read, Write, Glob` — `Glob` is what
+its wrong-meeting-id fallback lists the real ids with. Spawning with the narrower
+pair would have broken that fallback on the extension's very first mistyped id.
+The command's frontmatter is the authority on what the prompt needs, `Glob`
+returns paths rather than contents and cannot reach past the `Read`/`Edit` deny
+rule on `.voices/**`, so the docs were corrected to match it. **`Bash` is the
+line that actually matters and it has not moved**: having no shell is what makes
+a file-tool deny rule sufficient, and `claude.ts` says so where the constant is
+defined.
+
+**`claude` is not on `PATH` on this machine**, which step 10 found and step 11
+had to answer. The binary ships inside the installed Claude Code VS Code
+extension, in a directory whose name carries a version that changes on every
+update — 2.1.247 was current four days ago and is now listed in that folder's
+`.obsolete` beside 2.1.87, while 2.1.251 is live. The first implementation
+globbed that folder and parsed `.obsolete` itself, and it worked; asking VS Code
+for the extension and reading `extensionPath` is better, because VS Code already
+follows its own extensions across updates and there is then no version to parse
+and no `.obsolete` to read. `PATH` stays as the fallback for a machine with an
+ordinary install.
+
+**Nothing caches that path.** It is resolved on every spawn, because a resolved
+absolute path stored anywhere would still be there a week later pointing at a
+directory that has been deleted — and would fail at the moment somebody clicks
+*Generate notes*, which is the worst moment to find out. That is the same rot
+that happened between the two step 10 sessions.
+
+**It runs the venv's interpreter, and that was decided twice.** The plan for
+this step said `uv run --directory <repoRoot> referat`, on step 9's reasoning
+that Dropbox deletes `.venv\Scripts\referat.exe` while `uv run` re-materializes
+it. Then the first command this session ran came back *An Application Control
+policy has blocked this file*, because **Smart App Control had withdrawn its
+benefit of the doubt from `uv.exe` earlier the same day** — the entry above this
+one. An extension built on `uv run` would have failed on the only machine this
+project targets. It spawns `<repoRoot>\.venv\Scripts\python.exe -m referat.cli`
+instead, with `cwd` at the repository root: the interpreter is the one link in
+the chain that survives both SAC and Dropbox. `cwd` is load-bearing there rather
+than tidy — `-m referat.cli` resolves only because the working directory is on
+`sys.path`, the same dependency the autostart shortcut has carried since step 9.
+
+**No meetings-folder setting**, despite step 11's own bullet asking for one. The
+meetings folder is `[paths].meetings_dir` in the repository's `config.toml`,
+which is the file the tray records against; a second place to say where meetings
+live is a second thing that can disagree with the recorder, and this project has
+been pulled back from exactly that twice already (`voices_dir` derived from
+`meetings_dir`, `format_duration` copied into two modules). `referat.repoRoot`
+takes its place — point the extension at the repository and it learns both roots
+from the config the tray is using.
+
+Smaller decisions worth their line. The tree is **newest first**, matching the
+meetings `INDEX.md` rather than `referat list`, for the reason step 10 already
+recorded: a listing is read at a prompt, a dashboard is read from the top. The
+watcher is **debounced at 300 ms**, because transcription rewrites `meta.json`
+several times a meeting and every refresh is a subprocess. *Re-transcribe* opens a
+**terminal** rather than spawning behind a progress toast, since `referat rerun`
+takes minutes and loads a model and that log is the thing worth watching.
+*Generate notes* refuses on a **staged** meeting with an explanation, because
+`/cleanup` runs in the meetings folder and a staged meeting is not in it. And the
+panel's known-name **chips** are what stop a typo creating a second person —
+`difflib`'s "Did you mean Anna?" exists in the terminal because there is no list
+to click there, and porting it would have been the second implementation this
+whole step is built to avoid.
+
+**One thing found in passing.** The repository's own `.vscode/settings.json`
+has never been valid JSON: the interpreter path was written with single
+backslashes, making `\.` and `\S` invalid escapes. VS Code's parser is
+error-tolerant, so the pin worked and nothing ever complained; it turned up only
+because `launch.json` and `tasks.json` went in beside it and got parse-checked
+as a set. Forward slashes now, which VS Code accepts on Windows.
+
+**Verified as far as a session can.** The Python half was driven end to end
+against a throwaway config pointing at the scratchpad, so nothing real was
+touched: a synthetic meeting with two unnamed speakers was listed, dumped,
+named, and forgotten again, checking each time that `transcript.md`,
+`meta.json`'s `speaker_names`, the per-channel mirror, `voices.json`, the
+snippets and the meetings `INDEX.md` all moved — and moved back. The relabeling
+left a `SPEAKER_01` *inside another speaker's sentence* alone, which is the
+immutability rule holding. Every refusal was exercised: a reserved name, an
+unknown meeting, an unknown speaker, a speaker who already has a name, and all
+five bad flag combinations. The TypeScript half typechecks and bundles, and the
+`claude` resolver was run against the real extensions folder; the parts that need
+a person to click — the tree, the watcher, the panel, `/cleanup` — are step 11's
+open box in `TODO.md`.
+
 ## 2026-08-29 — The meetings folder gets a scaffold, a dashboard, and notes
 
 Build step 10. The meetings folder stops being a pile of timestamped directories:

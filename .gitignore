@@ -29,10 +29,20 @@ logs/
 # but a .lnk dragged in to look at should never be committed.
 *.lnk
 
+# The VS Code extension's build tree. `dist/` and `build/` above are
+# unanchored and already cover the esbuild output; these are the rest.
+node_modules/
+out/
+*.vsix
+
 # Editors / OS
-# .vscode/settings.json is tracked; it pins the interpreter to the uv venv.
+# Three files under .vscode are tracked: settings.json pins the interpreter to
+# the project venv, and launch.json + tasks.json are what F5 needs to run the
+# extension from source until step 12 packages it.
 .vscode/*
 !.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
 .idea/
 Thumbs.db
 desktop.ini

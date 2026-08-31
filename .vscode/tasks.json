@@ -1,0 +1,50 @@
+// esbuild in watch mode, so F5 picks up an edit without a rebuild by hand.
+// The begin/end patterns match the markers esbuild.mjs prints; without them
+// VS Code waits forever for a "build finished" it never sees.
+//
+// Two things here are load-bearing and both looked like typos:
+//
+//   "path" must end in a slash. VS Code's npm task provider joins it onto
+//   "package.json" with no separator, so "referat-vscode" looks for
+//   "referat-vscodepackage.json", contributes no task, and the launch
+//   configuration's preLaunchTask then fails to resolve -- before the
+//   extension host is ever spawned.
+//
+//   The pattern must capture a file as well as a message. VS Code rejects a
+//   message-only pattern, which invalidates the whole matcher, which means the
+//   background begin/end tracking never arms and F5 hangs waiting for a steady
+//   state it cannot detect. It matches the compact "[watch] error" line that
+//   esbuild.mjs prints for exactly this reason -- esbuild's own error format
+//   puts the message and the file on different lines with a blank between.
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "npm",
+      "script": "watch",
+      "path": "referat-vscode/",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "esbuild",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}/referat-vscode"
+        ],
+        "pattern": {
+          "regexp": "^\\[watch\\] error (\\S+?):(\\d+):(\\d+): (.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "message": 4
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\[watch\\] build started",
+          "endsPattern": "^\\[watch\\] build finished"
+        }
+      },
+      "group": "build",
+      "label": "npm: watch - referat-vscode"
+    }
+  ]
+}

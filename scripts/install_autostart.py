@@ -1,22 +1,49 @@
-r"""Create the Startup-folder shortcut that launches the Referat tray at sign-in.
+r"""Create the shortcuts that launch the Referat tray -- at sign-in, and by hand.
 
-    uv run python scripts/install_autostart.py            # install
-    uv run python scripts/install_autostart.py --status    # what is installed
-    uv run python scripts/install_autostart.py --uninstall
+    .venv\Scripts\python.exe scripts\install_autostart.py              # autostart
+    .venv\Scripts\python.exe scripts\install_autostart.py --start-menu # Start menu
+    .venv\Scripts\python.exe scripts\install_autostart.py --status
+    .venv\Scripts\python.exe scripts\install_autostart.py --uninstall
 
-The shortcut targets this checkout's `.venv\Scripts\pythonw.exe` with
+Both shortcuts target this checkout's `.venv\Scripts\pythonw.exe` with
 `-m referat.tray`, so the tray comes up with no console window.
+
+**Two locations, one shortcut.** Writing a `.lnk` into the Startup folder and
+writing the same `.lnk` into `Start Menu\Programs` differ only in which known
+folder they name: the target, the verification read-back and the refusal to
+overwrite somebody else's shortcut are the same operation both times. So
+`--start-menu` selects a `Location` rather than reaching a second script, and
+the two cannot drift apart in what they install. The Start menu entry is the
+answer to "the tray is not running and I do not want to open a terminal" --
+searchable by name, and pinnable to the taskbar from there.
+
+Installing both is the expected state and they do not conflict: `tray.py` holds
+a single-instance mutex, so launching from the Start menu while an autostarted
+tray is already running hands the hotkeys to nobody new.
 
 Three choices worth writing down, because each of them has an obvious
 alternative that is wrong:
 
 **`pythonw.exe -m referat.tray`, not `referat-tray.exe`.** The gui-script is a
-uv trampoline: it `CreateProcess`es `pythonw.exe` and stays resident as the
-parent, so autostarting through it would leave a stub process in the tree for
-the life of the tray. `pythonw.exe` is the venv itself, where the trampoline is
-an artifact `uv sync` regenerates. `tray.py` names its logger explicitly so the
-two paths log identically, and the `.lnk` properties dialog then says what it
-runs.
+generated launcher that `CreateProcess`es the interpreter and stays resident as
+the parent, and it is an artifact a reinstall regenerates -- Dropbox has deleted
+it twice here. `pythonw.exe` is the stable name. `tray.py` names its logger
+explicitly so the two paths log identically, and the `.lnk` properties dialog
+then says what it runs.
+
+This choice used to be argued on the grounds that `.venv\Scripts\pythonw.exe`
+"is the venv itself" and so costs no stub process. **That is no longer true and
+was only ever true of uv's venv.** Since the venv was rebuilt with the stdlib
+`venv` module -- see SETUP.md section 2 on why the interpreter had to change --
+`.venv\Scripts\pythonw.exe` is a *copy of CPython's own venv redirector*
+(`Lib\venv\scripts\nt\pythonw.exe`, 263 kB against the real interpreter's
+104 kB), which spawns the base `pythonw.exe` and waits on it so exit codes and
+Ctrl+C propagate. So the tray is two processes: a ~6 MB stub and the ~46 MB
+interpreter doing the work. `--copies` and `--symlinks` do not change this, and
+pointing the shortcut at the base interpreter instead would miss the venv's
+`site-packages` entirely. The stub is accepted rather than avoided. Nothing
+depends on the process count -- `tray.py` writes its *own* pid into
+`status.json`, so `referat status` reports the interpreter, not the stub.
 
 **PowerShell driving `WScript.Shell.CreateShortcut`, not COM through ctypes.**
 ctypes is right for a single flat function with scalar arguments -- which is
@@ -49,6 +76,7 @@ import os
 import subprocess
 import sys
 import winreg
+from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,13 +95,14 @@ except ImportError as exc:  # pragma: no cover - the one mistake worth catching
     raise SystemExit(
         f"install_autostart: could not import referat ({exc}).\n"
         "Run it inside the project environment:\n"
-        "    uv run python scripts/install_autostart.py"
+        "    .venv\\Scripts\\python.exe scripts\\install_autostart.py"
     )
 
 SHORTCUT_NAME = "Referat.lnk"
 DESCRIPTION = "Referat - meeting recorder tray"
 MODULE_ARGS = "-m referat.tray"
 FOLDERID_STARTUP = "{B97D20BB-F46A-4C97-BA10-5E3608430854}"
+FOLDERID_PROGRAMS = "{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}"
 
 
 class InstallError(Exception):
@@ -133,20 +162,24 @@ def _guid(text: str) -> _GUID:
     return guid
 
 
-def _appdata_startup_dir() -> Path:
-    """The Startup folder as it is on an unredirected machine. Fallback only."""
+def _appdata_programs_dir() -> Path:
+    r"""`Start Menu\Programs` as it is on an unredirected machine. Fallback only."""
     appdata = os.environ.get("APPDATA")
     base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
-    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs"
 
 
-def startup_dir() -> Path:
-    r"""The user's Startup folder, from `SHGetKnownFolderPath(FOLDERID_Startup)`.
+def _appdata_startup_dir() -> Path:
+    """The Startup folder as it is on an unredirected machine. Fallback only."""
+    return _appdata_programs_dir() / "Startup"
 
-    Falls back to the `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`
-    join only when the call fails, because that path is an assumption: Group
-    Policy folder redirection moves it, and `%APPDATA%` can be redirected on its
-    own.
+
+def _known_folder(folder_id: str, fallback: Callable[[], Path]) -> Path:
+    r"""A known folder from `SHGetKnownFolderPath`, or `fallback()`.
+
+    Falls back to an `%APPDATA%` join only when the call fails, because that
+    path is an assumption: Group Policy folder redirection moves these folders,
+    and `%APPDATA%` can be redirected on its own.
     """
     try:
         shell32 = ctypes.WinDLL("shell32", use_last_error=True)
@@ -159,21 +192,72 @@ def startup_dir() -> Path:
         ]
         buffer = ctypes.c_wchar_p()
         result = shell32.SHGetKnownFolderPath(
-            ctypes.byref(_guid(FOLDERID_STARTUP)), 0, None, ctypes.byref(buffer)
+            ctypes.byref(_guid(folder_id)), 0, None, ctypes.byref(buffer)
         )
         if result != 0 or not buffer.value:
-            return _appdata_startup_dir()
+            return fallback()
         try:
             return Path(buffer.value)
         finally:
             ole32.CoTaskMemFree(buffer)
     except (OSError, InstallError):
-        return _appdata_startup_dir()
+        return fallback()
+
+
+@dataclass(frozen=True)
+class Location:
+    """Where a shortcut goes, and what installing it there means.
+
+    The two locations differ in the known folder they name and in the sentence
+    printed afterwards; everything else -- the target, the read-back
+    verification, the refusal to overwrite a shortcut Referat did not write --
+    is the same operation, and is written once.
+    """
+
+    flag: str
+    label: str
+    folder_id: str
+    fallback: Callable[[], Path]
+    installed_note: tuple[str, ...]
+    removed_note: str
+
+    def dir(self) -> Path:
+        return _known_folder(self.folder_id, self.fallback)
+
+    def path(self) -> Path:
+        return self.dir() / SHORTCUT_NAME
+
+
+AUTOSTART = Location(
+    flag="",
+    label="Startup folder",
+    folder_id=FOLDERID_STARTUP,
+    fallback=_appdata_startup_dir,
+    installed_note=("The tray starts at your next sign-in.",),
+    removed_note="The tray no longer starts at sign-in.",
+)
+
+START_MENU = Location(
+    flag="--start-menu",
+    label="Start menu",
+    folder_id=FOLDERID_PROGRAMS,
+    fallback=_appdata_programs_dir,
+    installed_note=(
+        'Press Start and type "Referat" to launch the tray. Right-click the',
+        "result to pin it to the taskbar or to Start.",
+    ),
+    removed_note="Referat is no longer in the Start menu.",
+)
+
+
+def startup_dir() -> Path:
+    """The user's Startup folder. Kept as a name because it reads better."""
+    return AUTOSTART.dir()
 
 
 def shortcut_path() -> Path:
-    """Where the Referat shortcut lives."""
-    return startup_dir() / SHORTCUT_NAME
+    """Where the autostart shortcut lives."""
+    return AUTOSTART.path()
 
 
 # --- Talking to the shell ----------------------------------------------------
@@ -289,7 +373,7 @@ def intended() -> Shortcut:
         raise InstallError(
             f"no pythonw.exe beside {sys.executable}.\n"
             "Run it inside the project environment:\n"
-            "    uv run python scripts/install_autostart.py"
+            "    .venv\\Scripts\\python.exe scripts\\install_autostart.py"
         )
     here = Path(__file__).resolve().parent.parent
     if os.path.normcase(str(here)) != os.path.normcase(str(paths.REPO_ROOT)):
@@ -353,10 +437,10 @@ def _describe_mismatch(found: Shortcut, wanted: Shortcut) -> list[str]:
     ]
 
 
-def install(*, force: bool) -> int:
+def install(location: Location, *, force: bool) -> int:
     """Write the shortcut, unless one is already there pointing somewhere else."""
     wanted = intended()
-    path = shortcut_path()
+    path = location.path()
     existing = read_shortcut(path)
 
     if existing is not None and existing.matches(wanted):
@@ -394,16 +478,18 @@ def install(*, force: bool) -> int:
     for line in _config_warning():
         print(line)
     print("")
-    print("The tray starts at your next sign-in. To start it now:")
-    print("    uv run referat-tray")
+    for line in location.installed_note:
+        print(line)
+    print("To start it now, without waiting:")
+    print(f"    {wanted.target} {wanted.arguments}")
     print("A tray that is already running keeps the hotkeys: the single-instance")
     print("mutex means an autostarted tray and a manual launch cannot fight over them.")
     return 0
 
 
-def uninstall(*, force: bool) -> int:
+def uninstall(location: Location, *, force: bool) -> int:
     """Remove the shortcut, unless it is one Referat did not write."""
-    path = shortcut_path()
+    path = location.path()
     existing = read_shortcut(path)
     if existing is None:
         print(f"Nothing to remove at {path}")
@@ -427,56 +513,78 @@ def uninstall(*, force: bool) -> int:
         print(f"Could not remove {path}: {exc}", file=sys.stderr)
         return 1
     print(f"Removed {path}")
-    print("The tray no longer starts at sign-in.")
+    print(location.removed_note)
+    return 0
+
+
+def _status_of(location: Location, wanted: Shortcut) -> int:
+    """Report one location. Exit 0 when it is current, 1 when it is not."""
+    path = location.path()
+    existing = read_shortcut(path)
+    if existing is None:
+        print(f"{location.label}: not installed.")
+        print(f"  folder: {location.dir()}")
+        print(
+            "  install with: .venv\\Scripts\\python.exe scripts\\install_autostart.py"
+            + (f" {location.flag}" if location.flag else "")
+        )
+        return 1
+
+    if not existing.matches(wanted):
+        print(f"{location.label}: installed, but not current.")
+        for line in _describe_mismatch(existing, wanted):
+            print(line)
+        print("  re-run with --force to replace it.")
+        return 1
+
+    print(f"{location.label}: installed {path}")
+    for line in wanted.lines():
+        print(line)
     return 0
 
 
 def show_status() -> int:
-    """Report what is installed. Exit 0 when it is current, 1 when it is not."""
-    path = shortcut_path()
-    existing = read_shortcut(path)
-    if existing is None:
-        print("Not installed.")
-        print(f"  startup folder: {startup_dir()}")
-        print("Install it with: uv run python scripts/install_autostart.py")
-        return 1
+    """Report both locations. Exit 0 only when both are current.
 
+    Both, rather than the one a flag selected, because "is the tray set up"
+    is one question and answering half of it is how somebody concludes the
+    Start menu entry is missing when it is the autostart one that is.
+    """
     wanted = intended()
-    if not existing.matches(wanted):
-        print("Installed, but not current.")
-        for line in _describe_mismatch(existing, wanted):
-            print(line)
-        print("Re-run with --force to replace it.")
-        return 1
-
-    print(f"Installed {path}")
-    for line in wanted.lines():
-        print(line)
+    codes = [_status_of(location, wanted) for location in (AUTOSTART, START_MENU)]
     print(f"  config:  {effective_config()}")
     for line in _config_warning():
         print(line)
-    return 0
+    return 0 if not any(codes) else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="install_autostart.py",
         description=(
-            "Create the Startup-folder shortcut that launches the Referat tray "
-            "at sign-in. With no options, installs it; installing again when it "
-            "is already current changes nothing."
+            "Create the shortcuts that launch the Referat tray. With no "
+            "options, installs the Startup-folder one, so the tray comes up at "
+            "sign-in; with --start-menu, the Start menu one, so it can be "
+            "launched by name. Installing again when a shortcut is already "
+            "current changes nothing."
         ),
     )
     what = parser.add_mutually_exclusive_group()
     what.add_argument(
         "--status",
         action="store_true",
-        help="report what is installed; exit 0 when it is current, 1 when it is not",
+        help="report both locations; exit 0 when both are current, 1 when either is not",
     )
     what.add_argument(
         "--uninstall",
         action="store_true",
-        help="remove the shortcut, so the tray no longer starts at sign-in",
+        help="remove the shortcut from the selected location",
+    )
+    parser.add_argument(
+        "--start-menu",
+        dest="start_menu",
+        action="store_true",
+        help="act on the Start menu entry rather than the autostart one",
     )
     parser.add_argument(
         "--force",
@@ -488,12 +596,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    location = START_MENU if args.start_menu else AUTOSTART
     try:
         if args.status:
             return show_status()
         if args.uninstall:
-            return uninstall(force=args.force)
-        return install(force=args.force)
+            return uninstall(location, force=args.force)
+        return install(location, force=args.force)
     except InstallError as exc:
         print(f"install_autostart: {exc}", file=sys.stderr)
         return 1

@@ -395,12 +395,19 @@ neither.
       `site-packages\referat-0.1.0.dist-info` is now an empty directory, so
       `import referat` fails from any working directory but the repo root. The
       repository lives inside the Dropbox tree and `.venv` is only *gitignored*,
-      which does nothing to stop a sync client. `uv sync` repairs it; nothing
-      stops it happening again. Decide between telling Dropbox to ignore
-      `.venv` (right-click, "Ignore" — or the `com.dropbox.ignored` attribute)
-      and moving the checkout out of Dropbox entirely. **This is the same class
-      of mistake the meetings folder already hit**, and the same answer: keep the
-      thing that must not be synced out of the synced tree
+      which does nothing to stop a sync client. Nothing stops it happening again.
+      Decide between telling Dropbox to ignore `.venv` (right-click, "Ignore" —
+      or the `com.dropbox.ignored` attribute) and moving the checkout out of
+      Dropbox entirely. **This is the same class of mistake the meetings folder
+      already hit**, and the same answer: keep the thing that must not be synced
+      out of the synced tree.
+      **It recurred on 2026-08-31 and `uv sync` was no longer available to repair
+      it** — see the Smart App Control item below — so the repair is now pip:
+      remove the *empty* `referat-0.1.0.dist-info` husk, then
+      `python -m pip install -e . --no-deps`. The husk has to go first or pip
+      refuses with "Cannot uninstall referat None", claiming the package is
+      installed while holding no record of what it installed. Documented in
+      SETUP.md section 2
 - [ ] Because of the above, the shortcut's `WorkingDirectory` is currently
       **load-bearing** rather than a nicety: `-m referat.tray` finds the package
       only because the working directory is the repo root and `-m` puts the
@@ -544,11 +551,15 @@ with diarized speakers in it. See the step 10 follow-ups below.
 - [ ] **A deny rule binds the file tools, not `Bash`.** `Read(**/.voices/**)`
       and `Edit(**/.voices/**)` stop the Read and Edit tools; a
       `cat .voices/voices.json` would walk straight past them. That is survivable
-      only because step 11 spawns `/cleanup` with `--allowedTools "Read,Write"`
-      and no shell — so **`Bash` must never be added to that list**, and if it
-      ever is, the deny rule needs `Bash(...)` entries to match. Written into
-      `CLAUDE.md`; noted here because it is a footgun in the step 11 code, not in
-      this step's
+      only because step 11 spawns `/cleanup` with no shell — so **`Bash` must
+      never be added to that list**, and if it ever is, the deny rule needs
+      `Bash(...)` entries to match. Written into `CLAUDE.md`; noted here because
+      it is a footgun in the step 11 code, not in this step's.
+      **The list itself was wrong here and is now `Read,Write,Glob`** — the
+      slash command's own frontmatter declares those three, and `Glob` is what
+      its wrong-meeting-id fallback needs. It returns paths rather than contents,
+      so it cannot reach past the deny rule; `Bash` is the entry that would, and
+      that is the one that has not moved
 - [ ] The `/cleanup` prompt says to read `meta.json` for the date and duration,
       which means the pass reads a file the folder's `CLAUDE.md` tells it never
       to *edit*. That is the intended distinction and it held on the one real
@@ -580,41 +591,244 @@ with diarized speakers in it. See the step 10 follow-ups below.
 
 ## 11. VS Code extension (`referat-vscode/`)
 
-- [ ] TypeScript, standard `yo code` scaffold, esbuild bundling
-- [ ] A "Referat" TreeView in the sidebar listing meeting folders read from
-      their `meta.json`: date, duration, and a status icon per meeting
-      (recorded / transcribed / notes exist)
-- [ ] A file watcher on the meetings folder keeps the tree live
-- [ ] Per-meeting context menu: *Open transcript*, *Open notes*, *Generate
-      notes*, *Re-transcribe*
-- [ ] *Generate notes* spawns the official Claude Code CLI as a child process
-      with cwd = the meetings folder: `claude -p "/cleanup <meeting-id>"
-      --allowedTools "Read,Write" --permission-mode acceptEdits`. Progress
-      notification while it runs; on exit code 0 open the resulting `notes.md`;
-      on failure surface stderr. **The extension never handles credentials** —
-      the `claude` binary owns all authentication, under the subscription login
-- [ ] *Re-transcribe* shells out to `referat rerun <meeting-id>`
-- [ ] An **"Unknown speakers"** sub-item per meeting in the tree, listing the
-      speakers step 7b could not identify and opening a labeling webview: a play
-      button per snippet, and a name field completing over the known names. It
-      is `referat label` with a UI, writing the same three places — the
-      database, `meta.json`, `transcript.md` — so drive it through that code
-      rather than reimplementing the matching in TypeScript
-- [ ] Settings: meetings folder path, and path to the `claude` binary. **A
-      PATH-only default fails on this machine**, where there is no `claude` on
-      PATH at all — it lives inside the Claude Code VS Code extension's own
-      `resources/native-binary/`. Resolve in this order, at **spawn time**:
-      1. `referat.claudeBinary`, when the user has set one;
-      2. `vscode.extensions.getExtension("Anthropic.claude-code")`, then
-         `extensionPath` + `resources/native-binary/claude.exe`, existence-checked.
-         This is the answer that needs no PATH, no config and no npm, and VS Code
-         resolves the versioned directory so it follows the extension across
-         updates;
-      3. `claude` on PATH, for a machine with an ordinary install.
-- [ ] **Never persist a resolved absolute path** — not in a setting, not in a
-      cache, not in `meta.json`. That is precisely what rotted between the two
-      step 10 sessions (see below), and a stored path fails *silently* a week
-      later, at the moment somebody clicks *Generate notes*
+**Built on 2026-08-31.** Everything below is done except the boxes that need a
+person to click, which are collected at the end of this step.
+
+- [x] TypeScript, standard `yo code` scaffold, esbuild bundling. `npm install`
+      of four devDependencies (typescript, esbuild, @types/vscode, @types/node),
+      `npm run typecheck` and `npm run compile` both clean, `dist/extension.js`
+      at 13.5 kB
+- [x] A "Referat" TreeView in the sidebar listing meeting folders with date,
+      duration, status and an icon per state. **Not read from `meta.json` in
+      TypeScript** — see the `list --json` box below for why
+- [x] A file watcher on the meetings folder keeps the tree live. **Both roots**,
+      not just the meetings folder: a recording is in staging and would
+      otherwise never appear until it promoted. Debounced at 300 ms, because
+      transcription rewrites `meta.json` several times a meeting and every
+      refresh is a subprocess
+- [x] Per-meeting context menu: *Open transcript*, *Open notes*, *Generate
+      notes*, *Re-transcribe*, gated on a composed `contextValue` so *Open
+      notes* does not appear on a meeting with none and *Re-transcribe* does not
+      appear on one whose audio was released
+- [x] *Generate notes* spawns the official Claude Code CLI as a child process
+      with cwd = the meetings folder. Progress notification, cancellable; exit 0
+      opens the resulting `notes.md` rendered; failure surfaces stderr with the
+      full invocation one click away in the output channel. **The extension
+      never handles credentials** — the `claude` binary owns all authentication
+- [x] **`--allowedTools "Read,Write"` was wrong** and this is where it showed.
+      The `/cleanup` command's own frontmatter declares `Read, Write, Glob`, and
+      `Glob` is what its wrong-meeting-id fallback lists the real ids with, so
+      the narrower pair would have broken that fallback on the first mistyped
+      id. The frontmatter is the authority; `Glob` returns paths rather than
+      contents and cannot reach past the `Read`/`Edit` deny rule on `.voices/`.
+      `CLAUDE.md`, this file and the spawn now all say `Read,Write,Glob`.
+      **`Bash` is the line that matters and it has not moved**
+- [x] *Re-transcribe* shells out to `referat rerun <meeting-id>` — in a
+      terminal rather than a spawn behind a progress toast, because it takes
+      minutes, loads a model and logs continuously, and that log is the thing
+      worth watching while it does. The tree refreshes when the terminal closes
+- [x] An **"Unknown speakers"** sub-item per meeting, listing what step 7b could
+      not identify and opening a labeling webview: an audio element per snippet
+      and a name field. It drives `label.apply_name` through the CLI rather than
+      reimplementing anything — see the two boxes below
+- [x] Settings resolution for the `claude` binary, in the order specified here
+      and at **spawn time**: `referat.claudeBinary`, then
+      `vscode.extensions.getExtension("Anthropic.claude-code")` +
+      `resources/native-binary/claude.exe` existence-checked, then `claude` on
+      PATH. The first implementation globbed the extensions folder and parsed
+      its `.obsolete` — it worked, verified against the real filesystem where it
+      picked 2.1.251 over the obsolete 2.1.247, and asking VS Code is still
+      better, because VS Code follows its own extensions and leaves nothing to
+      parse
+- [x] **Never persist a resolved absolute path.** Nothing does: `resolveClaude`
+      runs on every spawn and stores nothing anywhere
+
+### What step 11 had to add to Python first
+
+- [x] **`referat label` could not be driven from a subprocess at all.** The
+      prompt reads `input()`, and `--forget`'s confirmation answers *no* on EOF,
+      so anything without a terminal was told "Nothing was deleted." It now
+      takes `--speaker SPEAKER_NN --name <name>`, `--forget <name> --yes` and
+      `--json`. All three are thin wrappers over `label.apply_name` and
+      `label.forget`, which the module docstring reserved for "step 11's
+      labeling webview" back at step 7b
+- [x] **The wrappers duplicate none of the rules.** `voices.name_complaint`
+      still decides what a name may be; `--speaker` refuses a speaker who
+      already has one, because renaming is a different operation from naming;
+      and `run_apply` calls `index.write_index` itself, since `apply_name`
+      deliberately does not — it is a primitive the pipeline also calls, so
+      every *entry point* that names somebody has to, or the dashboard's Unnamed
+      column goes stale the first time the panel is used
+- [x] **`referat list --json`**, because the tree needs seven things the
+      extension would otherwise have re-derived: the two roots,
+      `format_duration`, `audio_state`, `index.meeting_title`,
+      `voices.unknown_speakers`, and whether a meeting is still staged. Every
+      one exists exactly once in Python and is shared by three or more callers
+      *so that they cannot disagree*; a TypeScript copy would have made the
+      extension a seventh reader of `meta.json` with its own opinions about all
+      of them. The step 11 bullet above said "read from their `meta.json`", and
+      this is the deliberate departure from it. The ASCII tables are untouched
+      and stay the default
+- [x] `_label_complaint` rejects the flag combinations that do not mean
+      anything, in a sentence rather than through argparse's mutually-exclusive
+      groups, which name the flags without saying what the pair would have meant
+
+### Deviations from this step as it was written
+
+- [x] **No meetings-folder setting**, though the bullet above asked for one.
+      Where meetings live is `[paths].meetings_dir` in the repository's
+      `config.toml` — the file the tray records against — and a second place to
+      say it is a second thing that can disagree with the recorder. This project
+      has been pulled back from exactly that twice: `voices_dir` derived from
+      `meetings_dir`, and `format_duration` copied into two modules.
+      `referat.repoRoot` takes its place, and the extension learns both roots
+      from the config the tray is using
+- [x] **`uv run` was the plan and is unusable.** The plan for this step said
+      `uv run --directory <repoRoot> referat`, on step 9's reasoning that
+      Dropbox deletes `.venv\Scripts\referat.exe`. The first command of the
+      session came back *An Application Control policy has blocked this file*:
+      Smart App Control had withdrawn its benefit of the doubt from `uv.exe`
+      earlier the same day. The extension spawns
+      `<repoRoot>\.venv\Scripts\python.exe -m referat.cli` with cwd at the
+      repository root instead — the interpreter being the one link that survives
+      both SAC and Dropbox. **cwd is load-bearing**, not tidy: `-m referat.cli`
+      resolves only because the repository root is on `sys.path`
+- [x] The labeling panel offers **clickable chips of the known names** rather
+      than a port of `difflib.get_close_matches`. The terminal asks "Did you
+      mean Anna?" because it has no list to click; porting the fuzzy match would
+      have been the second implementation this whole step is built to avoid
+
+### Still to check by hand — nothing in a session can click VS Code
+
+- [x] **Launching the tray without a terminal.** `install_autostart.py
+      --start-menu` writes the same shortcut into `Start Menu\Programs`, so it
+      is searchable by name and pinnable to the taskbar. One `Location` record
+      per folder rather than a second script, and `--status` reports both
+      locations whatever flags it is given
+- [x] **Audited what is still unsigned, rather than assuming the migration
+      settled it.** Base install: 39 signed, 8 unsigned, and all 8 are bundled
+      tools nothing imports. Venv `python.exe`/`pythonw.exe`: `Valid`. Unsigned
+      and reachable: pip's console-script stubs (`referat.exe`,
+      `referat-tray.exe`), which nothing here invokes, and `site-packages` native
+      DLLs — torch alone 26 of 38 — which would cost transcription and not the
+      application. The rule that came out of it: **keep the import-critical path
+      signed, let the rest fail soft**, since PyPI wheels cannot be signed and
+      SAC has no per-file allow
+- [ ] **The `[audio].mic_device = "Jabra"` substring matches nothing right now**,
+      found while running `referat devices` after the rebuild — it falls back to
+      the Realtek array and says so only in a log line. Exactly the silent
+      failure `devices` exists to catch. Either the headset was unplugged or the
+      substring is wrong; check before the next meeting rather than after it
+
+- [x] **Rebuild the venv on a signed Python 3.12 — nothing below could run until
+      this was done.** Smart App Control had started blocking `_ctypes.pyd` inside
+      the unsigned uv-provisioned interpreter, which killed `status.py`,
+      `tray.py`, `power.py`, every CLI subcommand and the extension. `py install
+      3.12` fetched a PSF-signed 3.12.10 and the venv was rebuilt on it with
+      `site-packages` moved aside and back. Verified: `ctypes`, `winsound`,
+      `torch 2.11.0+cu128` with `cuda True`, the whole audio and transcribe
+      stack, every CLI subcommand, and the tray running `idle`
+- [x] **The venv `pythonw.exe` is a redirector now, not the interpreter.**
+      CPython's `venv` copies `Lib\venv\scripts\nt\pythonw.exe`, which
+      spawns the base interpreter and waits — so the tray is a ~6 MB stub plus a
+      ~46 MB interpreter where uv's venv gave one process. Harmless (`tray.py`
+      writes its own pid, so `referat status` is right), but it falsified the
+      argument in `install_autostart.py`'s docstring, which now says so
+- [ ] Press F5 and confirm the tree lists the meetings, newest first, with the
+      right icons, and that a meeting recorded from the tray appears without a
+      manual refresh
+- [ ] *Open transcript* and *Open notes* open rendered Markdown
+- [ ] *Generate notes* on a meeting without notes: that it finds `claude.exe`
+      off PATH, that `/cleanup` runs with `Read,Write,Glob` and gets far enough
+      to use `Glob` on a wrong id, and that `notes.md` opens afterwards
+- [ ] *Re-transcribe* opens a terminal and runs
+- [ ] The **Unknown speakers** node opens the panel, a snippet actually plays
+      through the webview's `<audio>` element, and a name applies. **This is the
+      one path with no real material to test it on**: no meeting on this machine
+      has an unknown speaker, so the whole Python half was driven against a
+      synthetic meeting in a scratchpad instead. It needs a real call with other
+      people in it — the same gate step 10 is still waiting on
+
+### Surfaced while building step 11
+
+- [x] **F5 could never have started the extension host.** Three faults, each
+      fatal on its own, all upstream of the extension host — the bundle itself
+      was fine and loaded when required by hand. `tasks.json` had
+      `"path": "referat-vscode"`: VS Code's npm task provider joins that onto
+      `package.json` with no separator, looks for `referat-vscodepackage.json`,
+      contributes no task, and `preLaunchTask` then fails to resolve. The same
+      file's problem matcher captured a `message` and no `file`, which VS Code
+      rejects, which invalidates the matcher, which means the background
+      begin/end tracking never arms and F5 hangs — the exact failure that file's
+      own comment was written to prevent. And
+      `~/.vscode/extensions/niklas-elmqvist.referat-vscode-0.1.0` was a directory
+      symlink at the live source tree, listed in `.obsolete` but absent from
+      `extensions.json`, colliding with `--extensionDevelopmentPath`
+- [x] **Smart App Control gave `uv` back the same day**, unchanged and still
+      `NotSigned` — the reputation for that build was simply restored. Nothing
+      reverted: it is the same volatility in the other direction, and the
+      argument for a signed interpreter is the same argument either way
+- [x] **`tsconfig.json` carried emit settings it never used.** `outDir` and
+      `sourceMap` existed for a `tsc` that only ever runs with `--noEmit`, and
+      went from inert to erroring when VS Code's bundled TypeScript 6 started
+      requiring an explicit `rootDir` beside `outDir`. Removed both and set
+      `noEmit` in the file, so the config no longer claims to emit anything
+- [x] **F5 would have opened the host on no folder at all.**
+      `--extensionDevelopmentPath` says which extension to load, not which
+      workspace to open, and with no `referat.repoRoot` set `cli.ts` resolves the
+      root by searching the open workspace folders for one holding
+      `pyproject.toml` and `referat/cli.py`. So every command would have failed
+      with "Cannot find the Referat repository." The launch config passes
+      `${workspaceFolder}` as a second argument, **and** `repoRoot` now falls
+      back to `__dirname/../..` — the checkout the bundle sits inside — so the
+      tree works even in a host window opened on nothing. Installed from a
+      `.vsix` that walk lands in `~/.vscode/extensions` and finds no
+      `pyproject.toml`, so the real error still stands where it should
+- [x] **Every context menu was inert.** The five `when` clauses read
+      `/\bhasTranscript\b/`, and in JSON `\b` is a valid escape for U+0008
+      backspace, not a regex word boundary — parsing the manifest shows character
+      code 8 where the boundary should be. Every clause compiled to a regex that
+      could never match the `contextValue` `tree.ts` composes. They need `\\b`.
+      Worth remembering the shape of this: a JSON string is parsed before the
+      regex engine ever sees it, so any `\b`, `\d` or `\s` in a `when`
+      clause has to be doubled
+- [x] **esbuild's error format cannot be matched by a VS Code problem pattern.**
+      It puts `[ERROR] message` and the indented `file:line:col:` on different
+      lines *with a blank line between*, and multi-line patterns match only
+      consecutive lines. Rather than depend on an external matcher extension,
+      `esbuild.mjs`'s `onEnd` hook now also prints one compact
+      `[watch] error file:line:col: message` per error and the matcher reads
+      that. esbuild's own pretty output is untouched — `logLevel: "info"` still
+      prints it with the source frame
+
+- [ ] **The panel's `<audio>` element has never decoded a real snippet.** The
+      WAVs are mono 16-bit PCM at 16 kHz, which Chromium handles, but that is
+      reasoning rather than a test — the synthetic fixture's tones were never
+      played through a webview. First thing to check when a real meeting has an
+      unnamed speaker in it
+- [x] **The repo's own `.vscode/settings.json` was not valid JSON**, found while
+      adding `launch.json` and `tasks.json` beside it: the interpreter path was
+      written with single backslashes, so `\.` and `\S` were invalid escapes.
+      VS Code's parser is error-tolerant and had been carrying it since step 1,
+      which is why the interpreter pin still worked and nobody noticed. Now
+      forward slashes, which VS Code accepts on Windows, with a comment saying
+      why so it does not get "fixed" back
+- [ ] The tree calls `referat list --json` on **every** refresh, including one
+      per watcher burst. That is a Python interpreter start each time, roughly a
+      third of a second. Fine at this scale; if a hundred meetings ever make it
+      feel slow, cache the document and invalidate on the watcher rather than
+      making the CLI do less
+- [ ] **`referat.repoRoot` empty means "search the workspace folders"**, so the
+      extension does nothing useful in a window that does not have the
+      repository open. That is the common case for a window opened on the
+      *meetings* folder, which is exactly where somebody would want it. Decide
+      whether the meetings folder should be recognised too, or whether the
+      setting is simply the answer for that window
+- [ ] A meeting that is **staged** cannot have notes written for it: `/cleanup`
+      runs in the meetings folder and a staged meeting is not there. *Generate
+      notes* says so and refuses rather than letting the pass fail confusingly,
+      but the real fix is the one already logged under step 8 — a meeting whose
+      audio was kept sits in `%LOCALAPPDATA%` forever
 
 ### The Projects section (step 13's UI lives here)
 
@@ -652,6 +866,10 @@ before; it is listed here because this is the file that describes the extension.
 
 ## 12. Extension packaging
 
+- [ ] **`.vscodeignore` does not exist yet**, so `vsce package` would ship
+      `src/`, `node_modules/`, `esbuild.mjs` and the source maps inside the
+      `.vsix`. `dist/`, `media/`, `package.json` and `README.md` are the whole
+      payload — the point of bundling was to make that true
 - [ ] `vsce package` producing a `.vsix`
 - [ ] SETUP.md paragraph on sideloading it: `code --install-extension
       referat-vscode-x.y.z.vsix`, or the Extensions view's "Install from
@@ -835,6 +1053,32 @@ stays local.
 
 ## Surfaced later
 
+- [x] **Smart App Control now blocks `uv.exe` itself**, not just PyAV's bundled
+      DLLs. `uvx.exe` says it outright — `An Application Control policy has
+      blocked this file. (os error 4551)` — and through bash `uv.exe` surfaces as
+      `Permission denied`, exit 126. Cause: all three uv binaries are
+      **NotSigned**, and SAC admits an unsigned binary only on cloud reputation,
+      which is per build and can be withdrawn without anything local changing.
+      uv 0.12.6 worked here for a week and stopped on 2026-08-31.
+      **There is nothing to whitelist**: SAC has no exclusion list, by design,
+      which is the difference between it and SmartScreen — so reinstalling from
+      scoop, from Astral's installer or from PyPI gets the same bytes and the
+      same block. **Resolved by not needing uv**: the venv's own Python still
+      runs, `ensurepip` bootstraps pip with no network and no uv, and pip
+      replaces `uv sync` given
+      `--extra-index-url https://download.pytorch.org/whl/cu128` — which pip
+      cannot learn from `pyproject.toml`, since the cu128 pin lives in
+      `[tool.uv.sources]` and only uv reads it. SETUP.md section 2, CLAUDE.md
+      Commands
+- [ ] **The venv's `python.exe` is unsigned too**, and is running on exactly the
+      same cloud reputation that was withdrawn from `uv.exe`. If it is ever
+      withdrawn from the interpreter, the fallback above goes with it and there
+      is no third layer — the environment would have to be rebuilt from a signed
+      Python. Not worth acting on, worth having written down before it happens
+- [ ] Worth one try if uv is wanted back: `winget upgrade astral-sh.uv` to
+      0.12.7. Reputation is per build, so a newer one may pass — but it is still
+      unsigned, so it can be blocked again later. Not a fix, a coin flip
+
 - [ ] **Speaker bleed.** Recording through laptop speakers rather than
       headphones puts the remote voice on *both* channels, which would duplicate
       every remote line — once as `ME`, once as `REMOTE`. Not observed in the
@@ -954,11 +1198,19 @@ stays local.
 - [x] Pin the VS Code interpreter to the uv venv and set
       `python-envs.alwaysUseUv` — the extension had selected system Python 3.14
       and was failing `python -m pip list` (uv venvs have no pip)
+- [x] **And then take `python-envs.alwaysUseUv` back out.** Smart App Control
+      blocks `uv.exe` at `CreateProcess`, so the setting turned every package
+      refresh into `Running: uv --version` followed by `Error refreshing packages
+      A system error occurred (spawn UNKNOWN)` — a spawn failure rather than an
+      exit code, which is why it reads like a VS Code bug rather than a blocked
+      binary. Both halves of its justification are gone: pip is bootstrapped, and
+      the venv is built by `py -m venv` now, which seeds pip itself
 - [ ] Step 11 spawns `claude -p` with `--permission-mode acceptEdits` and
-      `--allowedTools "Read,Write"` in a folder full of private meeting
+      `--allowedTools "Read,Write,Glob"` in a folder full of private meeting
       material, which makes the `/cleanup` prompt the only thing bounding what
-      gets written there. Re-read that prompt with this in mind once there are
-      real meetings in the folder
+      gets written there. **Now built and therefore live**, so this is no longer
+      hypothetical: re-read that prompt with this in mind once there are real
+      meetings in the folder, and remember that *Generate notes* is one click
 
 - [ ] **`--forget` cannot bring the snippets back.** They are deleted the moment
       a speaker is named, so a person who is forgotten leaves a `SPEAKER_NN`

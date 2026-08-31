@@ -148,9 +148,30 @@ handed a *path*; handed `{"waveform": tensor, "sample_rate": int}` it decodes
 nothing, which is the same trick already played on faster-whisper. Anything else
 that ships FFmpeg should be fed decoded audio for the same reason.
 
-**CLI** (`referat`), for the user and for Claude Code: `list`, `rerun <id>`,
-`label <id>`, `status`, `devices`, `index`, `project <verb>`. All of them are
-built except `project`, which arrives with the digests at step 13.
+**CLI** (`referat`), for the user, for Claude Code and — since step 11 — for the
+VS Code extension: `list`, `rerun <id>`, `label <id>`, `status`, `devices`,
+`index`, `project <verb>`. All of them are built except `project`, which arrives
+with the digests at step 13.
+
+**Two commands answer in JSON**, and only because the extension asks. `referat
+list --json` is every meeting with its duration, status, audio state, title,
+unnamed speakers and folder, across both roots; `referat label <id> --json` is
+one meeting's unnamed speakers with their snippet paths and sample lines. Both
+are the same functions the human-readable forms call, so the table, the
+dashboard and the tree cannot drift apart. The tables themselves are unchanged
+and stay the default.
+
+`referat label` also grew the three flags that let something without a terminal
+name somebody: `--speaker SPEAKER_NN --name <name>` applies one name,
+`--forget <name> --yes` skips the confirmation, and `--json` dumps the meeting.
+They exist because the prompt cannot be driven from a subprocess — it reads
+`input()`, and `--forget`'s confirmation answers *no* on EOF, so a caller with
+no terminal was told "Nothing was deleted." Each is a thin wrapper over
+`label.apply_name` and `label.forget`, which the module docstring had reserved
+for exactly this since step 7b. **The rules are not duplicated in the wrapper**:
+`voices.name_complaint` still decides what a name may be, and the apply path
+refuses a speaker who already has one, because renaming is a different operation
+from naming.
 
 `list` is the queue as much as the inventory: one row per meeting with its
 duration, status, whether the WAVs are still on disk, and how many speakers are
@@ -216,7 +237,12 @@ A `Write(**/.voices/**)` line was written first and Claude Code said so out loud
 on the first run; it looked like defence in depth and was decoration. Note also
 that these rules bind the file tools, not `Bash`: a `cat .voices/voices.json`
 would go straight past them, which is survivable only because `/cleanup` is
-spawned with `--allowedTools "Read,Write"` and has no shell.
+spawned with `--allowedTools "Read,Write,Glob"` and has no shell. Those three
+are the slash command's own frontmatter, which is the authority on what the
+prompt needs — `Glob` is what its wrong-meeting-id fallback lists the real ids
+with, and it returns paths rather than contents, so the deny rule is untouched
+by it. This file said `"Read,Write"` until step 11 went to spawn it and found
+the two disagreeing. **`Bash` is the line that matters and it does not move.**
 
 `referat index` regenerates the meetings folder's own `INDEX.md`, a table of all
 meetings — date, title, duration, links to transcript and notes — also written
@@ -231,7 +257,45 @@ meetings TreeView, and per-meeting commands that shell out to the `claude`
 binary (*Generate notes*) and to `referat rerun` (*Re-transcribe*). At step 13
 it also grows a Projects section — **there is no web UI in this project and
 never will be**, so the extension is where every graphical surface above the
-tray icon lives.
+tray icon lives. A VS Code webview is part of the extension and is not a web UI;
+a localhost server would be, and there is none.
+
+**The extension reimplements nothing.** It reads meetings from `referat list
+--json` and names speakers through `referat label <id> --speaker <s> --name
+<n>`, both added for it at step 11. The two meeting roots, `format_duration`,
+`audio_state`, `index.meeting_title`, `voices.unknown_speakers`,
+`voices.name_complaint` and the whole of `label.apply_name` stay in Python,
+where they already exist exactly once and are shared by the CLI, the dashboard
+and the tray *so that they cannot disagree*. Reading `meta.json` from TypeScript
+would have made the extension a seventh reader of it with its own opinions about
+all seven. Step 13's Projects section shells out to `referat project` for the
+same reason.
+
+It also has **no meetings-folder setting**, only `referat.repoRoot` and
+`referat.claudeBinary`. Where meetings live is `[paths].meetings_dir` in the
+repository's `config.toml` — the file the tray records against — and a second
+place to say it is a second thing that can disagree with the recorder. That is
+the mistake `voices_dir` and `format_duration` were each pulled back from
+already.
+
+**The extension reaches Python through the venv's own interpreter**, spawning
+`<repoRoot>\.venv\Scripts\python.exe -m referat.cli` with the working directory
+at the repository root. Not `uv run`, which Smart App Control blocks here, and
+not `.venv\Scripts\referat.exe`, which Dropbox has deleted twice; the
+interpreter is the one link that survives both. The working directory is
+load-bearing rather than tidy, since `-m referat.cli` resolves only because the
+repository root is on `sys.path` — the same dependency the autostart shortcut
+carries.
+
+`claude` is **not on `PATH` on this machine**: it ships inside the installed
+Claude Code VS Code extension, whose directory name carries a version that
+changes on every update. So the extension asks VS Code —
+`extensions.getExtension("Anthropic.claude-code").extensionPath` plus
+`resources/native-binary/` — which follows that extension across updates by
+itself, and only then falls back to `PATH`. **The resolution happens at spawn
+time and is never persisted**: a resolved absolute path stored anywhere would
+still be there a week later, pointing at a directory that has been deleted, and
+would fail silently at the moment somebody clicks *Generate notes*.
 
 ## Per-project digests (build step 13)
 
@@ -446,13 +510,51 @@ when the format changes — by hand, since nothing overwrites a seeded file.
 
 ## Commands
 
+**Neither `uv` nor the interpreter it provisioned runs on this machine.** Smart
+App Control blocks unsigned binaries whose cloud reputation does not vouch for
+them, and it took uv 0.12.6 on 2026-08-31 after a week of working. It did not
+stop there: the venv's own CPython was a python-build-standalone build, unsigned
+file by file, and SAC went on to block `_ctypes.pyd` inside it — which kills
+`status.py`, `tray.py` and `power.py`, and so every CLI subcommand, since
+`cli.py` imports `status`. There is no exclusion list, so there is nothing to
+allow.
+
+The venv is therefore built on a **PSF-signed** Python 3.12 from the Python
+install manager (`py install 3.12`), not on uv's. Same pinned version, different
+provenance; signature is what SAC discriminates on.
+
+**That fixes the fatal class and not the whole machine, and the difference
+matters.** Measured after the migration: the base interpreter is 39 signed files
+and no unsigned ones, and the venv's `python.exe` / `pythonw.exe` keep that
+signature. Still unsigned are pip's console-script stubs (`referat.exe`,
+`referat-tray.exe`) and the native DLLs in `site-packages` — torch alone is 26 of
+38. Nothing in this project invokes the stubs, so the first costs nothing; the
+second would cost *transcription* if SAC ever turned on it, which is a degraded
+mode this codebase already has, rather than the total failure an unsigned
+interpreter caused. **Wheels cannot be made signed** — PyPI does not Authenticode
+sign, and there is no per-file allow — so the rule is to keep the *import-critical
+path* signed and let everything else fail soft. When something dies with "An
+Application Control policy has blocked this file", check the signature of the
+file named, not the package that imported it.
+
+Everything runs through that interpreter:
+
 ```powershell
-uv sync                       # base deps (tray, audio)
-uv sync --extra transcribe    # plus faster-whisper, torch cu128, pyannote
-uv run referat --version
-uv run referat config         # show the loaded configuration
-uv run referat devices        # audio devices, and which ones [audio] selects
+.venv\Scripts\python.exe -m referat.cli --version
+.venv\Scripts\python.exe -m referat.cli config     # show the loaded configuration
+.venv\Scripts\python.exe -m referat.cli devices    # audio devices, and which ones [audio] selects
+.venv\Scripts\python.exe -m pip install -e . --no-deps     # in place of `uv sync`
 ```
+
+pip needs `--extra-index-url https://download.pytorch.org/whl/cu128` for the
+transcribe extra, because the CUDA 12.8 wheels come from `[tool.uv.sources]`,
+which only uv reads. SETUP.md section 2 has the whole procedure — including
+rebuilding the venv onto a signed interpreter without re-downloading the ~5 GB of
+wheels — and the repair for a `.venv` a sync client has eaten.
+
+The `uv sync` / `uv run referat` forms in the git history and in SETUP.md are how
+this is meant to work, and would work on a machine where SAC is off. Do not
+reach for them here.
 
 Configuration lives in repo-root `config.toml`, gitignored and created from
 `config.example.toml` on first run. Override the location with `REFERAT_CONFIG`.

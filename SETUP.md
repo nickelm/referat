@@ -34,6 +34,13 @@ update, not a Referat problem.
 
 ## 2. Python 3.12 and uv
 
+> **On this machine, read "If Smart App Control blocks uv" below first.** Both
+> `uv.exe` and the interpreter uv provisions are unsigned, and Smart App Control
+> blocked both on 2026-08-31 — then gave `uv` back hours later, unchanged. The
+> venv here is built on a *signed* Python for that reason and is not the one
+> `uv sync` would create. What follows is how it is meant to go; that subsection
+> is what actually happened.
+
 ```powershell
 winget install --id astral-sh.uv
 ```
@@ -57,12 +64,223 @@ The base install is deliberately kept to the tray and the audio capture, so a
 plain `uv sync` gives you a working recorder in seconds. You need
 `--extra transcribe` before anything is transcribed.
 
+### If Smart App Control blocks uv — and then blocks Python itself
+
+It will, and it does not stop at uv. What Smart App Control actually refuses is
+**unsigned binaries** whose exact build Microsoft's cloud reputation does not
+vouch for — a verdict that can change tomorrow with nothing on your machine
+changing. `uv.exe` is unsigned, so it went first, on 2026-08-31, having worked
+for the previous week:
+
+```
+error: An Application Control policy has blocked this file. (os error 4551)
+/usr/bin/bash: .../uv.exe: Permission denied
+```
+
+**There is no way to allow one file.** Smart App Control has no exclusion list —
+that is deliberate in its design, and it is the difference between it and
+SmartScreen. Reinstalling uv from scoop, from the Astral installer or from PyPI
+gets you the same unsigned bytes and the same block. Upgrading to a newer uv is
+worth one try, since reputation is per build, but it is a coin flip that can flip
+back.
+
+The trap is that "just use the venv's Python instead" is not a workaround, because
+**the interpreter uv provisioned is unsigned too**. It is a
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+build, and every file in it — `python.exe`, `python312.dll`, every `.pyd` —
+reports `NotSigned`. On the same day, Smart App Control started blocking
+individual extension modules inside it:
+
+```
+ImportError: DLL load failed while importing _ctypes:
+    An Application Control policy has blocked this file.
+```
+
+`_ctypes.pyd` and `winsound.pyd` went; every other stdlib extension module still
+loaded, and no file had been modified. That is per-file reputation, and it is not
+a stable state — any other `.pyd` can go next.
+
+It is fatal here rather than inconvenient. `ctypes` is imported by `status.py`,
+`tray.py` and `power.py`, and `cli.py` imports `status`, so **every** `referat`
+subcommand dies at import — `referat --version` included, and so does the tray,
+and so does the VS Code extension, which drives the same interpreter.
+
+**The fix is a signed interpreter.** Signature is precisely what Smart App
+Control discriminates on, and the python.org builds are Authenticode-signed by
+the Python Software Foundation, file by file — `python312.dll` and every `.pyd`
+individually. Install one through the Python install manager, which ships with
+Windows as `py`:
+
+```powershell
+py install 3.12          # signed PSF build, PythonCore channel
+py list                  # confirm 3.12 is there
+```
+
+Still 3.12, and for the original reason: 3.13 and 3.14 are too new for the torch,
+CTranslate2 and pyannote wheels. You are changing the *provenance* of the
+interpreter, not the version.
+
+Then rebuild the venv on it. **Move `site-packages` aside rather than
+reinstalling it** — with the `transcribe` extra it is roughly 5 GB, pip's cache
+holds a fraction of that, and uv's cache is not in a format pip can read. The
+wheels transfer because both builds are CPython 3.12 for `win_amd64` against the
+same stable ABI, and because the venv path does not change, so the console-script
+shims and the `.pth` files stay valid:
+
+```powershell
+Move-Item .venv\Lib\site-packages $env:TEMP\referat-site-packages
+Remove-Item -Recurse -Force .venv
+
+py -3.12 -m venv .venv                   # seeds pip itself; no ensurepip step
+Remove-Item -Recurse -Force .venv\Lib\site-packages
+Move-Item $env:TEMP\referat-site-packages .venv\Lib\site-packages
+
+.venv\Scripts\python.exe -m pip install -e . --no-deps
+```
+
+Do not delete `$env:TEMP\referat-site-packages` until `import torch` succeeds.
+It is the only copy of a multi-gigabyte download.
+
+Check the block is gone, in this order — the first line is the whole point:
+
+```powershell
+.venv\Scripts\python.exe -c "import ctypes; print('ctypes ok')"
+.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"
+.venv\Scripts\python.exe -m referat.cli --version
+.venv\Scripts\python.exe -m referat.cli devices
+```
+
+From here on, drive everything through the venv's Python. Whether uv happens to
+be running today is beside the point — nothing needs it:
+
+```powershell
+.venv\Scripts\python.exe -m referat.cli list        # instead of `uv run referat list`
+.venv\Scripts\pythonw.exe -m referat.tray           # what autostart already does
+```
+
+Use the `-m` forms, not `.venv\Scripts\referat.exe`. Those console-script stubs
+are the one part of a signed Python install that is *not* signed — pip stamps
+them from bundled `t64.exe`/`w64.exe` templates — and Dropbox has deleted them
+twice besides. `python.exe -m` depends on neither.
+
+For a fresh install of the dependencies, use pip in uv's place:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -e . --no-deps
+.venv\Scripts\python.exe -m pip install -e ".[transcribe]" --extra-index-url https://download.pytorch.org/whl/cu128
+```
+
+That `--extra-index-url` is not optional and is the one thing pip will not learn
+from the project file: the CUDA 12.8 torch wheels come from
+`[tool.uv.sources]` in `pyproject.toml`, which **only uv reads**. Without it pip
+installs the default PyPI torch, which does not support this GPU.
+
+`--no-deps` on the first command is what repairs a broken editable install
+without touching the gigabytes already downloaded — see the next heading.
+
+One VS Code setting has to go with this. `"python-envs.alwaysUseUv": true` in
+`.vscode/settings.json` made the Python extension reach for uv on every package
+refresh, which now fails at `CreateProcess` rather than with an exit code, and so
+surfaces as `Error refreshing packages A system error occurred (spawn UNKNOWN)`.
+It was there because uv's venvs ship without pip; a `py -m venv` venv has pip, so
+the setting has lost both its purpose and its safety.
+
+### Reputation comes back, too — and that is not a reason to relax
+
+Hours after the block, on the same day and with nothing reinstalled,
+`uv --version` started answering again. Same unsigned bytes, still
+`NotSigned`; Microsoft's cloud reputation for that exact build had simply been
+restored.
+
+Do not read that as "the problem went away". It is the same mechanism running in
+the other direction, and it is the strongest evidence for the rule above: a
+build that works today is not a build you can depend on tomorrow, in either
+direction, and nothing local tells you which way it has gone. The venv stays on
+the signed interpreter. `uv` working again means you *may* use `uv sync` for a
+bulk dependency install if you like it better than pip — it does not mean the
+tray, the CLI or the extension should route through anything unsigned again.
+
+### Does a signed Python fix this for good?
+
+It fixes the class of failure that is fatal, and it does not clear the machine
+of unsigned binaries. Those are different claims and the difference is the whole
+answer. Measured after the migration, with `Get-AuthenticodeSignature`:
+
+| Surface | Signed? | If SAC turns on it |
+| --- | --- | --- |
+| Base interpreter — `python312.dll`, every stdlib `.pyd` | **39 Valid, 0 unsigned** | — |
+| `.venv\Scripts\python.exe`, `pythonw.exe` | **Valid** (the redirector copies keep the base signature) | — |
+| `referat.exe`, `referat-tray.exe`, `pip.exe` | NotSigned — distlib stubs stamped from pip's bundled `t64.exe`/`w64.exe` templates, themselves the only unsigned files in the whole Python install | Nothing breaks. Every path in this project already uses `python.exe -m referat.cli` and `pythonw.exe -m referat.tray` instead, for the unrelated reason that Dropbox eats these stubs |
+| `site-packages` native DLLs — torch alone is 26 unsigned of 38 | NotSigned | **Transcription breaks; recording and the CLI do not.** Degraded, not dead |
+
+So the critical path — everything that must import before `referat --version`
+can print — is now entirely signed, and that is what changed. What was fatal
+before was that the *interpreter* was unsigned: one revoked `.pyd` took the CLI,
+the tray and the extension with it, and no amount of care elsewhere could route
+around it.
+
+**There is no way to make the rest signed.** PyPI wheels are not Authenticode
+signed, will not be, and there is no per-file allow to grant them. Three honest
+options remain, in order of how much they actually buy:
+
+1. **Keep the critical path signed, accept degradation elsewhere.** Where this
+   now is. A future block costs a feature, in a component that already has a
+   documented failure mode, instead of costing the whole application.
+2. **Turn Smart App Control off.** The only thing that removes the exposure
+   completely — and it also retires the PyAV/`torchcodec` workarounds from steps
+   5 and 7, which exist solely because of it. One-way, system-wide, needs a
+   Windows reinstall to get back: your call, not this project's. See section 10.
+3. Sign the wheels yourself. Not real: it means a code-signing certificate and
+   re-signing every DLL on every dependency upgrade, for one laptop.
+
+The thing to take from this is the diagnostic, not the fix. **When something
+here dies with "An Application Control policy has blocked this file", check the
+signature of the file named, not the package that imported it** — SAC blocks per
+file, by reputation, with nothing modified on disk and no warning first.
+
+Turning Smart App Control off would also fix all of this. It is a one-way,
+system-wide change that Windows cannot undo without a reinstall, and it is your
+call, not this project's: see section 10.
+
+### If the checkout lives in Dropbox, the venv will be eaten
+
+`.venv` is *gitignored*, which does nothing to stop a sync client. If this
+repository sits inside a Dropbox, OneDrive or iCloud tree, that client will
+quietly delete files out of it. It has happened here twice: the console scripts
+`referat.exe` and `referat-tray.exe` disappeared, and
+`site-packages\referat-0.1.0.dist-info` was reduced to an empty directory —
+which leaves `import referat` working *only* from the repository root, so the
+failure looks like a `PATH` or working-directory problem rather than a missing
+install.
+
+The check, run from anywhere except the repository root:
+
+```powershell
+.venv\Scripts\python.exe -c "import referat; print(referat.__file__)"
+```
+
+`ModuleNotFoundError` there means the editable install is gone. The repair:
+
+```powershell
+Remove-Item -Recurse .venv\Lib\site-packages\referat-0.1.0.dist-info   # only if it is empty
+.venv\Scripts\python.exe -m pip install -e . --no-deps
+```
+
+An empty `dist-info` has to go first, or pip refuses with *"Cannot uninstall
+referat None — no RECORD file was found"*: the husk claims the package is
+installed while carrying no record of what it installed.
+
+The real fix is to keep the checkout out of the synced tree, or to mark `.venv`
+ignored by the sync client. That is the same rule the meetings folder already
+follows for the voiceprints and the staging folder — keep the thing that must not
+be synced out of the synced tree.
+
 ---
 
 ## 3. First run, and `config.toml`
 
 ```powershell
-uv run referat config
+.venv\Scripts\python.exe -m referat.cli config
 ```
 
 That creates `config.toml` in the repository root from
@@ -94,7 +312,7 @@ meetings_dir = 'C:\Users\you\Dropbox\Research\Meetings'
 ## 4. Choosing the microphone
 
 ```powershell
-uv run referat devices
+.venv\Scripts\python.exe -m referat.cli devices
 ```
 
 This lists every input device and every WASAPI loopback source, and marks the one
@@ -172,7 +390,7 @@ staging_dir  = "~/.referat/recording"
 voices_dir   = "~/.referat/voices"
 ```
 
-**The check is `uv run referat config`**: read the paths back and confirm that
+**The check is `.venv\Scripts\python.exe -m referat.cli config`**: read the paths back and confirm that
 only `meetings_dir` is inside the synced folder.
 
 ```
@@ -206,7 +424,7 @@ name of — people who never asked to be in a database.
   is denied read access to it by `<meetings_dir>/.claude/settings.json`, seeded
   with the rest of the scaffold (section 11a). That rule binds the file tools;
   it does not bind a shell, which is why `/cleanup` is spawned without one.
-- **`uv run referat label --forget <name>`** is how a person is removed, and it
+- **`.venv\Scripts\python.exe -m referat.cli label --forget <name>`** is how a person is removed, and it
   is a real deletion rather than a tombstone: the embeddings go, and their labels
   revert to `SPEAKER_NN` in every transcript that carried them.
 
@@ -290,15 +508,23 @@ A GPU machine that quietly transcribes on `medium` is the tell.
 
 ---
 
-## 9. Autostart
+## 9. Autostart, and launching the tray by hand
 
 ```powershell
-uv run python scripts/install_autostart.py
+.venv\Scripts\python.exe scripts\install_autostart.py               # at sign-in
+.venv\Scripts\python.exe scripts\install_autostart.py --start-menu  # by name
 ```
 
-That writes `Referat.lnk` into your Startup folder, targeting this checkout's
-`.venv\Scripts\pythonw.exe` with `-m referat.tray`, so the tray comes up at
-sign-in with no console window. The installer prints exactly what it wrote:
+Install both. The first writes `Referat.lnk` into your Startup folder so the
+tray comes up at sign-in; the second writes the same shortcut into
+`Start Menu\Programs`, so **pressing Start and typing "Referat" launches it** —
+and right-clicking that result pins it to the taskbar. That is the answer to
+"the tray is not running and I do not want to open a terminal". They do not
+conflict: a named mutex means a second tray logs "already running" and exits.
+
+Both target this checkout's `.venv\Scripts\pythonw.exe` with `-m referat.tray`,
+so the tray comes up with no console window. The installer prints exactly what
+it wrote:
 
 ```
 Installed C:\Users\you\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Referat.lnk
@@ -310,19 +536,26 @@ Installed C:\Users\you\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Sta
 
 | Command | What it does |
 | --- | --- |
-| `install_autostart.py` | Installs it. Running it again when it is already current changes nothing. |
-| `install_autostart.py --status` | Prints what is installed. Exit 0 when current, 1 when not. |
-| `install_autostart.py --uninstall` | Removes it; the tray no longer starts at sign-in. |
+| `install_autostart.py` | Installs the Startup-folder shortcut. Running it again when it is already current changes nothing. |
+| `install_autostart.py --start-menu` | Installs the Start menu entry instead. Same shortcut, different folder. |
+| `install_autostart.py --status` | Prints **both** locations. Exit 0 when both are current, 1 when either is not. |
+| `install_autostart.py --uninstall` | Removes the shortcut from the selected location; add `--start-menu` for that one. |
 | `--force` | Replaces, or removes, a shortcut that points somewhere else. |
 
 Without `--force` the installer refuses to touch a `Referat.lnk` aimed anywhere
-but this checkout, and refuses to delete one it did not write.
+but this checkout, and refuses to delete one it did not write. `--status`
+deliberately reports both locations whatever flags it is given: "is the tray set
+up" is one question, and answering half of it is how somebody concludes the
+Start menu entry is missing when it is the autostart one that is.
 
 Four things worth knowing:
 
-- **You can still launch the tray by hand.** A named mutex means an autostarted
-  tray and a manual launch cannot fight over the hotkeys — the second one logs
-  "already running" and exits.
+- **The tray is two processes, and that is expected.**
+  `.venv\Scripts\pythonw.exe` is a copy of CPython's venv *redirector*, which
+  spawns the base interpreter and waits on it. So you will see a ~6 MB stub and
+  a ~46 MB interpreter. `referat status` reports the interpreter, because
+  `tray.py` writes its own pid. (This changed when the venv moved off uv's
+  interpreter — see section 2.)
 - **Re-run the installer if you move or rename the repository.** The shortcut
   holds an absolute path into `.venv\Scripts`, and nothing detects a stale one:
   the tray simply never starts. `--status` is the check.
@@ -333,7 +566,7 @@ Four things worth knowing:
 - **Under `pythonw.exe` a bad `config.toml` is completely silent.** There is no
   console for the error and it happens before logging is set up, so you get no
   window, no icon, and no log line. If the tray does not appear after sign-in,
-  run `uv run referat config` — that is the diagnostic.
+  run `.venv\Scripts\python.exe -m referat.cli config` — that is the diagnostic.
 
 ---
 
@@ -377,31 +610,31 @@ it without a reinstall — so it is documented here and not recommended.
 ## 11. Checking the whole thing
 
 ```powershell
-uv run referat --version                              # referat 0.1.0
-uv run referat config                                 # paths, and the sync check from section 6
-uv run referat devices                                # your microphone marked `<- config`
-uv run referat status                                 # "Referat is not running." until you start it
-uv run python scripts/install_autostart.py --status   # Installed, exit 0
-uv run referat list                                   # empty until your first meeting
-uv run referat index                                  # writes <meetings_dir>/INDEX.md
+.venv\Scripts\python.exe -m referat.cli --version                              # referat 0.1.0
+.venv\Scripts\python.exe -m referat.cli config                                 # paths, and the sync check from section 6
+.venv\Scripts\python.exe -m referat.cli devices                                # your microphone marked `<- config`
+.venv\Scripts\python.exe -m referat.cli status                                 # "Referat is not running." until you start it
+.venv\Scripts\python.exe scripts\install_autostart.py --status   # Installed, exit 0
+.venv\Scripts\python.exe -m referat.cli list                                   # empty until your first meeting
+.venv\Scripts\python.exe -m referat.cli index                                  # writes <meetings_dir>/INDEX.md
 ```
 
 Then record something:
 
-1. Start the tray: `uv run referat-tray`, or `uv run python -m referat.tray` when
+1. Start the tray: `.venv\Scripts\pythonw.exe -m referat.tray`, or `.venv\Scripts\pythonw.exe -m referat.tray` when
    you want the log on screen.
 2. Press `ctrl+alt+f9`. The icon turns red.
 3. Talk for a minute or two, with something playing over the system audio if you
    want to exercise the loopback channel.
 4. Press `ctrl+alt+f9` again. The icon goes blue while it transcribes.
-5. `uv run referat list` — one row, status `done`, and an `UNNAMED` count if
+5. `.venv\Scripts\python.exe -m referat.cli list` — one row, status `done`, and an `UNNAMED` count if
    diarization found remote speakers.
 6. Open the meeting folder and read `transcript.md`, then `meta.json`.
-7. `uv run referat label <meeting-id>` plays each unidentified speaker and asks
+7. `.venv\Scripts\python.exe -m referat.cli label <meeting-id>` plays each unidentified speaker and asks
    who it was. From then on Referat knows that voice.
 8. Open the meetings folder in VS Code. `INDEX.md` shows the meeting, rendered.
    Run `/cleanup <meeting-id>` in a Claude Code session there to write its
-   `notes.md`, then `uv run referat index` to put the title in the table — see
+   `notes.md`, then `.venv\Scripts\python.exe -m referat.cli index` to put the title in the table — see
    section 11a.
 
 ---
@@ -428,7 +661,7 @@ worth carrying across.
 **Open the meetings folder in VS Code** and `INDEX.md` is the dashboard: because
 of that `.vscode/settings.json`, Markdown opens rendered rather than as source,
 so the table is a page of links. It is regenerated at the end of every
-transcription; `uv run referat index` rebuilds it on demand, which is what you
+transcription; `.venv\Scripts\python.exe -m referat.cli index` rebuilds it on demand, which is what you
 want after writing notes.
 
 **Notes are written on request, never automatically.** In a Claude Code session
@@ -478,10 +711,44 @@ committed.
 
 ## 12. The VS Code extension
 
-Not built yet — it is build step 12. Until then transcripts are ordinary Markdown
-files you can open in anything, `INDEX.md` is the browsing surface (section 11a),
-and the CLI (`list`, `status`, `rerun`, `label`, `index`) is the whole interface
-above the tray icon.
+Built, but **not packaged yet** — packaging is build step 12. Until then it is
+run from source:
 
-When it exists, this section becomes one command:
+```powershell
+cd referat-vscode
+npm install
+```
+
+Then open the repository in VS Code and press **F5**. That starts an Extension
+Development Host with a **Referat** icon in the activity bar: your meetings,
+newest first, with *Open transcript*, *Open notes*, *Generate notes*,
+*Re-transcribe* and *Name speakers* on each one's right-click menu. A meeting
+with speakers nobody has named yet has an **Unknown speakers** child; clicking a
+speaker opens a panel that plays their snippets and takes a name.
+
+Two settings, both optional:
+
+| Setting | Leave it empty and… |
+| --- | --- |
+| `referat.repoRoot` | it looks through the open workspace folders for the one holding `pyproject.toml` and `referat/cli.py`. Set it if you work with the repository closed. |
+| `referat.claudeBinary` | it asks VS Code where it installed the Claude Code extension and uses the binary inside it, falling back to `PATH`. **On this machine `claude` is not on `PATH` at all** — `where claude` finds nothing — so the extension lookup is the one that actually answers. It happens fresh on every run, so an update that moves the binary cannot break it. |
+
+There is deliberately no meetings-folder setting: the extension reads
+`[paths].meetings_dir` out of the repository's `config.toml`, which is the same
+file the tray records against, so the two cannot disagree about where meetings
+live.
+
+Everything it shows comes from `referat list --json`, and every name it applies
+goes through `referat label <id> --speaker <s> --name <n>` — so if the tree looks
+wrong, run those two commands yourself and you will see exactly what it saw.
+**Referat > Show Output** has every command it ran, with its full command line.
+
+It runs them through the venv's own interpreter,
+`.venv\Scripts\python.exe -m referat.cli`, with the working directory at the
+repository — the fallback from section 2, for the same reason: `uv` does not run
+on this machine. So if the tree is empty and an error appears, the usual causes
+are a `referat.repoRoot` pointing somewhere that is not the repository, or a
+`.venv` that Dropbox has eaten again (section 2 has the repair).
+
+When step 12 lands, installing it becomes one command:
 `code --install-extension referat-vscode-x.y.z.vsix`.

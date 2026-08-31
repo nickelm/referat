@@ -1,0 +1,171 @@
+{
+  "name": "referat-vscode",
+  "displayName": "Referat",
+  "description": "Browse Referat meetings, write their notes, and name the speakers identification could not place.",
+  "version": "0.1.0",
+  "publisher": "niklas-elmqvist",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:referat.meetings"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "referat",
+          "title": "Referat",
+          "icon": "media/referat.svg"
+        }
+      ]
+    },
+    "views": {
+      "referat": [
+        {
+          "id": "referat.meetings",
+          "name": "Meetings"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "referat.refresh",
+        "title": "Refresh",
+        "category": "Referat",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "referat.openMeetingsFolder",
+        "title": "Open Meetings Folder",
+        "category": "Referat",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "referat.showOutput",
+        "title": "Show Output",
+        "category": "Referat"
+      },
+      {
+        "command": "referat.openTranscript",
+        "title": "Open Transcript",
+        "category": "Referat"
+      },
+      {
+        "command": "referat.openNotes",
+        "title": "Open Notes",
+        "category": "Referat"
+      },
+      {
+        "command": "referat.generateNotes",
+        "title": "Generate Notes",
+        "category": "Referat"
+      },
+      {
+        "command": "referat.reTranscribe",
+        "title": "Re-transcribe",
+        "category": "Referat"
+      },
+      {
+        "command": "referat.labelSpeakers",
+        "title": "Name Speakers",
+        "category": "Referat"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "referat.refresh",
+          "when": "view == referat.meetings",
+          "group": "navigation@1"
+        },
+        {
+          "command": "referat.openMeetingsFolder",
+          "when": "view == referat.meetings",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "referat.openTranscript",
+          "when": "view == referat.meetings && viewItem =~ /\\bhasTranscript\\b/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "referat.openNotes",
+          "when": "view == referat.meetings && viewItem =~ /\\bhasNotes\\b/",
+          "group": "1_open@2"
+        },
+        {
+          "command": "referat.generateNotes",
+          "when": "view == referat.meetings && viewItem =~ /\\bhasTranscript\\b/",
+          "group": "2_run@1"
+        },
+        {
+          "command": "referat.reTranscribe",
+          "when": "view == referat.meetings && viewItem =~ /\\bhasAudio\\b/",
+          "group": "2_run@2"
+        },
+        {
+          "command": "referat.labelSpeakers",
+          "when": "view == referat.meetings && viewItem =~ /\\bhasUnnamed\\b/",
+          "group": "2_run@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "referat.openTranscript",
+          "when": "false"
+        },
+        {
+          "command": "referat.openNotes",
+          "when": "false"
+        },
+        {
+          "command": "referat.generateNotes",
+          "when": "false"
+        },
+        {
+          "command": "referat.reTranscribe",
+          "when": "false"
+        },
+        {
+          "command": "referat.labelSpeakers",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Referat",
+      "properties": {
+        "referat.repoRoot": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The Referat repository — the folder holding `pyproject.toml`. Everything else, including where the meetings live, is read from that repository's `config.toml` so the extension and the tray cannot disagree about it. Left empty, the extension looks through the open workspace folders for one that looks like the repository."
+        },
+        "referat.claudeBinary": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Full path to the `claude` binary used by *Generate notes*. Left empty, the extension looks on `PATH` and then inside the installed Claude Code VS Code extension, which is where it lives when it is not on `PATH`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

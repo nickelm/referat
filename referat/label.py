@@ -32,6 +32,7 @@ step 11's labeling webview is meant to drive :func:`apply_name` and
 from __future__ import annotations
 
 import difflib
+import json
 import logging
 import re
 import sys
@@ -314,13 +315,8 @@ def run(config: Config, meeting_id: str | None) -> int:
     and the database learns each voice at the earliest meeting it appears in.
     """
     if meeting_id:
-        folder = paths.find_meeting_dir(config.meeting_roots(), meeting_id)
-        if folder is None:
-            print(f"referat label: no meeting {meeting_id}", file=sys.stderr)
-            return 1
-        meeting = Meeting.load(folder)
+        meeting = _resolve_meeting(config, meeting_id)
         if meeting is None:
-            print(f"referat label: cannot read {folder / paths.META_JSON}", file=sys.stderr)
             return 1
         candidates = [meeting]
     else:
@@ -344,13 +340,96 @@ def run(config: Config, meeting_id: str | None) -> int:
     return 0
 
 
-def run_forget(config: Config, name: str) -> int:
+def _resolve_meeting(config: Config, meeting_id: str) -> Meeting | None:
+    """One meeting by id, complaining to stderr the way :func:`run` does."""
+    folder = paths.find_meeting_dir(config.meeting_roots(), meeting_id)
+    if folder is None:
+        print(f"referat label: no meeting {meeting_id}", file=sys.stderr)
+        return None
+    meeting = Meeting.load(folder)
+    if meeting is None:
+        print(f"referat label: cannot read {folder / paths.META_JSON}", file=sys.stderr)
+    return meeting
+
+
+def run_json(config: Config, meeting_id: str) -> int:
+    """`referat label <id> --json` — everything the labeling webview needs.
+
+    The extension gets the snippet *paths* rather than the audio: they are
+    ordinary WAVs on disk and a webview can load them through
+    `asWebviewUri`. `has_embedding` is the one case naming cannot repair — a
+    speaker whose embedding never made it into `meta.json` has nothing to file,
+    so the webview must show that rather than offer a field that will fail.
+    """
+    meeting = _resolve_meeting(config, meeting_id)
+    if meeting is None:
+        return 1
+
+    document = {
+        "meeting": meeting.id,
+        "dir": str(meeting.dir),
+        "known_names": voices.VoicesDB.load(config).names(),
+        "speakers": [
+            {
+                "speaker": speaker,
+                "snippets": [str(p) for p in voices.snippet_paths(meeting, speaker)],
+                "lines": sample_lines(meeting, speaker),
+                "has_embedding": voices.stored_embedding(meeting, speaker) is not None,
+            }
+            for speaker in voices.unknown_speakers(meeting)
+        ],
+    }
+    print(json.dumps(document, indent=2))
+    return 0
+
+
+def run_apply(config: Config, meeting_id: str, speaker: str, name: str) -> int:
+    """`referat label <id> --speaker <s> --name <n>` — the prompt's answer, given.
+
+    Every rule the prompt enforces is enforced here too, and in Python: the
+    reserved-name check is :func:`referat.voices.name_complaint`, and it stays
+    the only copy of that rule rather than being restated in the webview that
+    calls this.
+    """
+    complaint = voices.name_complaint(name)
+    if complaint:
+        print(f"referat label: a name {complaint}", file=sys.stderr)
+        return 1
+
+    meeting = _resolve_meeting(config, meeting_id)
+    if meeting is None:
+        return 1
+
+    if speaker not in voices.unknown_speakers(meeting):
+        known = meeting.speaker_names.get(speaker)
+        why = f"is already {known}" if known else f"is not an unnamed speaker in {meeting.id}"
+        print(f"referat label: {speaker} {why}", file=sys.stderr)
+        return 1
+
+    if not apply_name(config, meeting, speaker, name):
+        print(
+            f"referat label: no embedding was stored for {speaker}; nothing to file",
+            file=sys.stderr,
+        )
+        return 1
+
+    # `apply_name` deliberately does not touch the dashboard — it is a primitive,
+    # and the pipeline calls it too. Every *entry point* that names somebody has
+    # to, or the Unnamed column goes stale the moment the webview is used.
+    index.write_index(config)
+    print(f"{speaker} is {name}")
+    return 0
+
+
+def run_forget(config: Config, name: str, assume_yes: bool = False) -> int:
     """`referat label --forget <name>`."""
     db = voices.VoicesDB.load(config)
     if name not in db.people:
         print(f"referat label: {name} is not in the known-voices database", file=sys.stderr)
         return 1
-    if not _confirm(f"Delete {name} and revert their labels in every transcript?"):
+    if not assume_yes and not _confirm(
+        f"Delete {name} and revert their labels in every transcript?"
+    ):
         print("Nothing was deleted.")
         return 0
 

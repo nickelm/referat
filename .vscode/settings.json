@@ -1,9 +1,18 @@
 {
-  // Point VS Code at the uv-managed venv (Python 3.12), not the system 3.14.
-  "python.defaultInterpreterPath": "${workspaceFolder}\.venv\Scripts\python.exe",
+  // Point VS Code at the project venv (Python 3.12), not the system 3.14.
+  // Forward slashes deliberately: a backslash starts an escape in a JSON string,
+  // and this line was invalid JSON until 2026-08-31 (VS Code's lenient parser had
+  // been carrying it). VS Code accepts forward slashes on Windows.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
 
-  // uv creates venvs without pip, so `python -m pip list` fails. Use uv instead.
-  "python-envs.alwaysUseUv": true,
+  // No "python-envs.alwaysUseUv" here. It used to be set, on the reasoning that
+  // uv creates venvs without pip -- true of the venv uv made, and the reason
+  // `python -m pip list` failed. Both halves are now wrong: Smart App Control
+  // blocks uv.exe outright, so the setting only made the Python extension spawn
+  // a binary Windows refuses to start ("Running: uv --version", then "Error
+  // refreshing packages A system error occurred (spawn UNKNOWN)" -- a spawn
+  // failure rather than an exit code, because the block lands at CreateProcess
+  // time). And the venv is built by `py -m venv` now, which seeds pip itself.
 
   "python.terminal.activateEnvInCurrentTerminal": true,
   "files.trimTrailingWhitespace": true,

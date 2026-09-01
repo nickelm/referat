@@ -559,7 +559,7 @@ class Recorder:
         meeting.ended_at = dt.datetime.now()
         meeting.duration_seconds = (meeting.ended_at - meeting.started_at).total_seconds()
         meeting.audio = self._audio_info()
-        meeting.status = MeetingStatus.STOPPED
+        meeting.status = MeetingStatus.RECORDED
         meeting.save()
         for channel in self._channels():
             log.info(

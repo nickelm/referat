@@ -84,9 +84,12 @@ diarization_model = "pyannote/speaker-diarization-community-1"
 # snippets, asks who it was, and remembers the answer for next time.
 identify = true
 
-# Your own name, for recognising you and rendering your lines as ME. Leave it
+# Your own name, for recognising you and writing your lines under it. Leave it
 # empty until you want it: from the moment it is set, any meeting whose
 # microphone held exactly one voice also files an embedding of you.
+# You are labelled like anybody else - `Niklas:`, not `ME:`. ME means only that
+# the microphone recorded a line and nothing attributed it, which on a mic that
+# hears the whole room is frequently somebody else.
 # One voice on the mic is the condition, and it is measured rather than assumed —
 # a room with two people in it clusters into two speakers and files nothing, so
 # an in-person meeting cannot quietly blend everybody into your voiceprint.
@@ -99,7 +102,7 @@ owner_name = ""
 # When the database holds only one name there is no runner-up, so the margin is
 # asked of the score itself and the bar becomes threshold + margin. That is the
 # state the database is in right after owner_name is first set, and also when a
-# false accept is worst: it renders somebody else's words as ME.
+# false accept is worst: it renders somebody else's words under your own name.
 #
 # These two numbers are the only place a wrong name can be written into a
 # transcript, which is worse than no name at all, so they start strict. Loosen

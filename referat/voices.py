@@ -304,9 +304,9 @@ def match(embedding: np.ndarray, db: VoicesDB, threshold: float, margin: float) 
     would be trivially satisfied and the threshold left deciding alone. That is
     exactly the state the database is in just after `owner_name` is first set,
     which is also when a false accept costs the most: somebody else's words
-    rendered as `ME`. Verified rather than reasoned about — a different synthetic
-    voice scored 0.7404 against a lone stored voiceprint and was accepted at the
-    0.70 threshold. With no runner-up the margin is therefore required of the
+    rendered under the owner's own name. Verified rather than reasoned about — a
+    different synthetic voice scored 0.7404 against a lone voiceprint and was
+    accepted at the 0.70 threshold. With no runner-up the margin is therefore required of the
     *score* instead, so the bar is never lower for having less to compare against.
     """
     scored = [
@@ -573,6 +573,38 @@ def unknown_speakers(meeting: Meeting) -> list[str]:
         for label in (channel.get("speakers") or {})
     }
     return sorted(labels - set(meeting.speaker_names))
+
+
+def speaker_channel(meeting: Meeting, speaker: str) -> str:
+    """Which channel a label came out of - `mic`, `system`, or `""` when unknown.
+
+    Worth having because the answer is a strong hint about *who* a speaker is,
+    and because nothing was showing it. The person naming speakers was asked for
+    four names after one Teams call and one of them was themself, with nothing on
+    screen saying that cluster came out of their own microphone.
+
+    A hint and never a name: the mic hears the whole room in a meeting held in
+    person, so which channel a voice arrived on narrows the guess rather than
+    settling it, and *a wrong name is worse than no name* is unchanged by it.
+    """
+    for name, channel in (meeting.transcription.get("channels") or {}).items():
+        if isinstance(channel, dict) and speaker in (channel.get("speakers") or {}):
+            return str(name)
+    return ""
+
+
+def channel_speakers(meeting: Meeting, channel: str) -> list[str]:
+    """Every label one channel clustered into, in label order.
+
+    The counterpart of :func:`speaker_channel`, and the question `referat relabel`
+    asks: a meeting whose *microphone* clustered into nothing but the owner is one
+    where the mic held one person, which is what makes its `ME` lines safe to
+    spell out.
+    """
+    entry = (meeting.transcription.get("channels") or {}).get(channel)
+    if not isinstance(entry, dict):
+        return []
+    return sorted(entry.get("speakers") or {})
 
 
 def _stored_cluster(meeting: Meeting, speaker: str) -> dict[str, Any] | None:

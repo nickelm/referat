@@ -29,13 +29,60 @@ log = logging.getLogger(__name__)
 
 
 class MeetingStatus(StrEnum):
-    """The `status` key of `meta.json`, as fixed by the meeting folder contract."""
+    r"""The meeting's lifecycle, and the `status` key of `meta.json`.
+
+    ::
+
+        recording -> recorded -> transcribing -> gate_failed | transcribed
+                                                            -> notes_written -> synced
+        failed  (transcription raised — a different thing from gate_failed)
+
+    **One field, one authority.** Every surface renders this value and none of
+    them infers a state from which files happen to exist. A parallel `state` key
+    beside it would be a second place to say what a meeting is, which is the
+    mistake `voices_dir`, `format_duration` and the extension's absent
+    meetings-folder setting were each pulled back from.
+
+    :attr:`GATE_FAILED` is what earned the widening. A meeting whose transcript
+    failed the quality gate keeps its audio and stays in staging, and used to be
+    written down as `done` — indistinguishable in the file from a meeting that
+    finished cleanly. Telling them apart meant asking three questions at once
+    (status, are the WAVs there, is the folder still in `%LOCALAPPDATA%`), an
+    inference that lived in no function and was re-derived by every reader.
+
+    Still deliberately *not* :class:`referat.state.State`. That enum describes the
+    recorder, which has a `paused` state; this one describes what is on disk,
+    where a paused meeting is still being recorded.
+    """
 
     RECORDING = "recording"
-    STOPPED = "stopped"
+    RECORDED = "recorded"
     TRANSCRIBING = "transcribing"
-    DONE = "done"
+    GATE_FAILED = "gate_failed"
+    """Transcribed, but the quality gate refused to delete the audio, so the
+    meeting kept its WAVs and stayed in staging. Written by the pipeline; cleared
+    by a `referat rerun` that comes out clean."""
+    TRANSCRIBED = "transcribed"
+    NOTES_WRITTEN = "notes_written"
+    """`/cleanup` has written `notes.md`. The one transition no pipeline can make,
+    because that pass is forbidden from touching `meta.json` — whoever spawned it
+    calls `referat state <id> notes-written` afterwards."""
+    SYNCED = "synced"
+    """Every doc of every one of this meeting's tags is current. Build step 13."""
     FAILED = "failed"
+    """Transcription raised. A different thing from :attr:`GATE_FAILED`, which is
+    a transcript that came out but was not trusted."""
+
+
+LEGACY_STATUS = {"stopped": MeetingStatus.RECORDED, "done": MeetingStatus.TRANSCRIBED}
+"""What the pre-lifecycle vocabulary maps onto, applied by :meth:`Meeting.load`.
+
+**A pure mapping, with no look at the filesystem.** It is tempting to notice that
+a `done` meeting still holding WAVs in staging is really `gate_failed` and say so
+here — but that is the three-way inference being removed, and doing it in the
+loader would only hide it. The few such meetings on this machine are left alone;
+their next `rerun` writes the right value.
+"""
 
 
 @dataclass
@@ -111,6 +158,15 @@ class Meeting:
     pauses: list[Pause] = field(default_factory=list)
     audio: dict[str, ChannelAudio] = field(default_factory=dict)
     transcription: dict[str, Any] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+    """The project ids this meeting carries. Absent or empty means *untagged*.
+
+    Ids rather than names, so a `referat project rename` touches `projects.json`
+    alone and no meeting record. A list rather than a single value, because a
+    meeting may belong to several threads of work at once; and *untagged* is the
+    computed state of this list being empty, never an id in it. See
+    :mod:`referat.projects`.
+    """
     speaker_names: dict[str, str] = field(default_factory=dict)
     """`SPEAKER_NN` to the name it was resolved to, for the speakers that have one.
 
@@ -192,11 +248,12 @@ class Meeting:
             log.warning("ignoring malformed %s", meta)
             return None
 
+        raw_status = str(raw.get("status", MeetingStatus.RECORDED))
         try:
-            status = MeetingStatus(raw.get("status", MeetingStatus.STOPPED))
+            status = LEGACY_STATUS.get(raw_status) or MeetingStatus(raw_status)
         except ValueError:
-            log.warning("unknown status %r in %s", raw.get("status"), meta)
-            status = MeetingStatus.STOPPED
+            log.warning("unknown status %r in %s", raw_status, meta)
+            status = MeetingStatus.RECORDED
 
         audio_raw = raw.get("audio") or {}
         audio = {k: ChannelAudio.from_json(v) for k, v in audio_raw.items() if isinstance(v, dict)}
@@ -210,6 +267,7 @@ class Meeting:
             pauses=[Pause.from_json(p) for p in raw.get("pauses", []) if isinstance(p, dict)],
             audio=audio,
             transcription=raw.get("transcription") or {},
+            tags=[str(t) for t in (raw.get("tags") or []) if str(t).strip()],
             speaker_names={
                 str(k): str(v) for k, v in (raw.get("speaker_names") or {}).items()
             },
@@ -229,6 +287,7 @@ class Meeting:
             "pauses": [p.to_json() for p in self.pauses],
             "audio": {name: channel.to_json() for name, channel in self.audio.items()},
             "transcription": self.transcription,
+            "tags": self.tags,
             "speaker_names": self.speaker_names,
             "referat_version": self.referat_version,
         }
@@ -265,6 +324,28 @@ def _folder_time(meeting_dir: Path) -> dt.datetime:
         return paths.parse_meeting_id(meeting_dir.name)
     except ValueError:
         return dt.datetime.fromtimestamp(meeting_dir.stat().st_mtime)
+
+
+def resolve_meeting(config: Config, meeting_id: str) -> tuple[Meeting | None, str]:
+    """One meeting by id across both roots: the meeting, or None and why not.
+
+    Every command that takes a meeting id needs this and needs to say the same two
+    things about it — that there is no such meeting, or that its `meta.json` will
+    not read — so the lookup and both sentences live here once. The *caller* adds
+    its own `referat <command>:` prefix, which is the only part that differs and
+    the reason this returns the complaint rather than printing it.
+
+    Both roots, always: a meeting lives in staging while it still has audio, and
+    resolving against the meetings folder alone would fail on exactly the meetings
+    that need attention.
+    """
+    folder = paths.find_meeting_dir(config.meeting_roots(), meeting_id)
+    if folder is None:
+        return None, f"no meeting {meeting_id}"
+    meeting = Meeting.load(folder)
+    if meeting is None:
+        return None, f"cannot read {folder / paths.META_JSON}"
+    return meeting, ""
 
 
 def load_meetings(config: Config) -> list[Meeting]:

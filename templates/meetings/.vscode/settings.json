@@ -5,5 +5,22 @@
   // still offers the plain text editor.
   "workbench.editorAssociations": {
     "*.md": "vscode.markdown.preview.editor"
-  }
+  },
+
+  // Copy plain text, not syntax-highlighted HTML.
+  //
+  // VS Code puts two flavours on the clipboard when you copy from an editor:
+  // plain text, and an HTML version carrying the theme's colours and font. Word,
+  // Google Docs and Outlook all prefer the HTML one, so pasting a chunk of a
+  // note into a document arrives as dark-background code in the editor's
+  // monospace font. This turns the HTML flavour off, so a paste anywhere is the
+  // raw Markdown - `##` headings, `-` bullets, plain paragraphs - which is what
+  // survives being pasted into anything.
+  //
+  // To reach the source at all, given the association above: the preview's
+  // title bar has an "Open Source" action, or right-click the file in the
+  // Explorer and pick "Open With..." -> "Text Editor". To paste *rendered*
+  // instead - real headings and real bullet lists in Word - copy from the
+  // preview rather than from the source, which is the other half of this pair.
+  "editor.copyWithSyntaxHighlighting": false
 }

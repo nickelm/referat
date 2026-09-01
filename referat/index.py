@@ -63,6 +63,21 @@ def meeting_title(meeting: Meeting) -> str:
     return meeting.id
 
 
+def status_words(meeting: Meeting) -> str:
+    """The lifecycle value as words: `notes_written` reads `notes written` here.
+
+    Underscores are right in `meta.json` and in `referat list`, whose columns are
+    separated by spaces and where a two-word cell would read as two columns. They
+    are wrong in a rendered Markdown table somebody is looking at, which is what
+    this file becomes with the scaffold's Markdown-preview association.
+
+    Deliberately a formatting rule and not a map of value to sentence. A map would
+    be a second vocabulary alongside :class:`referat.meeting.MeetingStatus`, and
+    the first new state nobody added a row for would render as a blank.
+    """
+    return str(meeting.status).replace("_", " ")
+
+
 def _link(meeting: Meeting, filename: str) -> str:
     """A relative Markdown link to a file in the meeting folder, or `-` if absent.
 
@@ -82,7 +97,7 @@ def _row(meeting: Meeting) -> tuple[str, ...]:
         meeting.started_at.strftime("%Y-%m-%d %H:%M"),
         meeting_title(meeting),
         format_duration(meeting.duration_seconds),
-        str(meeting.status),
+        status_words(meeting),
         str(unnamed) if unnamed else "-",
         _link(meeting, paths.TRANSCRIPT_MD),
         _link(meeting, paths.NOTES_MD),

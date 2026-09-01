@@ -83,6 +83,22 @@ folder, and at build step 13 it is what a project digest is assembled around.
 Use the exact name the transcript uses for a person; do not wikilink a
 `SPEAKER_NN`.
 
+## Spelling
+
+Write the notes in **U.S. English**: *organize*, *analyze*, *color*, *center*,
+*defense*, *program*, *toward*. The transcript may be in any variety; the notes
+are normalized here.
+
+This applies to your own prose and nothing else. It never touches
+`transcript.md`, which is immutable. It never touches a **name** — a person, a
+product, a project or an institution keeps its own spelling, however British,
+Swedish or idiosyncratic: `Centre for Human-Centred Computing` stays exactly
+that, and so does anybody's surname. And it never rewrites the inside of a
+quotation: quote verbatim, and spell your own prose around it.
+
+The rule lives in this folder's `CLAUDE.md` under *notes.md, and `/cleanup`*.
+Change it there if the house style changes.
+
 ## Markdown to stay inside
 
 These notes are translated into Google Docs later, by a converter that handles

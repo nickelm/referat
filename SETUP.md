@@ -238,6 +238,17 @@ here dies with "An Application Control policy has blocked this file", check the
 signature of the file named, not the package that imported it** — SAC blocks per
 file, by reputation, with nothing modified on disk and no warning first.
 
+**And check whether it still fails.** On 2026-09-01 a `referat rerun` was killed
+by a block on scipy's `_odepack.pyd`; a retry minutes later was killed on
+`_stats_pythran`, then on `_sobol`, and a retry after that succeeded and has
+succeeded since. Nothing was installed or changed in between — the cloud
+reputation lookup simply finished. So a block is often a **window rather than a
+verdict**, which cuts both ways: a failure may not reproduce five minutes later,
+and a component that has worked for a month can still fail the first time it
+reaches a `.pyd` nobody on this machine has run before. That is why the
+resampler was moved off scipy (section 5) rather than wrapped in a retry: the
+window is unpredictable and lands wherever it lands.
+
 Turning Smart App Control off would also fix all of this. It is a one-way,
 system-wide change that Windows cannot undo without a reinstall, and it is your
 call, not this project's: see section 10.
@@ -729,10 +740,23 @@ npm install
 
 Then open the repository in VS Code and press **F5**. That starts an Extension
 Development Host with a **Referat** icon in the activity bar: your meetings,
-newest first, with *Open transcript*, *Open notes*, *Generate notes*,
-*Re-transcribe* and *Name speakers* on each one's right-click menu. A meeting
-with speakers nobody has named yet has an **Unknown speakers** child; clicking a
-speaker opens a panel that plays their snippets and takes a name.
+newest first, one row each with its title, duration, project tags and lifecycle
+state, and buttons for *Transcript*, *Notes*, *Generate notes*, *Re-transcribe*
+and *Tags…*. A meeting with speakers nobody has named yet has a **Speakers**
+button that expands in place, plays their snippets and takes a name. **Untagged
+only** at the top leaves the meetings that still need a project, and the view's
+**Projects** button creates, renames and deletes them.
+
+A meeting whose transcript the quality gate refused shows `gate_failed` and an
+**Accept & delete audio** button. That one is irreversible and says so in a
+modal: `mic.wav` and `system.wav` are deleted for good and the meeting moves into
+the meetings folder, because no WAV may ever be written there. Use it when the
+transcript is good enough despite the gate; use *Re-transcribe* when it is not.
+
+A status bar item on the left says what the tray is doing. It appears once you
+have opened the sidebar in that window, and it does not count up second by
+second — it re-reads `referat status` when the tray writes its status file, and
+every 30 seconds otherwise.
 
 Two settings, both optional:
 
@@ -746,15 +770,17 @@ There is deliberately no meetings-folder setting: the extension reads
 file the tray records against, so the two cannot disagree about where meetings
 live.
 
-Everything it shows comes from `referat list --json`, and every name it applies
-goes through `referat label <id> --speaker <s> --name <n>` — so if the tree looks
-wrong, run those two commands yourself and you will see exactly what it saw.
+Everything it shows comes from `referat list --json` and `referat status --json`,
+and every change it makes is a `referat` verb — `label --speaker --name`, `tag`,
+`untag`, `project`, `state`, `promote` — so if the sidebar looks wrong, run those
+commands yourself and you will see exactly what it saw. A refusal it shows you is
+the sentence the CLI printed, passed through unedited.
 **Referat > Show Output** has every command it ran, with its full command line.
 
 It runs them through the venv's own interpreter,
 `.venv\Scripts\python.exe -m referat.cli`, with the working directory at the
 repository — the fallback from section 2, for the same reason: `uv` does not run
-on this machine. So if the tree is empty and an error appears, the usual causes
+on this machine. So if the sidebar is empty and an error appears, the usual causes
 are a `referat.repoRoot` pointing somewhere that is not the repository, or a
 `.venv` that Dropbox has eaten again (section 2 has the repair).
 

@@ -31,16 +31,26 @@ knows it. A name is only written when the match clears both a similarity
 threshold and a margin over the runner-up, because a wrong name is worse than
 `SPEAKER_02`.
 
+A meeting carries zero or more **projects** — labels, not folders — and
+`referat project add|rename|rm|list` maintains them while `referat tag` and
+`referat untag` put them on and take them off. Nothing is ever tagged
+automatically, which is what keeps the untagged meetings a queue somebody works
+through rather than a bucket of quiet mistakes. Every meeting also records its
+own lifecycle in one field, `recording -> recorded -> transcribing ->
+gate_failed | transcribed -> notes_written -> synced`, and every surface renders
+that field rather than guessing from which files happen to exist.
+
 The `referat` CLI is the rest of it: `list` (the inventory and the queue),
-`status`, `devices`, `rerun`, `label` and `config`.
+`status`, `devices`, `rerun`, `promote`, `label`, `project`, `tag`, `untag`,
+`state`, `index` and `config`.
 
 A `/cleanup` slash command writes `notes.md` beside a transcript when asked —
-lazily, never automatically — and a VS Code extension browses the meetings,
-names speakers and runs that pass. What is next: projects as labels a meeting
-carries zero or more of, a sidebar that renders each meeting's lifecycle
-explicitly, tagging from the tray, and per-project digests pushed into Google
-Docs. See [TODO.md](TODO.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for
-what has landed.
+lazily, never automatically — and a VS Code extension is the primary UI: a
+sidebar of meetings with their lifecycle and their tags, the buttons that write
+notes, re-transcribe, tag and name speakers, and a status bar item saying what
+the tray is doing. What is next: packaging that extension, tagging from the tray,
+and per-project digests pushed into Google Docs. See [TODO.md](TODO.md) for the plan
+and [CHANGELOG.md](CHANGELOG.md) for what has landed.
 
 ## Quick start
 

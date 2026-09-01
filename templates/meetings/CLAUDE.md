@@ -12,6 +12,7 @@ One subfolder per meeting, named `YYYY-MM-DD_HHMM` (local start time, with a
 
 ```
 INDEX.md           the dashboard: one row per meeting. Generated — see below
+projects.json      the projects a meeting can be tagged with. Machine-written
 2026-08-27_1400/
   mic.wav          my microphone — and the room — mono 16 kHz
   system.wav       system audio output (WASAPI loopback) — everyone on the call
@@ -37,19 +38,30 @@ machine and it is no part of any note.
 ```
 ## Meeting 2026-08-27 14:00 (58 min)
 
-[00:03:12] ME: ...
+[00:03:12] Niklas: ...
+
 [00:03:40] Anna: ...
+
 [00:04:05] SPEAKER_02: ...
+
+[00:04:31] ME: ...
 ```
 
 - Timestamps are `[HH:MM:SS]` elapsed from the start of the recording, not wall
   clock. Paused intervals are excluded from elapsed time; see `meta.json`, whose
   `pauses` are in wall-clock seconds since the start.
-- **`ME`** is Niklas, the owner of this laptop, on whichever channel his
-  voiceprint was recognised. It is not a synonym for "the microphone": the
-  microphone hears the whole room in a meeting held in person, and it is diarized
-  exactly as the system channel is. A transcript of nothing but `ME` on the
-  microphone means diarization did not run on that channel — check `meta.json`.
+- **`ME`** is the fallback for the microphone channel: a line nothing
+  attributed. It names nobody. It is emphatically **not** Niklas and not a
+  synonym for "the microphone's owner" — the microphone hears the whole room in a
+  meeting held in person, and it is diarized exactly as the system channel is, so
+  a run of `ME` lines is as likely to be two people as one. A transcript of
+  nothing but `ME` on the microphone means diarization did not run on that
+  channel — check `meta.json`.
+- **Niklas is a name like any other.** He is recognised by voiceprint and written
+  out, so his lines read `Niklas:`. They used to read `ME:`, which is why some
+  older transcripts in this folder still do; `referat relabel` repaired the ones
+  it safely could and left the rest alone. Where you see `ME`, treat it as
+  unattributed, not as Niklas.
 - **A plain name** — `Anna` — is a speaker Referat recognised by voice, or one
   somebody named with `referat label`. A name is **per person and stable across
   every meeting in this folder**: `Anna` in March and `Anna` today are the same
@@ -68,8 +80,9 @@ machine and it is no part of any note.
   belongs, and only `referat label` puts it there.
 - **`REMOTE`** is the fallback for the system-audio channel: a line diarization
   could not attribute, or a whole meeting where it never ran (no Hugging Face
-  token, or an error). A transcript of nothing but `ME` and `REMOTE` is a normal,
-  complete transcript with the speaker names missing — check
+  token, or an error). It is `ME`'s counterpart and means the same thing on the
+  other channel: nothing attributed this. A transcript of nothing but `ME` and
+  `REMOTE` is a normal, complete transcript with the speaker names missing — check
   `transcription.channels.system.diarization` in `meta.json` for why.
 - Lines are in chronological order across both channels.
 
@@ -88,7 +101,7 @@ make.
   "started_at": "2026-08-27T14:00:03",
   "ended_at": "2026-08-27T14:58:11",
   "duration_seconds": 3488,
-  "status": "done",
+  "status": "transcribed",
   "pauses": [{"start": 1204.5, "end": 1320.2}],
   "audio": {"mic": {...}, "system": {...}},
   "transcription": {
@@ -117,6 +130,7 @@ make.
     },
     "audio_released": false
   },
+  "tags": ["kundprojekt"],
   "speaker_names": {"SPEAKER_01": "Anna"},
   "referat_version": "0.1.0"
 }
@@ -126,9 +140,31 @@ Both WAVs run the full length of the meeting: quiet stretches are written as
 real silence, so the same position in `mic.wav` and in `system.wav` is the same
 moment. Either file may be missing if that device could not be opened.
 
-`status` is one of `recording`, `stopped`, `transcribing`, `done`, `failed`.
+`status` is the meeting's lifecycle, and it is the only place that lifecycle is
+written down — nothing works it out from which files happen to exist:
+
+```
+recording -> recorded -> transcribing -> gate_failed | transcribed
+                                                    -> notes_written -> synced
+failed  (transcription raised)
+```
+
 A folder still marked `recording` means the app died mid-meeting; the WAV files
-are still valid and `referat rerun <id>` will transcribe them.
+are still valid and `referat rerun <id>` will transcribe them. `gate_failed` is a
+transcript that came out but was not trusted enough to delete the audio for, so
+that meeting is still in the staging folder and not in this one. `transcribed` and
+`done` mean the same thing — `done` is what older meetings say, and it is read as
+`transcribed`.
+
+`notes_written` is the one value nothing here writes for itself. **You may not set
+it**, because you may not touch `meta.json` at all; whoever ran `/cleanup` calls
+`referat state <id> notes-written` afterwards.
+
+`tags` is the list of project ids this meeting carries — zero or more, and an
+empty list means untagged. They are ids rather than names so that renaming a
+project touches one file; `projects.json` in this folder maps them to what a
+person reads. An id in `tags` with no entry in `projects.json` is an *orphan*, left
+behind by a deleted project, and is worth mentioning rather than ignoring.
 
 **`speaker_names` is the authority on who a label is** — the mapping from this
 meeting's `SPEAKER_NN` to a real person. A speaker missing from it is one nobody
@@ -172,8 +208,8 @@ freehand, so every meeting's notes come out the same shape. The prompt is a file
 if the notes keep coming out wrong, improve `.claude/commands/cleanup.md` rather
 than working around it.
 
-Two things depend on the shape it produces, so keep them if you ever write notes
-by hand:
+Three things depend on the shape it produces, so keep them if you ever write
+notes by hand:
 
 - **The first line is an H1**, a short specific title. `INDEX.md` reads it as the
   meeting's title, and so will the per-project digests; a meeting with no
@@ -181,6 +217,18 @@ by hand:
 - **The Markdown stays in a narrow subset** — `##`/`###`, bold, italic, code, one
   level of `-` bullets, links and `[[Wikilinks]]`. Notes are translated into
   Google Docs later by a converter that handles exactly that much.
+- **U.S. spelling and conventions.** Write *organize*, *analyze*, *color*,
+  *center*, *defense*, *program*, *toward*; not *organise*, *colour*, *centre*,
+  *defence*, *programme*, *towards*. This is a house style, changed by editing
+  this file, and it applies to the **notes only**.
+
+  It never reaches `transcript.md`, which is immutable and keeps whatever
+  spelling Whisper heard, and it never reaches a **name**: a person, a product, a
+  project or an institution keeps its own spelling however British, Swedish or
+  idiosyncratic it is. `Centre for Human-Centred Computing` stays exactly that,
+  and so does anybody's surname. Nor is it a licence to change what somebody
+  said inside a quotation — quote verbatim and spell your own prose in U.S.
+  English around it.
 
 `[[Wikilinks]]` mark people and projects: `[[Anna]]`, `[[Intake pipeline]]`. They
 have no target on disk — they are what connects notes to each other, and what a

@@ -7,11 +7,15 @@ step 8 from `referat rerun`, so nothing in this module touches the state machine
 or the UI: it takes a :class:`referat.meeting.Meeting`, works on the files in its
 folder, and writes the results back into `meta.json`.
 
-**Both channels are transcribed.** The microphone is one speaker by definition
-and gets `ME`; the loopback channel is everyone else, and :mod:`referat.diarize`
-splits it into `SPEAKER_01`, `SPEAKER_02`, ... — falling back to an
-undifferentiated `REMOTE` whenever it cannot. Ordering the two into one document
-belongs to :mod:`referat.merge`.
+**Both channels are transcribed, and both are diarized.** The microphone is not
+one speaker by definition — Referat is mostly used for meetings held in person,
+where the whole room arrives through it — so :mod:`referat.diarize` splits each
+channel into `SPEAKER_01`, `SPEAKER_02`, ..., numbered across the *meeting* rather
+than the channel, and :mod:`referat.voices` puts names on the ones it recognises.
+A channel diarization could not split falls back to an undifferentiated
+:data:`ME_LABEL` or :data:`REMOTE_LABEL`, which mean *this channel recorded it and
+nothing attributed it* and never mean a particular person. Ordering the two into
+one document belongs to :mod:`referat.merge`.
 
 **Imports are lazy.** `faster_whisper` and `torch` live behind the `transcribe`
 extra, ~3 GB of wheels a base install does not have, so they are imported inside
@@ -19,7 +23,10 @@ the functions that need them, exactly as :mod:`referat.recorder` does with
 `sounddevice` and `pyaudiowpatch`. Importing this module must stay free.
 
 **Audio is decoded here, not by faster-whisper.** See :func:`decode_wav` and
-:func:`_neutralize_pyav`.
+:func:`_neutralize_pyav`. It is also **resampled here**, in numpy alone: see
+:func:`_resample`. Both are the same decision twice — the path from a WAV to a
+transcript may not depend on a wheel's unsigned native code, because Smart App
+Control on this machine blocks that at whatever moment it feels like it.
 """
 
 from __future__ import annotations
@@ -27,11 +34,13 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import re
 import sys
 import threading
 import time
 import wave
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from math import gcd
 from pathlib import Path
 from types import ModuleType
@@ -52,19 +61,27 @@ SAMPLE_WIDTH = 2
 """Both channels are 16-bit PCM, as written by :mod:`referat.recorder`."""
 
 ME_LABEL = "ME"
-"""The owner of the laptop, on whichever channel their voice was recognised.
+"""Microphone speech that nothing attributed: the mic channel's fallback label.
 
-Not "the microphone channel", which is what this used to mean. Referat is
-primarily for meetings held **in person**, where the room's other voices arrive
-through the same microphone as the owner's — so the mic is diarized like the
-loopback is, and a cluster earns `ME` by matching the owner's voiceprint rather
-than by which file it came out of. An undiarized mic channel still falls back to
-this label, because one channel of unattributed speech is better read as the
-owner than as nobody.
+Not the owner, which is what this used to mean, and not a synonym for "whoever
+was recognised". The owner is identified exactly as everybody else is — by
+matching a voiceprint — and is then written by **name**, like Anna or Mohammad.
+Rendering them as `ME` instead put one person under two labels in a single
+transcript, since :func:`referat.label.apply_name` spells the name out and the
+pipeline did not: 2026-09-01_2102 came out with 178 `ME:` lines and 4 `Niklas:`
+lines for the same voice.
+
+So this label now means one thing and says something true whenever it appears:
+the microphone recorded this and nothing put a name on it — diarization did not
+run on the channel, or no turn overlapped the segment. Referat is primarily for
+meetings held **in person**, where the room's other voices arrive through the
+same microphone as the owner's, so it must not be widened back into a name: a
+mic channel of unattributed speech is frequently two people, and spelling a name
+onto it is the same failure as putting a name on a `SPEAKER_NN`.
 """
 
 REMOTE_LABEL = "REMOTE"
-"""Everyone on the loopback channel, when diarization did not name them."""
+"""The same, on the loopback channel: speech nothing attributed."""
 
 DECODE_CHUNK_SECONDS = 60.0
 """How much of a resampled WAV is held as float32 at once. See :func:`decode_wav`."""
@@ -72,10 +89,41 @@ DECODE_CHUNK_SECONDS = 60.0
 RESAMPLE_MARGIN = 1024
 """Overlap-save margin for chunked resampling, in `down`-sized input steps.
 
-`resample_poly`'s filter is `2 * 10 * max(up, down) + 1` taps wide — 61 for the
-48 kHz -> 16 kHz case — so a thousand-odd steps of history on each side is
-enormous overkill, which is the point: the seams have to be inaudible and this
-costs 64 ms of redundant filtering per chunk.
+The resampling kernel reaches :data:`RESAMPLE_TAP_DENSITY` input samples either
+side of each output sample — 30 for the 48 kHz -> 16 kHz case — so a thousand-odd
+steps of history on each side is enormous overkill, which is the point: the seams
+have to be inaudible and this costs 64 ms of redundant filtering per chunk.
+"""
+
+RESAMPLE_TAP_DENSITY = 10
+"""Kernel half-width, in samples of whichever rate is higher.
+
+`scipy.signal.resample_poly`'s own default, kept deliberately: it is what the
+48 kHz loopback was resampled with until Smart App Control blocked scipy, and
+matching it means a `referat rerun` of an old meeting decodes to the same samples
+it did the first time. Measured against `resample_poly` on a real `system.wav`,
+:func:`_resample` agrees to 138 dB — which is float rounding — and puts an 11 kHz
+tone through at the same -67.6 dBFS.
+"""
+
+RESAMPLE_KAISER_BETA = 5.0
+"""Kaiser window parameter, also `resample_poly`'s default. See above."""
+
+RESAMPLE_HALF_TAPS_RANGE = (8, 128)
+"""Clamp on the kernel half-width.
+
+The floor keeps a near-unity ratio from being interpolated with three taps; the
+ceiling bounds the cost of a pathological one, since every output sample pays for
+every tap. Neither has ever bitten: the only ratios this machine produces are
+48 kHz and 44.1 kHz down to 16 kHz, at 30 and 28 taps.
+"""
+
+RESAMPLE_OUT_BLOCK = 1 << 16
+"""Output samples gathered at once, so the `(block, taps)` temporary stays ~8 MB.
+
+Without it a 60-second chunk of 48 kHz would build a 960k x 61 float array —
+230 MB, three times over — which is precisely the peak
+:data:`DECODE_CHUNK_SECONDS` exists to avoid.
 """
 
 # --- Quality thresholds -----------------------------------------------------
@@ -129,6 +177,17 @@ again when it is garbage collected."""
 
 class TranscriptionError(RuntimeError):
     """Raised when a meeting could not be transcribed at all."""
+
+
+class DecodeError(TranscriptionError):
+    """Raised when a WAV could not be turned into samples.
+
+    Its own class so that :func:`transcribe_meeting` does not answer it by
+    re-running the whole meeting on the CPU. Decoding happens before any model is
+    loaded and touches no device at all, so a CUDA attempt that died here would
+    fail identically on the second pass — at the cost of several minutes and a
+    duplicated traceback that hides the real cause in the middle of it.
+    """
 
 
 # --- What came back ---------------------------------------------------------
@@ -292,14 +351,22 @@ def decode_wav(path: Path, target_rate: int = SAMPLE_RATE) -> np.ndarray:
     230 MB plus a fixed ~30 MB working set — which is to say down to the array
     Whisper needs anyway, and nothing else.
     """
-    with wave.open(str(path), "rb") as wav:
-        rate, channels, width = wav.getframerate(), wav.getnchannels(), wav.getsampwidth()
-        frames = wav.getnframes()
-        if width != SAMPLE_WIDTH:
-            raise TranscriptionError(f"{path.name} is {width * 8}-bit, expected 16-bit PCM")
-        if rate == target_rate:
-            return _to_mono_float(wav.readframes(frames), channels)
-        audio = _resample_stream(wav, frames, channels, rate, target_rate)
+    try:
+        with wave.open(str(path), "rb") as wav:
+            rate, channels, width = wav.getframerate(), wav.getnchannels(), wav.getsampwidth()
+            frames = wav.getnframes()
+            if width != SAMPLE_WIDTH:
+                raise DecodeError(f"{path.name} is {width * 8}-bit, expected 16-bit PCM")
+            if rate == target_rate:
+                return _to_mono_float(wav.readframes(frames), channels)
+            audio = _resample_stream(wav, frames, channels, rate, target_rate)
+    except DecodeError:
+        raise
+    except Exception as exc:
+        # Everything that reaches a WAV arrives as one class, so the caller can
+        # tell "this file will not decode" from "the GPU died" without reading
+        # the message. See :class:`DecodeError`.
+        raise DecodeError(f"could not decode {path.name}: {exc}") from exc
     log.info("%s: resampled %d Hz -> %d Hz", path.name, rate, target_rate)
     return audio
 
@@ -315,12 +382,92 @@ def _to_mono_float(raw: bytes, channels: int) -> np.ndarray:
     return audio
 
 
+@lru_cache(maxsize=4)
+def _resample_kernel(up: int, down: int) -> tuple[np.ndarray, int]:
+    """The polyphase kernel for one ratio: `(up, 2 * half)` taps, and `half`.
+
+    One row per output phase. Output sample `m` lands at input time `m * down /
+    up`, whose fractional part is `(m * down) % up / up` — so there are exactly
+    `up` distinct fractional offsets however long the file is, and the whole
+    filter is a table of `up` windowed sincs. That is the entire polyphase trick,
+    and it is what keeps 44.1 kHz (`up = 160`) from costing 160 times anything.
+
+    The window is Kaiser, evaluated at fractional positions through `np.i0`
+    rather than taken from `np.kaiser`, which only samples it at integers. Rows
+    are normalized to sum to one, which sets the DC gain to unity and quietly
+    absorbs the asymmetry of a kernel that reaches one sample further right than
+    left.
+
+    Cached because it depends on nothing but the ratio, and
+    :func:`_resample_stream` asks for it once per 60-second chunk.
+    """
+    low, high = RESAMPLE_HALF_TAPS_RANGE
+    half = min(max(-(-RESAMPLE_TAP_DENSITY * max(up, down) // up), low), high)
+    taps = np.arange(-half + 1, half + 1, dtype=np.float64)
+    offsets = np.arange(up, dtype=np.float64) / up
+    distance = taps[None, :] - offsets[:, None]
+    # Relative to the *input* Nyquist: when downsampling, the passband has to end
+    # at the output's Nyquist instead, or the decimation aliases it back in.
+    cutoff = min(1.0, up / down)
+    shape = np.clip(1.0 - (distance / half) ** 2, 0.0, None)
+    window = np.i0(RESAMPLE_KAISER_BETA * np.sqrt(shape)) / np.i0(RESAMPLE_KAISER_BETA)
+    kernel = np.sinc(distance * cutoff) * window
+    kernel /= kernel.sum(axis=1, keepdims=True)
+    return kernel.astype(np.float32), half
+
+
+def _resample(block: np.ndarray, up: int, down: int) -> np.ndarray:
+    """`scipy.signal.resample_poly(block, up, down)`, in numpy and the stdlib alone.
+
+    **Why not scipy.** `from scipy.signal import resample_poly` pulls in
+    `scipy.stats` and `scipy.integrate` behind it, which is some hundred unsigned
+    `.pyd` files, and Smart App Control blocks an unsigned binary whose cloud
+    reputation has not yet vouched for it. On 2026-09-01 it blocked three
+    different ones inside five minutes — `_odepack`, `_stats_pythran`, `_sobol` —
+    and then stopped, the reputation having arrived. So this was never a scipy
+    that does not work: it is a scipy that stops working at an unpredictable
+    moment, for minutes at a time, and the moment it picked was a `referat rerun`.
+
+    A transcript may not depend on that. numpy is already unavoidable — nothing in
+    this module runs without it — so a resampler written against numpy alone adds
+    no new way to fail, while scipy on this path added a whole package of them.
+    It is the same judgement as :func:`_neutralize_pyav` and
+    :func:`referat.diarize._neutralize_torchcodec`, one layer down, and it is the
+    project rule about keeping the import-critical path narrow rather than a new
+    one.
+
+    Contract-compatible with `resample_poly` on purpose, because meetings
+    recorded before this existed have to re-run to the same samples: same output
+    length, `ceil(n * up / down)`; same zero-phase alignment, output `m` at input
+    time `m * down / up`; same zero padding past the ends; same default kernel.
+    Verified against it at 138 dB on a real `system.wav` while it was importable.
+    """
+    kernel, half = _resample_kernel(up, down)
+    count = -(-block.size * up // down)
+    out = np.empty(count, dtype=np.float32)
+    # Zero-padded rather than edge-clamped: `resample_poly` runs the filter off
+    # the ends into silence, and only the file's true ends ever see this, since
+    # the overlap-save margins hide every seam.
+    padded = np.zeros(block.size + 2 * half, dtype=np.float32)
+    padded[half : half + block.size] = block
+    reach = np.arange(1, 2 * half + 1)  # tap offsets, already shifted past the pad
+
+    for start in range(0, count, RESAMPLE_OUT_BLOCK):
+        stop = min(start + RESAMPLE_OUT_BLOCK, count)
+        position = np.arange(start, stop, dtype=np.int64) * down
+        rows = padded[(position // up)[:, None] + reach[None, :]]
+        # einsum rather than (rows * taps).sum(axis=1): one pass, no temporary
+        # the size of the gather.
+        out[start:stop] = np.einsum("ij,ij->i", rows, kernel[position % up])
+    return out
+
+
 def _resample_stream(
     wav: wave.Wave_read, frames: int, channels: int, rate: int, target_rate: int
 ) -> np.ndarray:
     """Resample a WAV to `target_rate` a chunk at a time, overlap-save.
 
-    `scipy.signal.resample_poly` low-pass filters as it decimates; plain
+    :func:`_resample` low-pass filters as it decimates; plain
     decimation would alias speech down into the band Whisper listens to. Applied
     per chunk it would also ring at every seam, so each chunk is filtered with
     :data:`RESAMPLE_MARGIN` steps of real audio on either side and the margins
@@ -331,8 +478,6 @@ def _resample_stream(
     Chunk and margin are whole multiples of `down`, so every trim is an exact
     number of output samples and the pieces abut with no drift.
     """
-    from scipy.signal import resample_poly
-
     divisor = gcd(rate, target_rate)
     up, down = target_rate // divisor, rate // divisor
     margin = RESAMPLE_MARGIN * down
@@ -350,7 +495,7 @@ def _resample_stream(
         if block.size == 0:  # A header claiming more frames than the file holds.
             break
 
-        resampled = resample_poly(block, up, down).astype(np.float32, copy=False)
+        resampled = _resample(block, up, down)
         head, tail = left // down * up, right // down * up
         piece = resampled[head : resampled.size - tail] if tail else resampled[head:]
         out[written : written + piece.size] = piece
@@ -594,25 +739,6 @@ def transcribe_channel(
     return transcript
 
 
-def _owner_to_me(names: dict[str, str], config: Config) -> dict[str, str]:
-    """Render the owner's own cluster as `ME` rather than by name.
-
-    The owner is identified exactly as everybody else is — by matching their
-    voiceprint — and is then written as `ME`, because a transcript reading
-    `Niklas:` for one's own lines is a stranger way to read one's own meeting
-    than `ME:` is.
-
-    This is presentation only. `meta.json` keeps the real name in
-    `speaker_names`, which is what `referat label --forget <name>` needs in order
-    to find and revert the owner's labels like anybody else's, and what keeps the
-    per-channel `name` honest about who the match actually was.
-    """
-    owner = config.speakers.owner_name.strip()
-    if not owner:
-        return names
-    return {label: (ME_LABEL if name == owner else name) for label, name in names.items()}
-
-
 def _diarize_into(
     meeting: Meeting,
     transcript: ChannelTranscript,
@@ -654,7 +780,6 @@ def _diarize_into(
         )
         log.info("%s: %s", transcript.channel, ", ".join(found) or "no speakers found")
         names = voices.identify(meeting, transcript, renaming, audio, SAMPLE_RATE, config)
-        names = _owner_to_me(names, config)
         if names:
             # The label is metadata on the segment, so putting a name on it here
             # means `merge` and `render_transcript` need to know nothing about
@@ -751,17 +876,81 @@ def format_timestamp(seconds: float) -> str:
     return f"{total // 3600:02d}:{total % 3600 // 60:02d}:{total % 60:02d}"
 
 
+ENTRY_SEPARATOR = "\n\n"
+"""What goes between two entries of `transcript.md`: a blank line.
+
+**A single newline is not enough, and that is a Markdown fact rather than a
+matter of taste.** In CommonMark a newline inside a block is a *soft* break,
+rendered as a space — so a transcript whose entries were separated by one
+newline came out of every Markdown viewer as one unbroken paragraph, hundreds of
+utterances long. The meetings folder opens Markdown rendered, which makes that
+the normal way these files are read.
+
+A blank line was chosen over the two alternatives. Two trailing spaces are the
+other hard break, and they are two characters nobody can see, in a file plenty of
+editors would strip them out of on save. Turning each entry into a `- ` list item
+reads well and breaks both of the line-anchored patterns in :mod:`referat.label`,
+which is a real cost for a cosmetic gain.
+
+:func:`render_transcript` and :func:`reflow_transcript` share this, so the file
+Referat writes and the file it repairs cannot come to disagree.
+"""
+
+ENTRY_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\] [^:]+: ")
+"""One rendered entry: `[HH:MM:SS] <label>: `.
+
+Only :func:`reflow_transcript` uses it, and only to be sure that the two lines it
+is about to put a blank line between really are two entries. Deliberately not
+imported from :mod:`referat.label`, whose patterns anchor on a *known speaker* in
+order to rewrite that field; this one asks the weaker question of whether a line
+has the shape this module writes.
+"""
+
+
 def render_transcript(meeting: Meeting, entries: list[tuple[float, str, str]]) -> str:
     """The `transcript.md` document, from `(start, label, text)` in time order.
 
     Takes already-ordered entries rather than channels; ordering the channels is
     :func:`referat.merge.merge`'s job.
+
+    Entries are separated by a blank line — see :data:`ENTRY_SEPARATOR` for why
+    one newline was not enough.
     """
     when = meeting.started_at.strftime("%Y-%m-%d %H:%M")
     minutes = round(meeting.duration_seconds / 60)
-    lines = [f"## Meeting {when} ({minutes} min)", ""]
-    lines += [f"[{format_timestamp(start)}] {label}: {text}" for start, label, text in entries]
-    return "\n".join(lines) + "\n"
+    header = f"## Meeting {when} ({minutes} min)"
+    body = [f"[{format_timestamp(start)}] {label}: {text}" for start, label, text in entries]
+    return ENTRY_SEPARATOR.join([header, *body]) + "\n"
+
+
+def reflow_transcript(text: str) -> tuple[str, int]:
+    """Put a blank line between the entries of an already-written transcript.
+
+    Every transcript recorded before :data:`ENTRY_SEPARATOR` existed has a single
+    newline between its entries and renders as one paragraph. Most of them have
+    had their audio released, so no `referat rerun` can ever regenerate them —
+    `referat reflow` is the only way they become readable, and this is what it
+    calls. Returns the new text and how many blank lines were inserted.
+
+    **This is not the kind of edit the immutability rule forbids.** It inserts
+    whitespace *between* lines and rewrites no line: no word of speech, no
+    timestamp and no speaker label is touched, which is the same narrowness
+    `referat label` observes when it rewrites the label field.
+
+    Conservative on purpose: a blank line goes in only where **both** the line
+    before and the line after match :data:`ENTRY_RE`. A file holding anything
+    else — a hand-annotated transcript, a format from some later version — keeps
+    that part exactly as it is rather than being reformatted on a guess.
+    Idempotent, so a second run inserts nothing and the CLI writes no file.
+    """
+    out: list[str] = []
+    inserted = 0
+    for line in text.split("\n"):
+        if out and ENTRY_RE.match(line) and ENTRY_RE.match(out[-1]):
+            out.append("")
+            inserted += 1
+        out.append(line)
+    return "\n".join(out), inserted
 
 
 # --- Releasing the audio ----------------------------------------------------
@@ -780,12 +969,11 @@ def release_audio_if_clean(meeting: Meeting) -> bool:
     the loopback records nothing but silence and notification chimes, would
     otherwise pin every recording to the disk forever.
 
-    The `audio` block itself stays — frames, duration and device remain on record
-    — and `audio_released` says the files are gone deliberately. The `speakers/`
-    snippets stay too: they are cut precisely because this function is about to
-    delete the audio they were cut from, and they go when their speaker is named.
+    **This function is the gate and nothing else.** The deletion itself is
+    :func:`release_audio`, which `referat promote --release-audio` also calls when
+    a person overrules this gate on a `gate_failed` meeting.
     """
-    if meeting.status is not MeetingStatus.DONE:
+    if meeting.status is not MeetingStatus.TRANSCRIBED:
         return False
     channels = meeting.transcription.get("channels") or {}
     present = sorted(meeting.audio)
@@ -803,19 +991,48 @@ def release_audio_if_clean(meeting: Meeting) -> bool:
         log.info("keeping the audio of %s: %s looks unreliable", meeting.id, ", ".join(unclean))
         return False
 
+    return release_audio(meeting) >= 0
+
+
+def release_audio(meeting: Meeting) -> int:
+    """Delete this meeting's channel WAVs, unconditionally. Bytes freed, or -1.
+
+    **The decision is the caller's; this is only the act.** Split out of
+    :func:`release_audio_if_clean` at build step 15, when `referat promote
+    --release-audio` became the second thing that deletes a meeting's audio: the
+    sidebar's off-ramp for a gate-failed meeting, where the person looking at the
+    transcript overrules the quality gate. Deleting the WAVs and recording that it
+    was deliberate has to happen the same way both times, or `audio_released`
+    would mean two different things.
+
+    A channel whose file is already gone is not a failure — it is the state this
+    function is trying to reach — so it is skipped rather than counted. Anything
+    that actually refuses to be deleted returns -1 with the files left as they
+    are: a half-released meeting must not be promoted, because the invariant that
+    no WAV ever reaches the meetings folder is the whole reason for staging.
+
+    The `audio` block itself stays — frames, duration and device remain on record
+    — and `audio_released` says the files are gone deliberately. The `speakers/`
+    snippets stay too: they are cut precisely because this deletes the audio they
+    were cut from, and they go when their speaker is named.
+    """
     freed = 0
-    for name in present:
+    for name in sorted(meeting.audio):
         wav = meeting.dir / str(meeting.audio[name].file)
         try:
-            freed += wav.stat().st_size
+            size = wav.stat().st_size
+        except OSError:
+            continue
+        try:
             wav.unlink()
         except OSError:
             log.exception("could not delete %s", wav)
-            return False
+            return -1
+        freed += size
     meeting.transcription["audio_released"] = True
     meeting.save()
     log.info("released %.0f MB of audio from %s", freed / 1e6, meeting.id)
-    return True
+    return freed
 
 
 # --- The job ----------------------------------------------------------------
@@ -846,6 +1063,11 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
             transcripts, errors = transcribe_channels(
                 meeting, config, backend, tolerate_failures=backend.device != "cuda"
             )
+        except DecodeError:
+            # Not a device problem, so the CPU would fail in exactly the same
+            # place several minutes later. The retry below is for the GPU, and a
+            # WAV that will not decode has not reached it yet.
+            raise
         except Exception:
             if backend.device != "cuda":
                 raise
@@ -871,7 +1093,7 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
         raise TranscriptionError(f"could not transcribe {meeting.id}: {exc}") from exc
 
     elapsed = time.monotonic() - started
-    status = MeetingStatus.FAILED if errors else MeetingStatus.DONE
+    status = MeetingStatus.FAILED if errors else MeetingStatus.TRANSCRIBED
     meeting.status = status
     meeting.transcription = _transcription_meta(backend, transcripts, elapsed, status=status)
     # Re-derived from this run rather than carried over: `referat rerun`
@@ -903,6 +1125,15 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
     voices.bootstrap_owner(meeting, transcripts, config)
     if release_audio_if_clean(meeting):
         promote_meeting(meeting, config)
+    else:
+        # The lifecycle value that used to be a three-way inference: status is
+        # `transcribed`, the WAVs are still there, the folder is still in
+        # staging. Every reader worked it out again and none of them could
+        # render it honestly, so the pipeline writes it down instead. The
+        # transcript itself is fine — `meeting.transcription["status"]` still
+        # says so — it is the *audio* that was not trusted enough to delete.
+        meeting.status = MeetingStatus.GATE_FAILED
+        meeting.save()
     # After the promotion, so the meeting that just finished is already in the
     # folder being indexed — and unconditional, because a meeting that stayed in
     # staging still changes the footer. `write_index` never raises: the dashboard
@@ -954,7 +1185,7 @@ def _transcription_meta(
     transcripts: list[ChannelTranscript],
     elapsed: float,
     *,
-    status: MeetingStatus = MeetingStatus.DONE,
+    status: MeetingStatus = MeetingStatus.TRANSCRIBED,
     error: str | None = None,
 ) -> dict[str, Any]:
     """The `transcription` block of `meta.json`: what ran, and how well it went."""

@@ -2,6 +2,541 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-01 — First use of the tag picker, and the two bugs in it
+
+Reported after creating the first real projects. Both were in the tag picker, and
+neither was a race: one was a mutated set used as its own baseline, the other a
+cache with no path that invalidated it.
+
+### A project created in the picker was never applied to the meeting
+
+`editTags` built one set, `current`, from the meeting's tags and handed it to the
+picker as the tick state. Creating a project inside the picker did `current.add(id)`
+so it would come back ticked. Then the caller computed
+`added = [...picked].filter(id => !current.has(id))` — **against the same set**.
+The new id was in it, so it was in neither `added` nor `removed`, `referat tag`
+was never called, and the project existed while the meeting stayed untagged.
+Exactly the report: "it was created but could then not be used to tag the
+meeting."
+
+Two sets now. `carried` is what the meeting has on it, never moves, and is the
+only baseline the diff uses; `checked` is the picker's tick state, starts as a
+copy, and grows on a create. Demonstrated on the real CLI: the same inputs give
+`added = []` against the old baseline and `added = ["<new-id>"]` against the new
+one, and a replay of the whole flow leaves the meeting carrying the project.
+
+### The picker showed one of two projects
+
+`editTags` took its project map from the listing the sidebar already held, to
+save a subprocess. Nothing invalidated that cache when a project was created
+without a refresh following — and `editTags` itself was the worst offender, since
+it returned early **without calling `onChanged()`** whenever the tags came out
+unchanged or the picker was dismissed. Create a project, dismiss, reopen: the new
+project is gone.
+
+The picker now reads `project list --json` fresh, keeping the cached map only as
+the fallback for a failed call. A third of a second at the moment somebody opens
+a picker is worth less than a picker that cannot be trusted. And every exit path
+refreshes the sidebar when a project was created, whatever happened to the tags —
+a project made here is a project the next picker and the next group heading have
+to know about.
+
+### Two smaller things found while in there
+
+**`referat project add <name> --json`** emits the project it just created. The
+extension used to run `project add`, throw the output away, then find the project
+back in `project list` **by display name**. Two projects are allowed to share a
+name, so `find` would hand back the older one's id — the meeting tagged with the
+wrong project — and any disagreement between Python's `" ".join(name.split())`
+and TypeScript's `trim().replace(/\s+/g, " ")` would have returned nothing at all.
+An id is `slugify` plus a `-2` collision suffix; only the command that made it
+knows which one it made. That is a fifth JSON document, added for the same reason
+as the first four.
+
+**Creating reopens the picker rather than re-rendering it.** Assigning
+`picker.items` makes VS Code recompute which rows are ticked, so setting
+`selectedItems` on the next line races that recomputation. It was not the cause of
+the reported bug — that one was deterministic — but it is a real race and the
+`items`/`selectedItems` pair cannot be made safe. A fresh picker built from the
+updated maps has no selection to preserve, and costs one repaint.
+
+### Copying out of a note now pastes as Markdown
+
+The seeded `.vscode/settings.json` sets `editor.copyWithSyntaxHighlighting: false`.
+VS Code puts two flavours on the clipboard when you copy from an editor — plain
+text, and an HTML one carrying the theme's colours and font — and Word, Google
+Docs and Outlook all prefer the HTML one, which is why a pasted chunk of a note
+arrived as dark-background monospace. With the HTML flavour off, a paste anywhere
+is the raw Markdown with its `##` and `-` intact.
+
+Worth stating as a pair, since the two halves answer different questions: **copy
+from the source for Markdown syntax, from the preview for real headings and
+bullet lists.** Reaching the source at all takes the preview's *Open Source*
+action or *Open With… → Text Editor*, because `*.md` is associated with the
+preview editor in that workspace — which stays, since reading is what that folder
+is for.
+
+### U.S. spelling in the notes
+
+A house style, written in the meetings folder's `CLAUDE.md` and again in the
+`/cleanup` prompt, so it is changed by editing Markdown rather than code — which
+is what the prompt being a versioned file is for.
+
+It is bounded in three directions, and the bounds are the point. It never touches
+`transcript.md`, which is immutable and keeps whatever Whisper heard. It never
+touches a **name**: a person, a product, a project or an institution keeps its own
+spelling however British, Swedish or idiosyncratic, so `Centre for Human-Centred
+Computing` stays exactly that. And it never rewrites the inside of a quotation.
+Same shape as every other rule here — a normalization that reads as authoritative
+has to be kept off anything it could be wrong about.
+
+## 2026-09-01 — One label per person, a delete verb, and a sidebar grouped by project
+
+The first real remote meeting. `2026-09-01_2102` is a 19-minute Teams call with
+three people in it, and it closed most of what the steps-10-to-15 gates were
+waiting on at once: the loopback channel finally had voice in it, diarization ran
+on a real call, `referat label` named four speakers, the webview's `<audio>`
+element played real snippets, and `/cleanup` met a transcript with diarized
+speakers. All of that worked. Three things it surfaced did not.
+
+### The owner appeared under two names in one transcript
+
+`meta.json` shows the microphone diarized into **two** clusters: `SPEAKER_01`
+matched the owner's voiceprint at 0.857, and `SPEAKER_02` matched nothing at all
+(0.035) and was named by hand. The file came out with **178 `ME:` lines and 4
+`Niklas:` lines for the same voice**.
+
+The cause was `transcribe._owner_to_me`, which rewrote a voiceprint-matched owner
+to the literal `ME` for presentation while `label.apply_name` wrote the name it
+was given. Two paths, two renderings, one person. **The rewrite is deleted**, and
+the owner is now written by name like everybody else.
+
+Two bugs hanging off it went with it, both of which had to be found by reading
+rather than by watching:
+
+- **`referat label --forget <owner>` could not revert those lines.** It builds
+  its reverse mapping out of `speaker_names`, so it went looking for `Niklas:` in
+  a file that said `ME:` and silently reverted nothing — while `clear_stored_name`
+  and `speaker_names` forgot the cluster anyway. `SPEAKER_01` would then have been
+  offered again by `unknown_speakers` with no snippets (an auto-matched cluster is
+  cut none) and no sample lines (they say `ME`), i.e. permanently unnameable.
+- **A `rerun` flipped a hand-labeled name back to `ME`**, since it clears
+  `speaker_names` and lets the pipeline re-derive from the database. The label of
+  one's own voice was not stable across a rerun.
+
+**`ME` now means exactly one thing and it is true wherever it appears**: the
+microphone recorded this line and nothing attributed it — diarization did not run
+on the channel, or no turn overlapped the segment. `REMOTE` is its counterpart on
+the loopback. It must never be widened back into a name: `2026-08-28_1152` is 258
+lines of `ME` that are actually two people, and spelling a name onto unattributed
+speech is the same failure as putting a name on a `SPEAKER_NN`. Pleasingly, the
+sentence the meetings `CLAUDE.md` already carried — *"a transcript of nothing but
+`ME` on the microphone means diarization did not run on that channel"* — was
+misleading before this change and is exactly true after it.
+
+### `referat relabel [<meeting-id>]`
+
+The same shape of repair as last session's `reflow`, and for the same reason: the
+transcripts written under the old rendering have released their audio, so no
+`rerun` can regenerate them. It rewrites `ME:` to the owner's name **only for a
+meeting whose microphone clustered into nothing but the owner** — measured off the
+clustering the way `bootstrap_owner`'s condition is, rather than inferred from
+what kind of meeting it was.
+
+That gate is the whole design, and a blanket rewrite would have been a disaster:
+`2026-08-28_1152` has no mic `speakers` block at all and 258 `ME:` lines, and
+renaming them would have been the exact failure `CLAUDE.md` records about merging
+a two-person meeting into one speaker, in reverse and irreversibly. The gate sorts
+the five real meetings correctly — three refused for never having diarized the
+mic, `2026-09-01_0900` refused because `Duosi` is a mic cluster there, and only
+`2026-09-01_2102` rewritten.
+
+**A deliberate, bounded exception is buried in it and is written down rather than
+left to be discovered.** Some of those 178 lines were `diarize.assign`'s
+no-overlapping-turn fallback rather than the owner's matched cluster, and nothing
+on disk records which. Naming them is defensible *only* because the gate has
+proved the sole voice diarization found on that microphone was the owner's —
+which is a much narrower claim than "the microphone is the owner", and is not a
+licence to relax the gate later.
+
+Verified the way `reflow` was: backed up first, then 182 `Niklas` / 71
+`Mohammad` / 15 `Gaby` and no `ME`, **zero** lines differing outside the label
+field across all 271 lines, and a second run writing nothing.
+
+### `--forget` no longer collapses a split person onto an arbitrary label
+
+Pre-existing, and the fix above made it both more likely and much worse. When one
+name covers two labels in a meeting — which is what happened here, and what
+`TODO.md` has an open item about — `forget`'s `{n: label for label, n in ...}`
+inverts many-to-one and silently keeps whichever came **last** in dict order.
+After this session's change all 182 mic lines say `Niklas`, so a
+`--forget Niklas` would have rewritten all 182 to `SPEAKER_02:`.
+
+It now reverts to the **lowest** label and logs that it did. Deterministic rather
+than dict-ordered, and honest: the two labels share a name because a person said
+they are the same voice, so collapsing them asserts nothing nobody asserted
+already. What it costs is the other label, which keeps its embedding and loses its
+lines — recorded under "Surfaced later" rather than fixed here.
+
+`apply_name` also warns when `relabel_transcript` changes nothing, which is the
+third way `meta.json` and the Markdown could drift apart while every write
+reported success.
+
+### `referat delete <meeting-id> [--yes]`
+
+The one deletion Referat did not have. `promote --release-audio` deletes the WAVs,
+`project rm` a project, `label --forget` a person; a recording that should never
+have been kept had to be removed in Explorer, which also left the meetings
+`INDEX.md` describing it.
+
+Modeled on `promote` throughout: resolve through `_resolve_meeting` so it reaches
+both roots, refuse while the meeting is `recording` or `transcribing`, print the
+folder and its size, confirm, delete through the new `paths.remove_meeting_dir`,
+then regenerate the dashboard. `--yes` is not a convenience — the prompt reads
+`input()` and answers *no* on EOF, so the extension could not confirm without it,
+exactly as with `label --forget`.
+
+**Two sentences the confirmation carries**, because both are true and neither is
+obvious. A meeting inside a **synced** meetings folder is not really gone — Dropbox
+keeps deleted files and prior versions on its servers for weeks, which is the same
+fact that put recording and transcription in a staging folder — while a staged one
+is; and the **voiceprints** the meeting contributed stay in `.voices/`, because
+deleting a meeting is not deleting a person.
+
+`remove_meeting_dir` refuses a folder holding no `meta.json`, which is the
+definition of a meeting `list_meeting_dirs` already uses. It is also the one
+function in `paths.py` that logs instead of raising: a recursive delete's reason is
+worth keeping even where the caller only needs to know it did not happen.
+
+### The sidebar groups by project
+
+One flat reverse-chronological column does not survive a year of meetings. Rows
+are now in collapsible sections: one per project, ordered by its most recent
+meeting; then one per **orphaned** tag id, shown rather than hidden, because a tag
+vanishing quietly off three meetings is how you lose track of what a meeting was
+about; then *Untagged* last, which is the queue. A meeting carrying two tags is
+drawn under **both** — a project is a label, not a container.
+
+A search box joins the *Untagged only* toggle, matching title, id, date, status
+and project name. Which sections are folded is kept across a reload through
+`vscode.setState`; expanded *rows* deliberately are not, since refilling one costs
+an interpreter start.
+
+**None of this reached Python.** `list --json` already carried `tags` and the
+top-level id-to-name map, and ordering stays presentation: `referat list` is still
+oldest-first. The page also stays plain DOM over a JSON document — its only VS Code
+coupling is `acquireVsCodeApi()` and the `--vscode-*` theme variables, and the
+grouping did not deepen it.
+
+Every row gained a **Delete…** button, last and styled as danger, behind a modal
+carrying the CLI's two caveats. The modal is the one place the extension says
+something Python also says, because it is shown *before* the command runs and
+there is no output yet to quote; a refusal still comes back through `mutate`
+unedited.
+
+### Naming yourself was unguided
+
+Four speakers to name after one call, and one of them was the person doing the
+naming, with nothing on screen saying which cluster came out of their own
+microphone. `referat label --json` now carries `channel` per speaker and `owner`
+at document level; the sidebar's speaker card says *from your microphone* or
+*from the call*, and puts the owner's name first among the chips for a mic
+speaker. The interactive prompt says it too, so the two surfaces cannot describe
+the same speaker differently.
+
+A hint and never a name applied on its own — the microphone hears the whole room —
+and `owner` crosses the wire as a string rather than as a pre-sorted list, because
+what the owner is *called* is Python's to know and the order chips appear in is
+the page's to decide.
+
+### Documentation
+
+`CLAUDE.md`'s `ME` paragraph is inverted, its transcript sample shows a named
+owner beside an unattributed `ME` line, and its CLI list — which had lost `reflow`
+already — now carries `config`, `reflow`, `relabel` and `delete`. Both copies of
+the meetings `CLAUDE.md` were rewritten and, while there, **reconciled**: the live
+copy still had the pre-reflow sample block, which was the outstanding hand-merge
+from last session. They now diff clean. `config.example.toml` and the live
+`config.toml` no longer promise that `owner_name` renders your lines as `ME`.
+
+## 2026-09-01 — Transcripts rendered as one paragraph, which was the Markdown
+
+`transcript.md` put one utterance per line separated by a single newline, and in
+CommonMark a newline inside a block is a *soft* break — rendered as a space. So
+every transcript came out of the Markdown preview as one unbroken paragraph:
+2026-08-28_1152 is 258 utterances and rendered as a single wall of text. The
+preview was right and the file was wrong, which matters because the meetings
+folder opens Markdown rendered, so that is how these files are normally read.
+
+**`transcribe.ENTRY_SEPARATOR` is a blank line**, and `render_transcript` joins
+on it. Two trailing spaces are the other hard break and were rejected: they are
+two characters nobody can see, in a file plenty of editors would strip them out
+of on save. Making each entry a `- ` list item was rejected too — it reads well
+and breaks both of the line-anchored patterns in `label.py`, which is a real cost
+for a cosmetic gain.
+
+**`referat reflow [<meeting-id>]`** repairs the transcripts already written,
+because a renderer fix reaches only new ones and the existing transcripts have
+had their audio released — no `rerun` can ever regenerate them. `reflow` is the
+only way they become readable. It is a permanent verb rather than a throwaway
+migration, since it is also the repair for a transcript mangled by hand.
+
+**It is not an exception to the immutability rule.** `reflow_transcript` inserts
+whitespace *between* lines and rewrites none of them, which is the same
+narrowness `referat label` observes when it rewrites the label field. It is
+conservative about where: a blank line goes in only where the lines on **both**
+sides match the entry shape, so a hand-annotated transcript keeps that part
+exactly as it is instead of being reformatted on a guess. And it is idempotent —
+a second run inserts nothing and writes no file.
+
+`markdown.preview.breaks: true` in the meetings folder's `.vscode/settings.json`
+was the tempting alternative, since it would have fixed every existing transcript
+with no file touched at all. It was rejected on a fact about VS Code: folder
+settings apply only when that folder is in the workspace, and the sidebar opens
+transcripts from whichever window is running — usually the repository. It would
+have worked in one window and not the one actually used.
+
+**Verified before anything was written**: over all four real transcripts, the
+reflow is idempotent and the sequence of non-blank lines is identical before and
+after; `reflow_transcript(render_transcript(...))` is a no-op, which is what
+keeps the renderer and the repair from drifting; and `label.relabel_transcript`
+still renames a speaker in a reflowed transcript while leaving that same name
+untouched where it appears *in the speech*. Then run for real against a backup
+taken first: 257 and 318 blank lines inserted, byte growth exactly the inserted
+newlines, every non-blank line preserved, and a second run rewriting nothing.
+
+**The live meetings folder's `CLAUDE.md` still shows the old sample.**
+`paths.seed_tree` never overwrites a seeded file, so the repo template and the
+live copy have drifted by exactly this one code block and it has to be
+reconciled by hand — the standing cost of the seeding rule, and the half that
+gets forgotten.
+
+## 2026-09-01 — Build step 15: the extension becomes the primary UI
+
+The TreeView from step 11 is gone. `MeetingsProvider`, its three node classes,
+the composed `contextValue` string, the five `view/item/context` entries and
+`labelPanel.ts` all went with it, and what replaces them is one webview view:
+a row per meeting, newest first, carrying its title, duration, start time, the
+project tag chips step 14 made possible and a strip printing `meta.json`'s
+`status` field. A webview inside an extension is **not a web UI** — that rule is
+about Flask, FastAPI, localhost and a browser front end, and there is still none
+of it.
+
+**The Python half came first, because the extension may not reimplement
+anything.** Two additions and one split:
+
+**`referat promote <id> [--release-audio]`** is the off-ramp for a meeting the
+quality gate stranded in staging, and it is the sharp one. `promote_meeting`
+refuses to move a folder still holding WAVs, and that refusal *is* the invariant
+the staging split exists for: deleting a file inside a synced folder does not
+delete it, so a WAV that reached the meetings folder would be retained on
+Dropbox's servers for weeks after `audio_released` said it was gone. So accepting
+a gate-failed transcript cannot mean "promote with the audio". It means delete
+the recordings and then promote, and `--release-audio` is what says so at the
+prompt; without it `promote` refuses and names the files. The flag also writes
+`transcribed`, because `gate_failed` was always a statement about the *audio* not
+having been trusted enough to delete — the transcript was never in doubt, and a
+person overruling the gate leaves the meeting where a clean run would have.
+
+The bare form is not a courtesy: it moves a staged meeting whose audio has
+already gone, which is the retry for a `promote_meeting` that failed to move the
+folder.
+
+**`transcribe.release_audio`** is the deletion, split out of
+`release_audio_if_clean`, which keeps the whole gate and now only decides. Two
+things delete a meeting's WAVs — the gate, and a person overruling it — and
+`audio_released` has to mean the same thing whichever wrote it. The split also
+corrected a latent case: the old loop `stat`ed each file and read a missing one
+as a failure, which is wrong for a half-released meeting and right for nothing.
+
+**`referat status --json`** is the fourth JSON document, after `list`, `label`
+and `project list`, and exists for the same reason as the first three: the status
+bar had to read the tray's state, and the alternative was parsing prose written
+for a person. `elapsed` is `format_duration`'s own output rather than a number of
+seconds — had it been seconds, the bar would have formatted it in TypeScript,
+which is the duplication this extension is arranged to avoid. The price is that
+**the status bar does not tick**: it says what Python said when it was last
+asked. `stale` is the other field worth having, since `running` false with
+`stale` true is a tray that *died*, which is a different thing from no tray
+having run.
+
+**The sidebar.** `src/sidebar.ts` sets `webview.html` once and thereafter posts
+documents to it. Re-rendering on every refresh would have been simpler to write
+and wrong to use: transcription rewrites `meta.json` several times a meeting, and
+every one of those would collapse an expanded row and stop a snippet
+mid-playback. `media/sidebar.js` — step 11's `label.js`, grown — builds every
+node with `textContent` and never `innerHTML`, because a meeting title comes out
+of somebody's `notes.md` and a speaker's line out of a transcript. Speaker
+labeling folded into an expandable section of the row it belongs to, and fetches
+`label --json` only for the meeting somebody actually opened. The file watcher is
+untouched: both roots, `RelativePattern`, 300 ms debounce, all of it hard-won.
+
+The one thing that had to be learned about `WebviewView`: the snippet players
+need the meeting roots to be `localResourceRoots`, and the roots are only known
+once `list --json` has answered. So the provider re-assigns `webview.options`
+when the roots change and keeps the last listing, and a page that reloads is
+answered from memory rather than with another interpreter start.
+
+**Projects and tags.** `src/projects.ts` holds both flows as native QuickPicks —
+VS Code already has a multi-select with a filter box, and a webview copy would be
+a worse one. The tag picker is pre-checked with what the meeting carries and
+applies the difference as a `tag` and an `untag`; *Create project "…"* appears as
+you type, and choosing it is a **detour rather than an answer** — it creates the
+project, checks it and hands the picker back, so one accept cannot silently mean
+both "make this" and "and that is the whole tag list". An orphaned tag is offered
+too, checked and marked as one: it is the tag somebody actually needs to remove,
+and a picker built only from the known projects would have been the one place it
+could not be.
+
+**Attaching a project's Google Docs is the one bullet of step 15 that is not
+built**, and deliberately: `project link-doc`, `unlink-doc` and `sync` are absent
+from the parser until step 13, because a verb that exists and answers "not built
+yet" reads as a bug. There is nothing to shell out to. It is recorded in `TODO.md`
+and in `projects.ts`'s own docstring rather than left looking forgotten.
+
+**Every mutation goes through one function**, `cli.ts`'s `mutate`, which hands
+back the CLI's own complaint. That is what makes "the refusal you see is the
+sentence Python printed" a property of the code rather than a habit: there is no
+path by which the extension can invent a reason for refusing.
+
+*Generate notes* now streams — the last non-empty line into the progress toast,
+the whole stream into the channel — and on exit 0 calls `referat state <id>
+notes-written`, the transition no pipeline can make because `/cleanup` is
+forbidden from touching `meta.json`.
+
+**Verified**: the Python half end to end against a scratch meetings folder — a
+synthetic `gate_failed` meeting refused a bare `promote`, then lost both WAVs and
+moved on `--release-audio`, with `list --json` showing `staged`, `status` and
+`audio` all moving together, and a second run saying "already promoted"; and all
+three shapes of `status --json` (no file, stale, live). `npm run typecheck` and
+`npm run compile` are clean at 16.7 kB. Everything past that needs somebody to
+press F5, and those checks are listed under step 15 in `TODO.md`.
+
+## 2026-09-01 — Smart App Control took scipy, so the resampler is Referat's own
+
+A `referat rerun` from the extension died in `decode_wav`: SAC blocked scipy's
+`_odepack.pyd`, reached through `scipy.signal` -> `scipy.stats` ->
+`scipy.integrate` from the one line that brought the 48 kHz loopback down to
+16 kHz. Retried, it blocked `_stats_pythran`; retried again, `_sobol`; and then
+it stopped, the cloud reputation having arrived. **A block here is a window, not
+a verdict** — which is worse than a permanent failure, because it lands
+unpredictably and it landed on the only thing standing between a recording and
+its transcript. All 106 of scipy's `.pyd` files are unsigned and always will be.
+
+**`transcribe._resample` replaces `resample_poly`, in numpy and the stdlib.** A
+polyphase kernel — one windowed sinc per output phase, so 44.1 kHz costs no more
+than 48 kHz — gathered in 64k-sample blocks so the temporaries stay around 8 MB.
+It is deliberately contract-compatible with what it replaces: same output length,
+same zero-phase alignment, same zero padding past the ends, same Kaiser window at
+the same default width, so a `rerun` of an older meeting decodes to the samples
+it decoded the first time. Validated against `resample_poly` while it was still
+importable — **138 dB agreement on a real `system.wav`, identical -67.6 dBFS
+stopband, and the 60-second chunked path byte-identical to a 0.5-second one**, so
+the overlap-save seams are exact. It costs ~12 s per meeting-hour.
+
+**The rule this settles** is narrower than the "stub out anything that ships
+FFmpeg" that PyAV and torchcodec produced: *nothing on the path from a WAV to a
+transcript may depend on unsigned native code that is not already unavoidable*.
+numpy is unavoidable, so a numpy resampler adds no new way to fail; scipy on that
+path added a hundred. Diarization still reaches scipy through
+`pyannote -> lightning -> torchmetrics` and is **left alone**, because there is no
+seam to cut and because it already degrades to unnamed speakers — which is the
+degradation this rule exists to permit.
+
+**`DecodeError`**, a `TranscriptionError` subclass, is the second half. The
+original failure re-ran the entire meeting on the CPU and failed in exactly the
+same place minutes later, because `transcribe_meeting` reads any exception on the
+CUDA attempt as a GPU problem. Decoding touches no device and happens before a
+model is loaded, so a `DecodeError` now propagates instead — one traceback, the
+real cause at the bottom of it, and no wasted CPU pass.
+
+Verified by re-running 2026-08-28_1104 end to end with scipy artificially blocked
+in the manner SAC blocks it, and then for real: both channels transcribed on
+CUDA, no CPU fallback, `system.wav` resampled 48000 -> 16000. That rerun also put
+step 14's `gate_failed` on disk for the first time from the pipeline rather than
+from a test — the mic channel is 21 seconds of near-silence, the gate refused it,
+and `referat list` now says `gate_failed` where it used to say `transcribed` and
+leave you to work the rest out.
+
+## 2026-09-01 — Build step 14: projects become labels, and the lifecycle becomes a field
+
+Two things a meeting can now say about itself that it could not before: what work
+it belongs to, and where it is in its life. Both are single fields with a single
+owner, which was the whole point.
+
+**`referat/projects.py` and `<meetings_dir>/projects.json`.** One entry per
+project: an immutable `id` slugged from the name at creation, a display `name`, a
+list of Google Doc references for step 13, a `glossary` for step 12b and
+`/cleanup`, a `description` reserved for step 17, and `created_at`. `referat
+project add | rename | rm | list [--json]` maintains it, `referat tag` and
+`referat untag` write `meta.json`'s new `tags` array, and every one of them is a
+JSON read and a JSON write with no optional extra behind it. `link-doc`,
+`unlink-doc` and `sync` are **absent from the parser** rather than present and
+answering "not built yet" — they arrive with the digests.
+
+**`rm` orphans, and the orphans are visible.** Deleting a project touches no
+`meta.json`, no `notes.md` and no doc; the ids it leaves behind get a trailing
+`?` in `referat list`'s new TAGS column and their own counted line under `referat
+project list`. That column prints **ids rather than display names**, because the
+next thing typed after reading it is `referat untag <meeting> <id>` and a table
+you cannot copy out of would be worse than a slightly less readable one.
+Correspondingly, `tag` refuses an id no project answers to — a typo should not be
+able to manufacture an orphan — and `untag` refuses nothing, since an orphan is
+precisely the tag somebody needs to be able to remove.
+
+**`MeetingStatus` widened rather than joined by a second field:** `recording ->
+recorded -> transcribing -> gate_failed | transcribed -> notes_written ->
+synced`, with `failed` beside them for a transcription that raised. `gate_failed`
+is what earned it — it used to be a three-way inference (status `done`, the WAVs
+still on disk, the folder still in staging) that lived in no function and was
+re-derived by every reader — and it is now one line in `transcribe_meeting`. The
+legacy values map **purely** on load, `stopped` to `recorded` and `done` to
+`transcribed`, with no look at the filesystem: doing that inference in the loader
+would only have hidden it. The three meetings on this machine that are really
+gate-failed still say `transcribed` and will until their next `rerun`, which is
+cheaper than a migration and does not reintroduce the thing being deleted.
+
+**`referat state <id> notes-written`** is the one transition no pipeline can
+make, because `/cleanup` may not touch `meta.json`. It accepts that transition
+and no other — argparse's `choices` sees to the vocabulary, and the command
+checks that the meeting is `transcribed` first — and it regenerates the dashboard
+afterwards, since the notes it is recording are also where the title comes from.
+
+**A projects file that will not parse refuses to be written.** `ProjectsDB.load`
+never raises, because step 12b will call it from inside the transcription
+pipeline, so a malformed file loads as *no projects*. That is right for reading
+and catastrophic for writing: the next `project add` would replace a file full of
+projects with an empty list and say nothing. The object records `unreadable` and
+every mutating verb refuses on it. Writing that guard turned up the same hazard
+in `voices.py`, where `apply_name` would overwrite every voiceprint on the
+machine after a failed parse — recorded under "Surfaced later" rather than fixed
+here, because it is not this step's file.
+
+**Three shared things instead of new copies.** `meeting.resolve_meeting` returns
+a meeting or None *and the complaint*, so `tag`, `untag`, `state` and `referat
+label` share the lookup and disagree only about the `referat <command>:` prefix —
+`label` held the second copy and now calls it. The id-to-name map in `list
+--json` comes out of the same `ProjectsDB.name_map` that `project list --json`
+hands out, so one subprocess feeds the whole sidebar. And `projects.name_complaint`
+is deliberately a **sibling** of `voices.name_complaint` rather than a call to
+it: three of that function's four rules are about transcript labels and mean
+nothing for a thread of work, so reusing it would have imported four checks to
+get the use of none. What a project name needs is that it survives `slugify` and
+that it is not `untagged`.
+
+**`index.status_words`** prints the lifecycle with its underscores as spaces, so
+the rendered dashboard says "notes written". A formatting rule and not a map of
+value to sentence — a map would be a second vocabulary beside `MeetingStatus`,
+and the first state nobody added a row for would render as a blank. The terminal
+table keeps the underscores, because its columns are space-separated.
+
+The extension's `MeetingJson` gained `tags` and a real `MeetingStatus` union,
+`ListJson` gained the `projects` map, and the doomed TreeView learned to draw
+`gate_failed` as a warning rather than as a finished meeting. Nothing else in it
+moved; step 15 replaces it. `templates/meetings/CLAUDE.md` was updated for the
+new vocabulary and for `tags` — **the live copy in the meetings folder is seeded
+once and never overwritten, so it needs the same edit by hand.**
+
 ## 2026-09-01 — Projects become labels, state becomes a field: planning only, no code
 
 Four decisions arrived together and none of them fit the plan as written. A

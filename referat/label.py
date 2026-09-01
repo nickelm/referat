@@ -40,7 +40,7 @@ from pathlib import Path
 
 from referat import index, paths, voices
 from referat.config import Config
-from referat.meeting import Meeting, load_meetings
+from referat.meeting import Meeting, load_meetings, resolve_meeting
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +118,20 @@ def apply_name(config: Config, meeting: Meeting, speaker: str, name: str) -> boo
     meeting.save()
 
     changed = relabel_transcript(meeting.transcript_path, {speaker: name})
+    if not changed:
+        # `meta.json` now names somebody the Markdown does not, which is the one
+        # way these two can drift apart while every write reported success:
+        # `relabel_transcript` returns 0 both for "no such label in the file" and
+        # for a transcript it could not read. Neither is fatal — the name is
+        # filed, and `referat relabel` can put it in the file later — but a
+        # silent 0 here is how a reader ends up trusting the wrong one.
+        log.warning(
+            "%s: %s is %s in meta.json, but no line of %s carried that label",
+            meeting.id,
+            speaker,
+            name,
+            meeting.transcript_path.name,
+        )
     removed = voices.drop_snippets(meeting, speaker)
     log.info(
         "%s: %s is %s (%d line(s) relabeled, %d snippet(s) deleted)",
@@ -142,6 +156,23 @@ def forget(config: Config, name: str) -> tuple[int, int]:
     This is what `speaker_names` is kept per meeting for. The Markdown alone says
     `Anna` and cannot say which `SPEAKER_NN` she used to be, and the numbers are
     per meeting — so without that mapping there would be no way back.
+
+    **One name can be several labels in one meeting**, and the revert has to be
+    deliberate about it. Diarization splits a person across two clusters often
+    enough that `TODO.md` has an item about it, and the person naming them puts
+    the same name on both on purpose — `2026-09-01_2102` has the owner as
+    `SPEAKER_01` and `SPEAKER_02`. The transcript then says `Anna` on lines that
+    came from either, and nothing in it records which, so every one of them has to
+    revert to a single number. The **lowest** label wins, which is at least stable
+    across runs; the alternative was whichever one `speaker_names` happened to
+    iterate last, which is what this used to do.
+
+    That merge is honest rather than merely convenient: the two labels share a
+    name because a person said they are the same voice, so collapsing them asserts
+    nothing nobody asserted already. What it costs is the other label, which keeps
+    its embedding in `meta.json` but now has no lines and no snippets, so
+    `referat label` can offer it nothing to recognise. Deleting a person is
+    already one-way — see the `--forget` item under "Surfaced later".
     """
     db = voices.VoicesDB.load(config)
     deleted = db.forget(name)
@@ -152,7 +183,16 @@ def forget(config: Config, name: str) -> tuple[int, int]:
         back = {label: n for label, n in meeting.speaker_names.items() if n == name}
         if not back:
             continue
-        relabel_transcript(meeting.transcript_path, {n: label for label, n in back.items()})
+        if len(back) > 1:
+            log.info(
+                "%s: %s was %s; all of them revert to %s, which is where those "
+                "lines are indistinguishable",
+                meeting.id,
+                name,
+                ", ".join(sorted(back)),
+                min(back),
+            )
+        relabel_transcript(meeting.transcript_path, {name: min(back)})
         for label in back:
             meeting.speaker_names.pop(label, None)
             # The per-channel record names them too, in `name` and inside the
@@ -250,7 +290,14 @@ def _label_speaker(config: Config, meeting: Meeting, speaker: str) -> str:
     clips = voices.snippet_paths(meeting, speaker)
     # Plain ASCII on purpose: this prints to a Windows console whose code page
     # is not UTF-8, and a dash is not worth a UnicodeEncodeError.
-    print(f"\n{meeting.id}  {speaker}")
+    #
+    # The channel is said here for the same reason `label --json` carries it, and
+    # said in both places so the terminal and the sidebar cannot describe the same
+    # speaker differently: which file a voice arrived in is the strongest hint
+    # available about who they are, and it was not being shown at all.
+    channel = voices.speaker_channel(meeting, speaker)
+    where = {"mic": "  (your microphone)", "system": "  (the call)"}.get(channel, "")
+    print(f"\n{meeting.id}  {speaker}{where}")
     if clips:
         play(clips)
     else:
@@ -341,14 +388,14 @@ def run(config: Config, meeting_id: str | None) -> int:
 
 
 def _resolve_meeting(config: Config, meeting_id: str) -> Meeting | None:
-    """One meeting by id, complaining to stderr the way :func:`run` does."""
-    folder = paths.find_meeting_dir(config.meeting_roots(), meeting_id)
-    if folder is None:
-        print(f"referat label: no meeting {meeting_id}", file=sys.stderr)
-        return None
-    meeting = Meeting.load(folder)
+    """One meeting by id, complaining to stderr the way :func:`run` does.
+
+    The lookup itself is :func:`referat.meeting.resolve_meeting`, shared with the
+    CLI's own commands that take an id — only the `referat label:` prefix is ours.
+    """
+    meeting, why = resolve_meeting(config, meeting_id)
     if meeting is None:
-        print(f"referat label: cannot read {folder / paths.META_JSON}", file=sys.stderr)
+        print(f"referat label: {why}", file=sys.stderr)
     return meeting
 
 
@@ -360,6 +407,18 @@ def run_json(config: Config, meeting_id: str) -> int:
     `asWebviewUri`. `has_embedding` is the one case naming cannot repair — a
     speaker whose embedding never made it into `meta.json` has nothing to file,
     so the webview must show that rather than offer a field that will fail.
+
+    `channel` and `owner` are here to answer one question the panel could not:
+    *is this me?* Naming four speakers after one Teams call, one of them was the
+    person doing the naming, and nothing on screen said that cluster had come out
+    of their own microphone. The page can now say so and lead with the owner's
+    name — a hint, never a name applied on its own, since the mic hears the whole
+    room in a meeting held in person.
+
+    `owner` crosses the wire as a string rather than as a pre-sorted `known_names`
+    because what the owner is *called* is Python's to know and the order chips
+    appear in is the page's to decide. It is `""` when `[speakers].owner_name` is
+    unset, which the page has to render as no chip rather than an empty one.
     """
     meeting = _resolve_meeting(config, meeting_id)
     if meeting is None:
@@ -369,9 +428,11 @@ def run_json(config: Config, meeting_id: str) -> int:
         "meeting": meeting.id,
         "dir": str(meeting.dir),
         "known_names": voices.VoicesDB.load(config).names(),
+        "owner": config.speakers.owner_name.strip(),
         "speakers": [
             {
                 "speaker": speaker,
+                "channel": voices.speaker_channel(meeting, speaker),
                 "snippets": [str(p) for p in voices.snippet_paths(meeting, speaker)],
                 "lines": sample_lines(meeting, speaker),
                 "has_embedding": voices.stored_embedding(meeting, speaker) is not None,

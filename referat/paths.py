@@ -9,11 +9,18 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import shutil
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
+
+log = logging.getLogger(__name__)
+"""Only :func:`remove_meeting_dir` uses it. Everything else here raises and lets
+the caller decide, which is the right shape for a write that failed; a recursive
+delete is the one operation whose *reason* is worth keeping even when the caller
+only needs to know that it did not happen."""
 
 # --- Repository and packaged files -----------------------------------------
 
@@ -94,6 +101,13 @@ INDEX_MD = "INDEX.md"
 
 A different file from the repository's `INDEX.md`: this one is generated and never
 hand-edited."""
+
+PROJECTS_JSON = "projects.json"
+"""The project list, in the meetings folder beside `.voices/` and the generated
+`INDEX.md`, so the folder stays self-describing.
+
+Owned by :mod:`referat.projects` and machine-written; resolve it through
+:func:`referat.projects.projects_path` rather than joining this on by hand."""
 
 SPEAKERS_DIR = "speakers"
 """Per-meeting folder of WAV snippets, a few per speaker `referat label` has yet
@@ -176,6 +190,31 @@ def move_meeting_dir(folder: Path, destination_parent: Path) -> Path:
         target = destination_parent / f"{folder.name}_{n}"
         n += 1
     return Path(shutil.move(str(folder), str(target)))
+
+
+def remove_meeting_dir(folder: Path) -> bool:
+    """Delete a meeting folder and everything under it. True when it is gone.
+
+    Guarded on the folder holding a `meta.json`, which is what
+    :func:`list_meeting_dirs` already treats as the definition of a meeting. That
+    is a cheap refusal and the only one worth having: a recursive delete pointed
+    at a mistyped path is a much worse afternoon than a refused one, and every
+    caller reaches this through :func:`referat.meeting.resolve_meeting`, which
+    found the folder by that same file.
+
+    Never raises. A folder that will not delete is a complaint the caller prints,
+    not a traceback out of the middle of one - the meeting is still there and
+    still readable, which is the state the caller was already in.
+    """
+    if not (folder / META_JSON).exists():
+        log.warning("refusing to delete %s: no %s in it", folder, META_JSON)
+        return False
+    try:
+        shutil.rmtree(folder)
+    except OSError:
+        log.warning("cannot delete %s", folder, exc_info=True)
+        return False
+    return True
 
 
 def voices_dir(meetings_dir: Path, override: Path | None = None) -> Path:

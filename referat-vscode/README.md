@@ -1,36 +1,66 @@
 # Referat for VS Code
 
-The browsing layer for [Referat](../README.md): a tree of meetings, the four
-things you do to one, and a panel for putting names on the speakers
-identification could not place.
+The primary UI for [Referat](../README.md): a sidebar of meetings, everything you
+do to one, and the projects they are tagged with.
 
 This and the tray icon are the only graphical surfaces Referat has, and the only
-ones it will ever have. There is no web UI in this project.
+ones it will ever have. **There is no web UI in this project** — that rule is
+about Flask, FastAPI, a localhost server and a browser front end. The sidebar is
+a VS Code webview, which is part of this extension; there is no server anywhere.
 
 ## What it does
 
-- **Meetings tree** — one node per meeting, newest first, with its title,
-  duration and status. A meeting still in staging says so; a meeting with
-  speakers waiting for a name has an **Unknown speakers** child.
-- **Open transcript** / **Open notes** — opens them rendered.
+- **Meetings sidebar** — one row per meeting, newest first: title, duration,
+  when it started, the project tags it carries as chips, and a strip showing
+  `meta.json`'s `status` field. Nothing here works a meeting's state out from
+  which files exist; the pipeline writes that field and this prints it.
+- **Untagged only** — a toggle that leaves the meetings with no tags. That view
+  *is* the queue for tagging, the way the speakers section is the queue for
+  naming.
+- **Transcript** / **Notes** — opens them rendered.
 - **Generate notes** — runs `/cleanup <meeting-id>` through the `claude` binary
-  in the meetings folder, then opens the `notes.md` it wrote.
+  in the meetings folder, streams what it says into the progress toast, then
+  records `referat state <id> notes-written` and opens the `notes.md` it wrote.
 - **Re-transcribe** — `referat rerun <meeting-id>` in a terminal, because it
   takes minutes and the log is worth watching.
-- **Name speakers** — plays a speaker's snippets and takes a name.
+- **Tags…** — a multi-select over the projects, pre-checked with what the
+  meeting carries, with *Create project "…"* as you type. An id no project
+  answers to is shown as an orphan chip and can be unchecked like any other.
+- **Speakers (n)** — expands in place: a player per snippet, the known names as
+  clickable chips, and a field. It drives `referat label --speaker --name`.
+- **Accept & delete audio** — the off-ramp for a meeting stuck in staging
+  because the quality gate refused its transcript. It deletes `mic.wav` and
+  `system.wav` for good and then promotes the meeting, behind a modal that says
+  exactly that. It cannot promote *with* the audio: no WAV may ever reach the
+  meetings folder, because deleting a file inside a synced folder does not
+  delete it.
+- **Projects** (view title) — create, rename and delete projects. Deleting one
+  leaves its ids on the meetings carrying them, visibly, as orphans.
+- **A status bar item** — what the tray is doing, from `referat status --json`.
+  It does not tick: the elapsed time is `format_duration`'s output, refreshed
+  when the tray rewrites its status file and every 30 seconds otherwise, because
+  a tray that was killed rewrites nothing. It appears once the sidebar has been
+  opened in a window — no window that never opens Referat starts an interpreter
+  to discover that nothing is recording.
+
+Attaching and detaching a project's Google Docs is **not here yet**: `referat
+project link-doc`, `unlink-doc` and `sync` arrive with the digests at build
+step 13, and this extension has nothing to shell out to until they exist.
 
 ## What it deliberately does not do
 
 **It reimplements nothing.** Every meeting it shows comes from
-`referat list --json`, and every name it applies goes through
-`referat label <id> --speaker <s> --name <n>`, both run through the venv's own
-interpreter (`.venv\Scripts\python.exe -m referat.cli`, working directory at the
+`referat list --json`, and every change it makes is a `referat` verb: `label
+--speaker --name`, `tag`, `untag`, `project add|rename|rm`, `state` and
+`promote --release-audio`. All of them run through the venv's own interpreter
+(`.venv\Scripts\python.exe -m referat.cli`, working directory at the
 repository). Not `uv run` — Smart App Control blocks `uv.exe` on this machine —
 and not `referat.exe`, which Dropbox has deleted twice. The two meeting roots, the
-duration format, the title rule, the audio state, the reserved-name rule, the
-voiceprint database and the transcript relabeling all stay in Python, where they
-already exist exactly once. A copy here would be one more thing that can
-disagree with the recorder.
+duration format, the title rule, the audio state, the lifecycle vocabulary, the
+project ids, the reserved-name rule, the voiceprint database and the transcript
+relabeling all stay in Python, where they already exist exactly once. A copy here
+would be one more thing that can disagree with the recorder — and every refusal
+you see in this sidebar is the sentence the CLI would have printed.
 
 **It never handles credentials.** *Generate notes* spawns the official `claude`
 binary as a child process and that binary owns all authentication, under your

@@ -53,9 +53,10 @@ def merge(transcripts: list[ChannelTranscript]) -> list[tuple[float, str, str]]:
     determined by the input rather than by dict or list order.
 
     A segment's own `speaker` is used when diarization gave it one — a
-    `SPEAKER_NN`, a name, or `ME` where the owner's voiceprint matched — and the
-    channel's label otherwise: `ME` for a microphone line nobody could attribute,
-    `REMOTE` for a loopback one.
+    `SPEAKER_NN`, or a name where a voiceprint matched, the owner's included — and
+    the channel's label otherwise: `ME` for a microphone line nobody could
+    attribute, `REMOTE` for a loopback one. Those two labels say only which file
+    the sound came out of; a person is always a name or a number.
     """
     entries = [
         (

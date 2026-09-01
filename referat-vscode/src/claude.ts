@@ -140,11 +140,22 @@ export async function generateNotes(
       title: `Writing notes for ${meetingId}\u2026`,
       cancellable: true,
     },
-    (_progress, token) =>
+    (progress, token) =>
       new Promise((resolve, reject) => {
         const child = spawn(binary, args, { cwd: meetingsDir, windowsHide: true });
         let stderr = "";
-        child.stdout.on("data", (chunk) => output().append(String(chunk)));
+        child.stdout.on("data", (chunk) => {
+          const text = String(chunk);
+          output().append(text);
+          // The last non-empty line into the toast, the whole stream into the
+          // channel. A cleanup pass takes a minute or two and says what it is
+          // doing while it works, so a progress toast that only says "writing
+          // notes" is throwing away the one signal there is.
+          const line = lastNonEmptyLine(text);
+          if (line) {
+            progress.report({ message: truncate(line) });
+          }
+        });
         child.stderr.on("data", (chunk) => {
           stderr += chunk;
           output().append(String(chunk));
@@ -154,4 +165,14 @@ export async function generateNotes(
         child.on("close", (code) => resolve({ code: code ?? 1, stderr }));
       }),
   );
+}
+
+function lastNonEmptyLine(text: string): string {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  return lines.length ? lines[lines.length - 1]!.trim() : "";
+}
+
+/** A progress toast is one line wide; a paragraph in it just pushes itself off. */
+function truncate(line: string): string {
+  return line.length > 90 ? `${line.slice(0, 89)}\u2026` : line;
 }

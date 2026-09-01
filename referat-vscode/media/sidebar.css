@@ -1,0 +1,403 @@
+/* Everything here is a VS Code theme variable, so the sidebar follows whatever
+   theme the editor is in rather than inventing its own colours. Inherited
+   wholesale from the step 11 labeling panel, which is now the speakers section
+   of a meeting row. */
+body {
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  padding: 0 0 2rem;
+}
+
+.muted {
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.5;
+  margin: 0.35rem 0;
+  padding: 0 0.8rem;
+}
+
+/* --- The toolbar --------------------------------------------------------- */
+
+.toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.4rem 0.8rem;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  position: sticky;
+  top: 0;
+  background: var(--vscode-sideBar-background);
+  z-index: 1;
+}
+
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.25rem 0.4rem;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.search:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* --- One project's group ------------------------------------------------- */
+
+/* Grouping by project is presentation: a project is a label rather than a
+   container, so a meeting with two tags is drawn under both and the listing the
+   host posted is not rearranged. */
+
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.35rem 0.8rem;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-foreground);
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.group-head:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.group-chevron {
+  color: var(--vscode-descriptionForeground);
+  width: 0.8em;
+}
+
+.group-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-count {
+  margin-left: auto;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+/* An id no project answers to, left behind by a `project rm`. Shown, never
+   hidden: a tag vanishing quietly off three meetings is how you lose track of
+   what a meeting was about. */
+.group-orphan .group-name {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+}
+
+.count {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+/* --- One meeting --------------------------------------------------------- */
+
+.meeting {
+  border-bottom: 1px solid var(--vscode-panel-border);
+  padding: 0.55rem 0.8rem 0.6rem;
+}
+
+.meeting-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.meeting-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meeting-when {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+/* The lifecycle strip: step 14's `status` field, rendered and never inferred.
+   One rule per value, and a value with no rule still shows its own text — a
+   state nobody styled must not become invisible. */
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.state {
+  border-radius: 3px;
+  padding: 0.05rem 0.4rem;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  font-family: var(--vscode-editor-font-family);
+}
+
+.state-recording,
+.state-failed {
+  background: var(--vscode-inputValidation-errorBackground);
+  color: var(--vscode-errorForeground);
+}
+
+.state-gate_failed {
+  background: var(--vscode-inputValidation-warningBackground);
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.state-synced,
+.state-notes_written {
+  background: var(--vscode-testing-iconPassed, var(--vscode-badge-background));
+  color: var(--vscode-badge-foreground);
+}
+
+/* --- Tag chips ----------------------------------------------------------- */
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.35rem;
+}
+
+.tag {
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  border-radius: 10px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.85em;
+}
+
+/* An id no project answers to. Rendered rather than hidden: a tag quietly
+   vanishing off three meetings is how you lose track of what a meeting was
+   about. */
+.tag-orphan {
+  background: transparent;
+  color: var(--vscode-editorWarning-foreground);
+  border: 1px dashed var(--vscode-editorWarning-foreground);
+}
+
+.tag-none {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  font-style: italic;
+}
+
+/* --- The action strip ---------------------------------------------------- */
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.45rem;
+}
+
+.action {
+  background: transparent;
+  color: var(--vscode-textLink-foreground);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+  font-size: 0.9em;
+  font-family: inherit;
+}
+
+.action:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The gate-failed off-ramp. It deletes recordings for good, so it does not look
+   like the buttons that open a file. */
+.action-danger {
+  color: var(--vscode-editorWarning-foreground);
+  border-color: var(--vscode-editorWarning-foreground);
+}
+
+/* --- The speakers section ------------------------------------------------ */
+
+.speakers {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--vscode-panel-border);
+  padding-top: 0.5rem;
+}
+
+.speaker {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  padding: 0.6rem 0.7rem;
+  margin-top: 0.5rem;
+}
+
+.speaker h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+  font-family: var(--vscode-editor-font-family);
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+/* Which channel a voice arrived on. A hint about who they are, so it reads as
+   an aside beside the label rather than as part of it. */
+.speaker-channel {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-font-family);
+  font-size: 0.85rem;
+  font-weight: normal;
+}
+
+/* The owner, offered first for a microphone speaker. */
+.chip-owner {
+  border-color: var(--vscode-focusBorder);
+}
+
+.clips {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.clip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.clip-name {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8em;
+  color: var(--vscode-descriptionForeground);
+}
+
+audio {
+  height: 1.8rem;
+  width: 100%;
+}
+
+.lines {
+  margin: 0.3rem 0 0.7rem;
+  padding-left: 1.1rem;
+  line-height: 1.5;
+}
+
+.lines li {
+  color: var(--vscode-descriptionForeground);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.4rem;
+}
+
+/* Clicking a known name is what stops a typo creating a second person. The
+   terminal asks "Did you mean Anna?" because it has no list to click. */
+.chip {
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  border: none;
+  border-radius: 10px;
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+.chip:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.row {
+  display: flex;
+  gap: 0.35rem;
+}
+
+input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  padding: 0.25rem 0.4rem;
+  border-radius: 2px;
+  font-family: inherit;
+}
+
+input[type="text"]:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+button[type="submit"] {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  padding: 0.25rem 0.7rem;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button[type="submit"]:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button[type="submit"]:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.error {
+  color: var(--vscode-errorForeground);
+  margin: 0.4rem 0 0;
+  font-size: 0.9em;
+}
+
+.warning {
+  color: var(--vscode-editorWarning-foreground);
+  font-size: 0.9em;
+  line-height: 1.5;
+  margin: 0.3rem 0;
+}
+
+code {
+  font-family: var(--vscode-editor-font-family);
+}

@@ -2,6 +2,268 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-01 — Projects become labels, state becomes a field: planning only, no code
+
+Four decisions arrived together and none of them fit the plan as written. A
+meeting belongs to *zero or more* projects rather than one; a project carries
+*zero or more* Google Docs rather than one; the extension's surface is a sidebar
+webview rather than a TreeView; and a meeting's lifecycle is an explicit field
+rather than something every reader works out for itself. Steps 14 through 17 were
+written for them, steps 11, 12, 12b and 13 were amended around them, and no code
+was touched.
+
+**The lifecycle field was the decision with something already underneath it.**
+`meta.json` has had a `status` key since step 1 — `recording | stopped |
+transcribing | done | failed` — and the obvious move was to leave it alone and add
+a UI-facing `state` beside it. That would have been the fourth time this project
+put the same fact in two places, after `voices_dir`, `format_duration` and the
+meetings-folder setting the extension does not have. `MeetingStatus` is widened
+instead: `recorded`, `gate_failed`, `transcribed`, `notes_written`, `synced`, with
+`stopped` and `done` mapping onto the new names on load.
+
+**`gate_failed` is the one that earns the change.** A meeting whose transcript
+failed the quality gate keeps its audio, stays in staging, and is written to disk
+as `status: done` — indistinguishable, in the file, from a meeting that finished
+cleanly. Everything that wants to tell them apart has to ask three questions at
+once: is the status `done`, are the WAVs still there, is the folder still in
+`%LOCALAPPDATA%`. That inference lives in no function; every reader does it again,
+and the sidebar was about to become the fourth. Writing the value down costs one
+enum and one line in `transcribe.py`.
+
+**Which then broke the off-ramp, in a useful way.** The sidebar is supposed to
+give a gate-failed meeting a visible way out of staging, and "Surfaced later" has
+carried an open item since step 8 wondering whether that wants a `referat rerun
+--accept` that "promotes it with the audio". It cannot. `promote_meeting` refuses
+to move a folder that still holds WAVs, and that refusal is the entire reason the
+staging split exists — deleting a file inside a synced folder does not delete it,
+so a WAV that reaches Dropbox is retained on somebody else's servers for weeks
+after Referat has reported it gone. So *accept* has to mean **delete the audio and
+then promote**, irreversibly, behind a modal that says so. The old item was
+phrased as a convenience; it is a destructive action, and it was worth finding
+that out while writing prose rather than while writing the button.
+
+**`notes.md` cannot advance its own meeting's state.** The `/cleanup` prompt's
+hard rule is that it never modifies `transcript.md`, `meta.json` or any `.wav`,
+and `referat index`'s title helper reads the H1 of `notes.md` precisely so the
+cleanup layer never has to edit the raw record. `notes_written` is therefore the
+one transition no pipeline can make. It gets a CLI verb — `referat state <id>
+notes-written` — called by whoever spawned the pass, and that verb accepts that
+transition and no other, because a verb that let a caller claim `synced` would
+turn the field back into a comment. The alternative was to let one reconciling
+sweep infer the state from `notes.md` existing, which is exactly the inference
+being removed, and would have removed it from six readers by moving it into one.
+
+**`projects.toml` becomes `projects.json`, and the reasoning it was chosen for
+goes with it.** Step 13 picked TOML and then spent a paragraph explaining why the
+file could not live in `config.py` — that `config.py` promises to parse TOML and
+never write it back, so hand edits and comments survive, and a machine-written
+TOML file would need a header comment warning that comments do not survive.
+That is a tension managed rather than resolved. JSON has none of it:
+`paths.write_json_atomic` already exists, the file is rewritten whole without
+apology, and nobody expects to find comments in it. `referat/projects.py` still
+owns it and still is not `config.py`.
+
+**Ids, not names, and a rename that touches one file.** A project's id is a slug
+fixed at creation; `rename` changes the display name alone. `meta.json` stores
+ids in a `tags` array, so renaming a project leaves every meeting record, every
+transcript and every doc anchor untouched. Deleting one is the interesting case:
+it orphans its tags **visibly**, and cascade-deletes no meeting, no note and no
+doc. A tag quietly disappearing off three meetings is how you lose track of what a
+meeting was about, and an orphan chip is a smaller problem than that.
+
+**Fan-out made `digest` a map.** Step 13 was going to record one `{gdoc_id,
+tab_id, notes_sha256, written_at}` per meeting, which was right when a meeting
+reached one doc. A meeting tagged with two projects, each linked to two docs, can
+be current in one and stale in another, and one flat object cannot say so. It is
+keyed by `gdoc_id` now, which is also what makes `synced` computable: every doc of
+every tag current, and back to `notes_written` the moment a `notes.md` sha stops
+matching. None of the Docs mechanics moved — the text anchors, the reverse
+document order, the UTF-16 offsets, the `tabId` on every request are all as they
+were.
+
+**The tray toast is the one item planned knowing it may not work.** "A toast
+asking Project(s)?, with recent projects, still reachable in Action Center" is
+not something `pystray` can raise: `icon.notify` is a buttonless balloon that
+does not persist. It needs a real WinRT notification, which is a new base
+dependency taken deliberately against the minimal-dependencies rule, an AUMID
+that step 9's autostart shortcut may or may not already carry, and — the part
+most likely to fail here — an activation path back into a running tray, or a
+registered COM server to reach a toast that was missed. So the fallback is
+planned alongside it rather than after it: if activation does not hold up, the
+toast degrades to a plain notification and the *Tag recent…* submenu carries the
+whole feature. Either way a notification that fails is a log line and never
+touches the stop path.
+
+**Step 11's Projects section is superseded and kept.** Seven boxes describing
+project nodes, an *Assign to project* QuickPick and an "Unassigned" node, all of
+it TreeView, none of it built. It stays in the file under a note saying what is
+now false about it, the way this file keeps everything else it got wrong.
+`referat project assign` and its remembered default go the same way — replaced by
+`referat tag` / `untag` over a list of ids, with the tray's untagged-on-timeout
+standing in for the default. The rule inside that sub-section is the one part that
+survives untouched and gets louder: **nothing is inferred from a transcript.**
+Step 17's notes-splitting experiment is where that will be most tempting, and it
+does not bend there either — the human's tags are an input to the split, never an
+output of it, and its failure mode is over-inclusive notes, which is the baseline.
+
+**Numbers 1 to 13 did not move.** `SETUP.md`'s sections are numbered to match,
+CHANGELOG entries are titled by step, and `TODO.md` cross-references by number, so
+renumbering would have quietly falsified all three at once. New work is appended
+as 14 to 17 and existing steps amended in place — the same reason the hotword step
+earlier today became 12b rather than a renumbering. Step 12 keeps its number and
+gains one sentence saying it now runs *after* step 15, because packaging a
+TreeView that step 15 deletes is work done twice.
+
+**Seven open questions were written down rather than answered**, which is the
+part of this session most likely to pay for itself: where step 17's split notes
+live given the folder contract says `notes.md`; whether orphan tags are ever
+pruned; whether `synced` really should regress every time somebody fixes a typo
+in a note; whether `claude -p` emits incremental stdout without
+`--output-format stream-json`; whether step 9's shortcut carries an
+`AppUserModelID`; and whether a toast activation can reach a running `pystray`
+loop at all. The last two are a spike, and step 16 should not start before it.
+
+## 2026-09-01 — Where a misheard name gets fixed: planning only, no code
+
+Reading the first real transcript raised a question the documents had only half
+an answer to. `CLAUDE.md` said the transcript's *speech* is immutable, but it
+said so as a detail of the meeting folder contract, and nothing anywhere said
+where a correction is supposed to go instead. This session settles that and
+writes it down. **No code, no config and no template changed** — every item
+below is a decision recorded in `CLAUDE.md` and `TODO.md`.
+
+**The immutability rule is now a rule.** It moved into Conventions, where it
+reads *the transcript is immutable; corrections live downstream* — a misheard
+name, a mangled acronym, a turn split in the wrong place, all of them corrected
+in `notes.md` and the digest and never at the source, because a transcript
+somebody has fixed is no longer evidence of what was said and there is nothing
+left to check the correction against. The paragraph in the folder contract was
+rewritten down to what is actually contract detail — the speaker label is the
+one editable field — rather than left restating the rule in a second place.
+
+**Corrections happen in the notes, and near misses get flagged.** The meetings
+folder's `CLAUDE.md` gains a *Known people and terms* section, and `/cleanup`
+normalizes against it: an exact match is rewritten silently, a near miss is
+corrected **and marked** — `Elmqvist (assumed transcription error: "Elmquist")`
+— and a word matching neither list is left as transcribed. The flag is the whole
+point. A silently applied guess about a word is the same failure as putting a
+name on a `SPEAKER_NN`: it reads exactly as authoritative when it is wrong, and
+this project already has a rule about that. Both files are Markdown in the
+meetings folder, so this is the half that needs no code, and it is sequenced
+first as **step 10's new subsection**.
+
+**One global hotword list, as new step 12b.** Whisper hears a name right when it
+has been told the name exists, so `referat/hotwords.py` will merge every name in
+the voices database, every project's `glossary` and a manual
+`[transcription].hotword_extras` into one list passed to
+`model.transcribe(hotwords=...)`. Two things are load-bearing and both were
+decided rather than assumed. The merge is called from `transcribe_channel` and
+not from `cli.py` — the tray never goes through the CLI, and a list that applied
+only to `referat rerun` would make a rerun produce a different transcript from
+the recording it came from; *merge logic lives in the CLI* means in Python,
+never re-derived in TypeScript, the same rule as `list --json`. And the list is
+capped at Whisper's 224-token prompt window in a stated order — extras, names,
+glossaries — with the drop logged, because a cap nobody can see becomes a bug
+report about one specific name that is never heard right. A `label --forget`
+purges a name from the list for free, given the merge reads the database live;
+that is written down as a property to verify rather than to assume.
+
+**Three alternatives were rejected and are recorded as rejected**, so they are
+not re-proposed: per-project hotwords at transcription time (a meeting is
+assigned to a project *after* it is transcribed, so there is nothing to select
+on); prompting for a project between stop and transcribe (it would manufacture
+that information, at the cost of putting a step that waits for a human being
+into the path from stop to transcript — against *recording robustness beats
+everything else*, with the tray holding the only copy of the audio while it
+waits); and retaining audio so a meeting could be re-run against a glossary
+learned later (the WAVs go as soon as the transcript is clean, and that is the
+privacy posture, not a disk-space optimization).
+
+**A project's `glossary` lands with step 13, not before**, and is used twice —
+merged into the hotword list, which acts before anything is assigned, and handed
+to `/cleanup` once a meeting *is* assigned. It is the one key in `projects.toml`
+that something outside step 13 reads, so it has to work for a project that is
+configured and unlinked.
+
+**Deferred and deliberately unscheduled:** `referat glossary prune --dry-run`,
+which would list terms unseen in any transcript for a long period. The cap may
+never bite, and pruning a list that quietly changes how audio is transcribed is
+not obviously a thing to automate. Also noted: there are now two lists of names,
+the voices database and the `CLAUDE.md` table, overlapping on purpose — one says
+who a voice is, the other how a name is spelled — and only the database feeds
+hotwords, because a machine-read list does not belong inside a hand-written
+Markdown document.
+
+## 2026-09-01 — The first real meeting, two names in the database, and a wall that did arrive
+
+The tray recorded a 14-minute in-person meeting between two people through one
+Jabra, and the whole pipeline worked without being touched: 319 segments,
+`clean=True`, then 337 diarized turns resolving to exactly **2 speakers** with
+an embedding each, then 106 MB of audio released and the meeting moved into
+Dropbox. Nothing failed. Three things came out of reading it afterwards.
+
+**The speakers were nearly filed backwards.** They came out unnamed for the
+ordinary reason — an empty voices database has nobody to match against — and the
+first reading of who was who had `SPEAKER_01` as the owner. The transcript says
+otherwise: SPEAKER_01 announces a draft and a paper count, SPEAKER_02
+recommends restructuring the research questions. Naming them the other way round
+would have filed the wrong centroid under the owner's name **permanently**, and
+mislabeled every later meeting from it. This is what "a wrong name is worse than
+no name" looks like from the outside: the guard rails in `voices.py` are all
+about the machine's confidence and none of them can catch a human being
+confidently wrong. Checking the content against the labels before running
+`referat label` is the only defence, and `--speaker/--name` — which skips the
+prompt, and therefore skips the snippet playback that would have settled it in
+ten seconds — is the flag that makes it easy to skip.
+
+Both are now named, which puts the first two voiceprints in the database.
+
+**`config.toml` had no `[speakers]` section at all.** It was copied from
+`config.example.toml` before that section existed and never caught up, so
+`owner_name` was `""` — and with it empty, `voices.bootstrap_owner` and
+`transcribe._owner_to_me` are both no-ops. Identification had been running all
+along; the `ME` label simply could not ever be produced. Nothing reported this,
+because an empty `owner_name` is also the legitimate not-yet-configured state.
+The section is now present in full, comments copied across so the two files
+agree. The very next `rerun` proved it live, refusing the bootstrap for the
+right reason: `the microphone holds 0 voices, so it is not unambiguously
+Niklas`.
+
+**The `torchcodec` wall did arrive.** A step 7 entry below records that it
+"never arrived", and TODO.md said the same in two places. Those stay as written
+— this file is append-only — and this entry is the correction. That was half
+right in a way worth keeping as a lesson: pyannote never *decodes* through
+torchcodec, because it is always handed `{"waveform": ..., "sample_rate": ...}`,
+and that reasoning was sound. But `pyannote/audio/core/io.py` imports
+`torchcodec` at module scope whatever it will later be handed, and the import
+alone walks `libtorchcodec_core{N}.dll` down FFmpeg majors 9 to 4, collecting a
+Smart App Control refusal each time. Pyannote catches the failure, sets
+`TORCHCODEC_AVAILABLE = False` and carries on — so the bill was never a
+transcript, only a Windows Security toast per run, and under `pythonw.exe` even
+pyannote's own warning about it is dropped because `sys.stderr` is None. The
+toasts were the *only* visible symptom, which is why this survived four
+transcriptions and a "resolved" checkbox before the user photographed one.
+
+The lesson is narrower than "check your claims": the claim was about *decoding*
+and the failure was in *importing*, and the two were close enough to look like
+one thing. `diarize._neutralize_torchcodec` now stubs the module out before
+pyannote is imported, mirroring `transcribe._neutralize_pyav` with one
+deliberate difference — it never attempts the real import first. For PyAV the
+attempt is the diagnosis and costs one failed load; for torchcodec the attempt
+*is* the problem. There is no configuration knob, because Referat has no use for
+torchcodec even on a machine where it loads perfectly; deleting the two call
+sites restores the real import.
+
+Verified directly rather than reasoned about: with the stub installed,
+`from pyannote.audio import Pipeline` succeeds, `TORCHCODEC_AVAILABLE` is False,
+`torchaudio` still loads (its own torchcodec use is lazy, inside function
+bodies), and `sys.modules` holds **no** real `torchcodec.*` submodule — so no
+DLL was probed. A full `referat rerun` then diarized on CUDA as before.
+
+Also noted for later, not done: under `pythonw.exe` Python warnings vanish
+entirely, so `logging.captureWarnings(True)` in `setup_logging` would be worth
+having. It was the toast and not the missing warning that surfaced this one.
+
 ## 2026-08-31 — Smart App Control takes the interpreter too, and F5 never started
 
 The VS Code extension would not launch. Two unrelated faults were stacked under

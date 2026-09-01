@@ -383,6 +383,9 @@ def _neutralize_pyav() -> None:
     it is a crash in code that was only looking.
 
     Does nothing when PyAV imports fine.
+    :func:`referat.diarize._neutralize_torchcodec` is the same trick played on
+    pyannote's bundled decoder, and differs in exactly one way: it never tries
+    the real import, because for torchcodec the attempt is itself the problem.
     """
     if "av" in sys.modules:
         return

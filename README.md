@@ -12,7 +12,8 @@ written afterwards, on demand, by running Claude Code against the transcripts.
 
 ## Status
 
-Build step 9 of 9 for the recorder itself. The tray app runs and autostarts, the
+The recorder is finished, and so are the meetings-folder scaffold and the first
+VS Code extension. The tray app runs and autostarts, the
 two hotkeys drive the state machine, and a meeting is recorded as `mic.wav` plus
 `system.wav` written crash-safely — left playable even if the process is killed
 mid-meeting — and Windows will not idle-sleep out from under it.
@@ -33,10 +34,13 @@ threshold and a margin over the runner-up, because a wrong name is worse than
 The `referat` CLI is the rest of it: `list` (the inventory and the queue),
 `status`, `devices`, `rerun`, `label` and `config`.
 
-Steps 10-13 are next, and gated on all of the above working on real meetings:
-the lazy `/cleanup` pass that writes `notes.md`, a VS Code browsing layer, and
-per-project digests pushed into a Google Doc. See [TODO.md](TODO.md) for the
-plan and [CHANGELOG.md](CHANGELOG.md) for what has landed.
+A `/cleanup` slash command writes `notes.md` beside a transcript when asked —
+lazily, never automatically — and a VS Code extension browses the meetings,
+names speakers and runs that pass. What is next: projects as labels a meeting
+carries zero or more of, a sidebar that renders each meeting's lifecycle
+explicitly, tagging from the tray, and per-project digests pushed into Google
+Docs. See [TODO.md](TODO.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for
+what has landed.
 
 ## Quick start
 

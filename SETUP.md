@@ -594,13 +594,21 @@ controls**. Referat will not rewrite a system-wide power setting on your behalf.
 ### Smart App Control
 
 If Smart App Control is enforcing, it blocks the unsigned FFmpeg DLLs that PyAV
-and `torchcodec` bundle — which would otherwise make `import faster_whisper` fail
-outright.
+and `torchcodec` bundle. The two cost different things: PyAV's block makes
+`import faster_whisper` fail outright, while torchcodec's merely raised a
+Windows Security notification — *"Part of this app has been blocked... we can't
+confirm who published `libtorchcodec_core6.dll`"* — during a transcription that
+then succeeded anyway, because pyannote catches the failure itself.
 
 **You do not have to do anything.** Referat decodes its own WAVs with the stdlib
 `wave` module and hands pyannote an in-memory waveform, so neither library ever
-reaches for its bundled decoder. This note exists to explain why that workaround
-is there.
+reaches for its bundled *decoder*; and it stubs both `av` and `torchcodec` out
+in `sys.modules` before the libraries that want them are imported, so neither
+bundled DLL is ever *loaded* either. If you see a Windows Security notification
+naming some other DLL during a run, that is a third library doing the same
+thing, and the fix is the same shape — see
+`transcribe._neutralize_pyav` and `diarize._neutralize_torchcodec`. This note
+exists to explain why those workarounds are there.
 
 Turning Smart App Control off is a **one-way** change — Windows cannot re-enable
 it without a reinstall — so it is documented here and not recommended.

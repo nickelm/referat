@@ -27,6 +27,13 @@ path, pyannote reaches for `torchcodec` and its bundled FFmpeg, which **Smart Ap
 Control blocks on this machine**, exactly as it blocks PyAV's. Handed
 ``{"waveform": ..., "sample_rate": ...}`` it decodes nothing at all.
 
+That is half of the torchcodec problem, and for a long time this module claimed
+it was all of it. Pyannote imports `torchcodec` at module scope whether or not
+it will ever decode with it, and that import alone loads the blocked DLLs — one
+Windows Security notification each. :func:`_neutralize_torchcodec` handles that
+half: never decoding is what makes torchcodec unnecessary, never importing it is
+what makes it quiet.
+
 **Imports are lazy**, as in :mod:`referat.transcribe`: `torch` and
 `pyannote.audio` live behind the `transcribe` extra, and importing this module
 must stay free for a base install.
@@ -35,8 +42,10 @@ must stay free for a base install.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from dataclasses import dataclass, field, replace
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -189,6 +198,56 @@ def _reason(exc: Exception) -> str:
     return text if len(text) <= MAX_REASON else text[: MAX_REASON - 1].rstrip() + "…"
 
 
+def _neutralize_torchcodec() -> None:
+    """Stop pyannote's import of `torchcodec` from loading its FFmpeg DLLs.
+
+    `pyannote.audio.core.io` imports `torchcodec` at module scope, inside a
+    `try`, purely for the decoder it reaches for when handed a *path*. Referat
+    never hands it a path — see :func:`_run` — so the decoder is dead weight.
+    The import is not free, though. `torchcodec._core` loads
+    `libtorchcodec_core{N}.dll`, probing six FFmpeg major versions in turn, and
+    **Smart App Control is enforcing on this machine**, so each one is refused
+    and each refusal raises a Windows Security notification. pyannote catches
+    the failure and carries on with `TORCHCODEC_AVAILABLE = False`, which is the
+    right outcome; the notifications are just what it cost to get there.
+
+    A stub in `sys.modules` reaches the same outcome without touching a DLL.
+    Dunder lookups answer `AttributeError`, so `hasattr` probes are merely
+    False, and everything else raises `ImportError` — which is what pyannote's
+    `except Exception` catches, on the first line that tries to use the module.
+
+    Unlike its sibling :func:`referat.transcribe._neutralize_pyav` this does
+    **not** try the real import first. There, the attempt is the diagnosis and
+    costs one failed load; here the attempt *is* the problem. Nothing in Referat
+    wants torchcodec even on a machine where it loads cleanly, because the
+    pipeline is always handed a waveform, so there is nothing to lose by never
+    asking and no configuration knob worth adding. Delete the two calls to get
+    the real import back.
+
+    The stub is duplicated rather than shared with `transcribe`: this module
+    must not import that one — the dependency runs the other way, see the module
+    docstring — and a third module existing only to hold eight lines would be
+    worse than the eight lines.
+    """
+    if "torchcodec" in sys.modules:
+        return
+
+    class _Absent(ModuleType):
+        def __getattr__(self, name: str) -> Any:
+            if name.startswith("__") and name.endswith("__"):
+                # A probe, not a use. Answer it the way a module without the
+                # attribute would, so `hasattr` is False and nothing explodes.
+                raise AttributeError(name)
+            raise ImportError(
+                f"torchcodec is not usable on this machine, so torchcodec.{name} "
+                "cannot be reached. Referat hands pyannote a decoded waveform "
+                "instead; see referat.diarize._run."
+            )
+
+    sys.modules["torchcodec"] = _Absent("torchcodec")
+    log.info("stubbed torchcodec out; pyannote is handed a decoded waveform instead")
+
+
 def _run(
     audio: np.ndarray, sample_rate: int, model: str, token: str, device: str
 ) -> tuple[list[Turn], dict[str, np.ndarray]]:
@@ -196,6 +255,9 @@ def _run(
     # Same ordering rule as `transcribe.load_model`: torch cleanly first, before
     # anything else can import it halfway through its own import.
     import torch
+
+    # Before pyannote, not after: importing it is what probes for torchcodec.
+    _neutralize_torchcodec()
     from pyannote.audio import Pipeline
 
     log.info("loading %s on %s", model, device)
@@ -209,8 +271,10 @@ def _run(
 
     try:
         pipeline.to(torch.device(device))
-        # A (channel, time) tensor, not a path: that is what keeps torchcodec's
-        # FFmpeg — blocked here by Smart App Control — out of the picture.
+        # A (channel, time) tensor, not a path: that is what keeps pyannote from
+        # ever *decoding* with torchcodec's FFmpeg, blocked here by Smart App
+        # Control. `_neutralize_torchcodec` above is what keeps it from *loading*
+        # it; the two are separate halves and both are needed.
         waveform = torch.from_numpy(np.ascontiguousarray(audio)).unsqueeze(0)
         result = pipeline({"waveform": waveform, "sample_rate": sample_rate})
         return _read_output(result)
@@ -293,6 +357,10 @@ def _embed(
 ) -> np.ndarray | None:
     """The body of :func:`embed`, free to raise into its handler."""
     import torch
+
+    # Here too, and not only in `_run`: this path can reach pyannote without any
+    # Whisper model having been loaded first, so it cannot lean on that one.
+    _neutralize_torchcodec()
     from pyannote.audio import Pipeline
 
     pipeline = Pipeline.from_pretrained(model, token=token)

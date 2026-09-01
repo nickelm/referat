@@ -964,6 +964,9 @@ before; it is listed here because this is the file that describes the extension.
 
 ## 12. Extension packaging
 
+**Built on 2026-09-01.** `referat-vscode-0.2.0.vsix`, installed as
+`niklas-elmqvist.referat-vscode@0.2.0`.
+
 **Re-sequenced on 2026-09-01 to run after step 15**, which rewrites the extension
 from a TreeView into a sidebar webview. Nothing in this step changes — packaging a
 view that step 15 deletes is simply wasted work. **Step 15 is built, so this is
@@ -974,17 +977,71 @@ against a file list rather than against the four names above would ship the wron
 thing. The number stays where it is
 because `SETUP.md` section 12 and the CHANGELOG entries are keyed to it.
 
-- [ ] **`.vscodeignore` does not exist yet**, so `vsce package` would ship
+- [x] **`.vscodeignore` does not exist yet**, so `vsce package` would ship
       `src/`, `node_modules/`, `esbuild.mjs` and the source maps inside the
       `.vsix`. `dist/`, `media/`, `package.json` and `README.md` are the whole
-      payload — the point of bundling was to make that true
-- [ ] `vsce package` producing a `.vsix`
-- [ ] SETUP.md paragraph on sideloading it: `code --install-extension
+      payload — the point of bundling was to make that true.
+      **Written as `**` plus negations** — an allowlist, which is the answer to
+      the warning above: a file list is right the day it is written and wrong the
+      next time `media/` gains a file. `media/**` by directory; `dist/extension.js`
+      by name rather than `dist/**`, so a map left by a watch build cannot creep
+      in. `LICENSE` joined the payload, so it is five names and not four
+- [x] `vsce package` producing a `.vsix`. Nine files, 21 KB, and the listing was
+      **checked against the archive** rather than trusted: no `src/`, no
+      `node_modules`, no `.map`, no `esbuild.mjs`, no `tsconfig.json`, no
+      `package-lock.json`
+- [x] SETUP.md paragraph on sideloading it: `code --install-extension
       referat-vscode-x.y.z.vsix`, or the Extensions view's "Install from
       VSIX...". SETUP.md **section 12 already exists** as a paragraph saying
       the extension is not built yet and transcripts are Markdown until it
       is, so this is replacing one paragraph rather than deciding where a
-      section goes
+      section goes. Replaced, and it gained the `referat.repoRoot` consequence
+      below — which is the only thing installing actually changes
+
+### What building it settled
+
+- [x] **The version is 0.2.0, not 0.1.0.** 0.1.0 was step 11's TreeView, which
+      step 15 deleted; the first packaged build is a different thing wearing the
+      same number. Nothing bumps it automatically and nothing checks it against
+      the CHANGELOG — `code --install-extension` reinstalls an unchanged version
+      quite happily — so it is a label, and the label has to be moved by hand
+      before packaging an update
+- [x] **No source map in the packaged build.** `sourcemap` is tied to `--watch`
+      beside the `minify` that already was. An esbuild map carries
+      `sourcesContent`, so shipping one puts the whole TypeScript inside a `.vsix`
+      whose point is being one JavaScript file — and excluding a map that is still
+      emitted leaves a `sourceMappingURL` pointing at nothing. F5 is `npm run
+      watch`, so debugging keeps its maps where debugging happens
+- [x] **`vsce` stops to ask about a missing LICENSE and a missing
+      `repository`**, and `npm run package` has no terminal to answer with. Both
+      added, and both truthful — the remote exists, and the LICENSE says what
+      `"license": "UNLICENSED"` already said. `"private": true` was left in and
+      packaged fine: it means "never `npm publish`", and `vsce` is not npm
+- [x] **A relative link in the README is rewritten, not refused.** With
+      `repository` set, `[Referat](../README.md)` shipped as
+      `https://github.com/nickelm/referat/blob/HEAD/../README.md` — a URL with a
+      literal `..` in it. Absolute now, with a comment saying why, because this
+      file is the package's front page and a relative link there points outside
+      the package
+- [x] **`vscode:prepublish` runs the bundler**, so a `.vsix` cannot be built
+      around a stale `dist/extension.js`. `@vscode/vsce` is a fifth
+      devDependency rather than an `npx --yes` re-resolving latest every run
+- [ ] **An installed build needs `referat.repoRoot` set.** Empty, the extension
+      searches the open workspace folders and then falls back to the checkout its
+      own bundle sits inside — which is what makes F5 work in a host window opened
+      on nothing, and which from `~\.vscode\extensions` finds no `pyproject.toml`.
+      So the window opened on the *meetings* folder, the normal one, reports the
+      repository missing until the setting is filled in. Correct behaviour, now
+      user-facing; SETUP.md section 12 says it twice. Watch whether it is
+      annoying enough to justify recognising the meetings folder as well — which
+      is the same open question already logged under step 11's "Surfaced while
+      building"
+- [ ] Confirm by hand that the installed build works from a window that is **not**
+      the repository: open the meetings folder, set `referat.repoRoot`, and check
+      that the sidebar lists the meetings and that *Transcript* and *Tags…* both
+      work from the bundled `dist/extension.js` with `media/` loading out of the
+      `.vsix`. Everything up to the install is verified; nothing in a session can
+      click VS Code
 
 ## 12b. A global hotword list
 

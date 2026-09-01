@@ -2,7 +2,8 @@
 //
 // `vscode` is provided by the extension host at runtime and must stay external;
 // bundling it is the standard way to get one file to load instead of a
-// node_modules tree, which is also what step 12 will package.
+// node_modules tree, which is what .vscodeignore then ships as the whole of the
+// .vsix -- this file plus media/.
 import * as esbuild from "esbuild";
 
 const watch = process.argv.includes("--watch");
@@ -15,7 +16,12 @@ const options = {
   format: "cjs",
   platform: "node",
   target: "node20",
-  sourcemap: true,
+  // Maps under --watch, which is the F5 build, and none in the packaged one.
+  // A map carries sourcesContent, so shipping it in the .vsix would ship the
+  // TypeScript that bundling exists to leave out -- and emitting one that
+  // .vscodeignore then drops would leave a sourceMappingURL pointing at
+  // nothing. Debugging happens from source, where the maps are.
+  sourcemap: watch,
   minify: !watch,
   logLevel: "info",
 };

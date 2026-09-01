@@ -2,6 +2,74 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-01 — Step 12: the extension is packaged and installed
+
+`referat-vscode-0.2.0.vsix`, nine files and 21 KB, installed as
+`niklas-elmqvist.referat-vscode@0.2.0`. Until now the primary UI existed only
+inside an Extension Development Host: not in the window where meetings are
+actually read, and gone at the next restart. Version 0.2.0 rather than 0.1.0
+because 0.1.0 was step 11's TreeView, which step 15 deleted.
+
+### `.vscodeignore` is an allowlist
+
+`**` followed by negations for `package.json`, `README.md`, `LICENSE`,
+`dist/extension.js` and `media/**`. `vsce` keeps a file that matches no pattern
+**or** matches a negation, so that is the way to say "only these". A list of
+things to leave out — `src/`, `node_modules/`, `esbuild.mjs`, `tsconfig.json` —
+is right on the day it is written and wrong the first time this folder gains a
+file, which is what TODO warned about when it noted that `media/` now holds
+`sidebar.*` rather than `label.*`. `media/**` is by directory for the same
+reason. `dist/extension.js` is by name rather than `dist/**`, so a stale map
+cannot creep in behind it.
+
+Verified rather than assumed: the packaged listing is exactly those five plus
+the two files `vsce` adds, and a grep of the archive for `src/`, `node_modules`,
+`.map`, `esbuild`, `tsconfig` and `package-lock` finds nothing.
+
+### No source map in the packaged build
+
+`sourcemap` is now tied to `--watch`, beside the `minify` that already was. An
+esbuild map carries `sourcesContent`, so shipping one would have put the whole
+TypeScript source inside a `.vsix` whose entire point is that it is one
+JavaScript file — and excluding a map that is still emitted leaves a
+`sourceMappingURL` pointing at nothing. F5 uses `npm run watch`, so debugging
+keeps its maps where debugging happens.
+
+### Three things `vsce` refused or would have refused
+
+**A missing LICENSE** stops it to ask whether to continue, which `npm run
+package` has no terminal to answer. One short all-rights-reserved file, saying
+what `"license": "UNLICENSED"` in the manifest already said.
+
+**A missing `repository`** does the same. The remote exists, so the field is
+truthful rather than added to quiet a warning.
+
+**A relative link in the README** — `[Referat](../README.md)` — is broken inside
+a package, which is what `vsce` objects to. With `repository` set it does not
+refuse but *rewrites*, and the first build shipped
+`https://github.com/nickelm/referat/blob/HEAD/../README.md`, a URL with a literal
+`..` still in it. Absolute now, with a comment saying why so it is not made
+relative again.
+
+`"private": true` was left in and packaged fine: it means "never `npm publish`",
+and `vsce` is not npm.
+
+### `vscode:prepublish`, and the one thing installing changes
+
+`npm run package` runs the bundler first, so a `.vsix` cannot be built around a
+stale `dist/extension.js`. `@vscode/vsce` is a fifth devDependency rather than an
+`npx --yes` that re-resolves latest on every run.
+
+The behaviour change worth knowing about is `referat.repoRoot`. Empty, the
+extension looks through the open workspace folders and then falls back to the
+checkout its own bundle sits inside — which is what makes F5 work in a host
+window opened on nothing. Installed from a `.vsix` that fallback lands in
+`~\.vscode\extensions` and finds no `pyproject.toml`, so a window without the
+repository open reports the repository missing until the setting is filled in.
+Step 11 recorded that as correct behaviour; it is user-facing now, and SETUP.md
+section 12 says so twice — once in the install steps and once in the settings
+table.
+
 ## 2026-09-01 — First use of the tag picker, and the two bugs in it
 
 Reported after creating the first real projects. Both were in the tag picker, and

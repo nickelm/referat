@@ -48,8 +48,9 @@ A `/cleanup` slash command writes `notes.md` beside a transcript when asked —
 lazily, never automatically — and a VS Code extension is the primary UI: a
 sidebar of meetings with their lifecycle and their tags, the buttons that write
 notes, re-transcribe, tag and name speakers, and a status bar item saying what
-the tray is doing. What is next: packaging that extension, tagging from the tray,
-and per-project digests pushed into Google Docs. See [TODO.md](TODO.md) for the plan
+the tray is doing. It packages to a `.vsix` and installs, so it is in every
+window rather than only in a development host. What is next: tagging from the
+tray, and per-project digests pushed into Google Docs. See [TODO.md](TODO.md) for the plan
 and [CHANGELOG.md](CHANGELOG.md) for what has landed.
 
 ## Quick start

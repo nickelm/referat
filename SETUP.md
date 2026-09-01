@@ -730,16 +730,31 @@ committed.
 
 ## 12. The VS Code extension
 
-Built, but **not packaged yet** — packaging is build step 12. Until then it is
-run from source:
+Build it and install it:
 
 ```powershell
 cd referat-vscode
 npm install
+npm run package                                    # referat-vscode-0.2.0.vsix
+code --install-extension referat-vscode-0.2.0.vsix
 ```
 
-Then open the repository in VS Code and press **F5**. That starts an Extension
-Development Host with a **Referat** icon in the activity bar: your meetings,
+`npm run package` compiles first — `vscode:prepublish` runs the bundler — so the
+`.vsix` can never be built around a stale `dist/extension.js`. It is nine files
+and about 21 KB: the bundle, `media/`, the manifest, the README and the LICENSE.
+`code --uninstall-extension niklas-elmqvist.referat-vscode` takes it off again.
+
+**Set `referat.repoRoot` after installing.** This is the one thing that changes
+when the extension stops being run from source. Left empty, it looks through the
+open workspace folders for the repository and, failing that, falls back to the
+checkout its own bundle sits inside — which is how F5 works in a development host
+opened on no folder at all. Installed from a `.vsix` that fallback lands in
+`~\.vscode\extensions\niklas-elmqvist.referat-vscode-0.2.0` and finds no
+`pyproject.toml`, so a window without the repository open reports the repository
+missing until the setting is filled in. The window opened on the *meetings*
+folder is exactly that window, and it is the normal one.
+
+Restart VS Code and there is a **Referat** icon in the activity bar: your meetings,
 newest first, one row each with its title, duration, project tags and lifecycle
 state, and buttons for *Transcript*, *Notes*, *Generate notes*, *Re-transcribe*
 and *Tags…*. A meeting with speakers nobody has named yet has a **Speakers**
@@ -762,7 +777,7 @@ Two settings, both optional:
 
 | Setting | Leave it empty and… |
 | --- | --- |
-| `referat.repoRoot` | it looks through the open workspace folders for the one holding `pyproject.toml` and `referat/cli.py`. Set it if you work with the repository closed. |
+| `referat.repoRoot` | it looks through the open workspace folders for the one holding `pyproject.toml` and `referat/cli.py`, then at the checkout its own bundle sits inside. **Installed from a `.vsix` that second half cannot answer**, so set it in any window that does not have the repository open. |
 | `referat.claudeBinary` | it asks VS Code where it installed the Claude Code extension and uses the binary inside it, falling back to `PATH`. **On this machine `claude` is not on `PATH` at all** — `where claude` finds nothing — so the extension lookup is the one that actually answers. It happens fresh on every run, so an update that moves the binary cannot break it. |
 
 There is deliberately no meetings-folder setting: the extension reads
@@ -784,5 +799,13 @@ on this machine. So if the sidebar is empty and an error appears, the usual caus
 are a `referat.repoRoot` pointing somewhere that is not the repository, or a
 `.venv` that Dropbox has eaten again (section 2 has the repair).
 
-When step 12 lands, installing it becomes one command:
-`code --install-extension referat-vscode-x.y.z.vsix`.
+To work on the extension rather than use it, press **F5** in the repository:
+that starts an Extension Development Host running it from source, with esbuild
+watching and source maps on. The packaged build deliberately has none — a source
+map carries the whole TypeScript inside it, and the point of bundling was that
+the `.vsix` is one JavaScript file.
+
+Updating it is the same three commands with the version bumped in
+`referat-vscode/package.json` first. Nothing bumps it for you, and
+`code --install-extension` on an unchanged version number does reinstall, so the
+version is a label rather than a check.

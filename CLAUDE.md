@@ -379,8 +379,8 @@ cannot see across one, and two large-v3 models do not fit in 12 GB of VRAM.
 
 ## Notes and browsing (build steps 10-12)
 
-**Steps 10, 11 and 15 are built**; 12 is not, and was re-sequenced to run after
-step 15 because it would otherwise have packaged the TreeView step 15 deleted.
+**Steps 10, 11, 15 and 12 are built**, in that order — 12 was re-sequenced to run
+after 15 because it would otherwise have packaged the TreeView step 15 deleted.
 The scaffold, the `/cleanup` prompt, `referat index` and the extension
 exist and have been driven on a real transcript. What is still open is the tuning
 the gate was really about: the prompt has met one meeting, and one held in person
@@ -562,6 +562,27 @@ itself, and only then falls back to `PATH`. **The resolution happens at spawn
 time and is never persisted**: a resolved absolute path stored anywhere would
 still be there a week later, pointing at a directory that has been deleted, and
 would fail silently at the moment somebody clicks *Generate notes*.
+
+**The extension is packaged and installed** since step 12: `npm run package`
+gives a `.vsix` of five files — `dist/extension.js`, `media/`, `package.json`,
+`README.md`, `LICENSE` — and `code --install-extension` puts it in every window
+instead of only in an F5 development host. `.vscodeignore` is written as `**`
+plus negations rather than as a list of things to leave out, because an
+exclusion list is right the day it is written and wrong the next time `media/`
+gains a file. Source maps are tied to `--watch` for the same reason the payload
+is: an esbuild map carries `sourcesContent`, so shipping one would put the
+TypeScript back inside the package that bundling exists to keep it out of.
+
+Installing changes exactly one thing about behaviour, and it is
+**`referat.repoRoot`**. Left empty the extension searches the open workspace
+folders and then falls back to the checkout its own bundle sits inside — which
+is what lets F5 work in a host window opened on no folder, and which from
+`~\.vscode\extensions` finds no `pyproject.toml`. So an installed build in a
+window that does not have the repository open needs the setting, and the window
+opened on the *meetings* folder is exactly that window. That is the fallback
+behaving correctly, not a regression; do not "fix" it by teaching the extension
+where meetings live, which is the second-place-to-say-it mistake this file
+records `voices_dir` and `format_duration` being pulled back from.
 
 ## Per-project digests (build step 13)
 

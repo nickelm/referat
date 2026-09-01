@@ -1,7 +1,13 @@
 # Referat for VS Code
 
-The primary UI for [Referat](../README.md): a sidebar of meetings, everything you
-do to one, and the projects they are tagged with.
+The primary UI for [Referat](https://github.com/nickelm/referat): a sidebar of
+meetings, everything you do to one, and the projects they are tagged with.
+
+<!-- That link is absolute on purpose. This file is the .vsix's own front page,
+     where a relative `../README.md` points outside the package at nothing;
+     `vsce` rewrites relative links against the repository URL and turns that
+     one into a URL with a literal `..` still in it. -->
+
 
 This and the tray icon are the only graphical surfaces Referat has, and the only
 ones it will ever have. **There is no web UI in this project** — that rule is
@@ -86,15 +92,33 @@ There is deliberately **no meetings-folder setting**. The meetings folder is
 records into; a second place to say where meetings live is a second thing that
 can be wrong.
 
-## Running it
-
-Not packaged yet — that is build step 12. Until then:
+## Installing it
 
 ```powershell
 cd referat-vscode
 npm install
+npm run package                                    # referat-vscode-0.2.0.vsix
+code --install-extension referat-vscode-0.2.0.vsix
 ```
 
-then press **F5** in the repository, which starts an Extension Development Host
-with esbuild watching. `npm run typecheck` and `npm run compile` do those
-separately.
+**Then set `referat.repoRoot`.** With the setting empty the extension looks
+through the open workspace folders for the repository and, failing that, at the
+checkout its own bundle sits inside — which, installed from a `.vsix`, is
+`~\.vscode\extensions\...` and holds no `pyproject.toml`. That fallback is what
+makes F5 work in a host window opened on nothing; it cannot work here. So any
+window that does not have the repository open — the window opened on the
+*meetings* folder, which is the normal one — needs the setting.
+
+`code --uninstall-extension niklas-elmqvist.referat-vscode` removes it again.
+
+## Developing it
+
+Press **F5** in the repository, which starts an Extension Development Host with
+esbuild watching and source maps on. `npm run typecheck` and `npm run compile`
+do those separately.
+
+The packaged build has no source map, deliberately: a map carries
+`sourcesContent`, so shipping one would put the whole TypeScript source inside a
+`.vsix` whose entire payload is otherwise `dist/extension.js`, `media/`,
+`package.json`, `README.md` and `LICENSE`. `.vscodeignore` is written as an
+allowlist so that stays true when a file is added.

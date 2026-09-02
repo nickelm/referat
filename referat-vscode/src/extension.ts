@@ -114,8 +114,16 @@ async function runCleanup(
     // A staged meeting is not in the meetings folder at all, so `/cleanup`
     // running there would not find it. Say why rather than letting the pass
     // fail with a confusing "no such meeting".
+    //
+    // Leading with the release and not with a rerun, which is the correction of
+    // 2026-09-02: this used to read "Re-transcribe it, or accept the transcript
+    // and let the audio go", and for a meeting kept by `[transcription]
+    // .keep_audio` a rerun does nothing at all — its transcript already passed
+    // the gate and the next run keeps the audio again. Worded to be true of both
+    // kinds of staged meeting, since the sidebar has no `audio_kept` to split on
+    // and nothing new goes into this extension.
     void vscode.window.showWarningMessage(
-      `${meeting.id} is still in staging because its audio was kept. Re-transcribe it, or accept the transcript and let the audio go.`,
+      `${meeting.id} is still in staging with its audio kept, so /cleanup cannot see it. Release it with \`referat promote ${meeting.id} --release-audio\`, or rerun it first if the transcript itself needs redoing.`,
     );
     return;
   }

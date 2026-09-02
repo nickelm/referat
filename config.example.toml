@@ -76,6 +76,32 @@ diarization = true
 # it is gated, so the token above must belong to an account that has accepted its
 # conditions at https://hf.co/pyannote/speaker-diarization-community-1
 diarization_model = "pyannote/speaker-diarization-community-1"
+# Keep mic.wav and system.wav even when the quality gate accepts the transcript.
+# Off by default, and that default is the right one: the WAVs are recordings of
+# people who never asked to be recorded, and deleting them is a promise the
+# pipeline keeps. Turn this on for a meeting whose audio is worth more than that
+# once - the first multi-speaker recording, say, which is the only material there
+# is for calibrating [speakers].match_threshold and match_margin - and turn it off
+# again afterwards. Once the audio is gone no `rerun` brings it back.
+# A meeting kept this way is not `gate_failed`: the gate still runs and still says
+# so when a transcript looks bad. It stays `transcribed` and stays in staging,
+# because no WAV may ever reach the meetings folder; release it with
+# `referat promote <meeting-id> --release-audio`.
+# keep_audio = false
+
+# Words Whisper should be told about before it transcribes: names, acronyms,
+# product names, jargon. This is the one correction that happens *before* the
+# transcript exists - everything else is corrected in the notes, because
+# `transcript.md` is immutable and keeps whatever was heard.
+#
+# One list for the machine, never one per project: a meeting is tagged after it
+# has been transcribed, so at the moment the model runs there is nothing to
+# select a list with. Referat merges three sources into it and this is only the
+# third - every name in the known-voices database and every project's `glossary`
+# in `projects.json` are already in there and maintain themselves. Put here what
+# neither of those will ever hold. `referat hotwords` prints the merged list with
+# the source of each term, and says what the 223-token budget made it drop.
+hotword_extras = []
 
 [speakers]
 # Put names on the SPEAKER_NN that diarization produced, by matching each
@@ -122,6 +148,62 @@ snippet_seconds = 6.0
 # data about people who never asked to be in it: keep that folder out of every
 # sync client and backup tool, and use `referat label --forget <name>` to delete
 # somebody outright.
+
+[bleed]
+# Removing the microphone's copy of speech that also arrived on the loopback.
+#
+# When the remote audio of a hybrid meeting comes out of a speaker standing in
+# the same room as the microphone - a TV, a laptop, anything but a headset or the
+# Jabra's own hardware echo cancellation - the far end is recorded twice, once
+# digitally and once off the air. Both copies are transcribed, both are diarized,
+# and both end up in transcript.md, usually under the same name once the speakers
+# have been labeled. Measured on 2026-09-02_1059: of 1239 lines under a remote
+# speaker's name, roughly 761 were the microphone's second copy.
+#
+# Suppression is one-directional. Microphone segments may be dropped; loopback
+# segments never are. Not because the loopback transcribes better - it does - but
+# because a conferencing app does not loop your own capture back into what it
+# plays, so speech from the room can only ever exist on the microphone. Dropping
+# a microphone segment risks a second copy; dropping a loopback segment risks the
+# only copy of the far end.
+suppress = true
+
+# Seconds of tolerance when deciding two segments describe the same moment. An
+# interval overlap rather than a gap between start times: two copies of one
+# utterance were measured a median of 2 seconds apart but as much as 34, and the
+# long ones are where one channel emitted a single run-on segment covering what
+# the other split into several.
+window = 6.0
+
+# How much of the microphone line's words the loopback line must contain, and how
+# much of the loopback line's words the microphone line must contain. The reverse
+# direction is not symmetry for its own sake: without it a short line is swallowed
+# by any longer line nearby that happens to hold its words, which produced 21
+# pairings of one room speaker against another where requiring the reverse gave 8.
+contain = 0.60
+back_contain = 0.50
+
+# Nothing shorter than this is ever dropped for matching some other line. More
+# than half of a hybrid meeting is one- and two-token backchannels, and nothing
+# distinguishes a remote person's second "Yeah" from the microphone's copy of
+# their first. Those go only when the cluster rule below takes the whole cluster,
+# which decides by whose voice they are rather than by what they say.
+min_tokens = 5
+
+# A whole microphone cluster is echo when this much of its speech time sits under
+# loopback speech AND this much of its long-enough lines matches loopback text.
+# Both, and that is the design: a microphone in a room is voiced almost
+# continuously - 97% of the meeting these were fitted to - so time alone convicts
+# anybody who talks while the far end is talking, while text alone misses a
+# cluster that is mostly "Yeah." Someone talking *over* the far end scores high on
+# time and near zero on text, and that is the case this pairing exists to spare.
+#
+# Unlike the three above, these two have no measurement behind them: the only
+# hybrid meeting on this machine had its audio released, so the cluster rule has
+# never been run against real material. Record the next one with
+# [transcription].keep_audio = true and calibrate them against it.
+cluster_time = 0.80
+cluster_text = 0.50
 
 [app]
 # DEBUG | INFO | WARNING | ERROR

@@ -1,0 +1,77 @@
+r"""Giving the GPU back between jobs.
+
+`transcribe_channels` and `diarize._run` both end by dropping their model, and
+both said in their docstrings that this was so the VRAM would not stay occupied
+for the rest of the session. It did anyway. Measured on 2026-09-02: a tray idle
+since its last meeting held **8484 MiB of 12227**, and a `referat rerun` in a
+second process stalled inside `ctranslate2.models.Whisper(...)` with the 3.7 GB
+that were left.
+
+`del` returns the *Python reference*, not the memory. Torch's CUDA caching
+allocator keeps every block it has ever taken from the driver, so that the next
+allocation of the same size is free; nothing but
+:func:`torch.cuda.empty_cache` hands the arena back, and nothing in this package
+was calling it. That is this module: one function, called from each of the three
+places that finish with a model on the GPU.
+
+**What it can and cannot reclaim.** CTranslate2 — which is what faster-whisper
+actually runs on — allocates outside torch entirely, so `empty_cache` never sees
+the Whisper weights; those come back when the `WhisperModel` is destroyed, which
+`del model` already does. What this reclaims is torch's share, which is pyannote
+and which is the overwhelming majority of the 8.4 GB above. And the CUDA
+*context* itself, a few hundred MiB, lives as long as the process does: the
+target is leaving room for a second large-v3, not reaching zero.
+"""
+
+from __future__ import annotations
+
+import gc
+import logging
+
+log = logging.getLogger(__name__)
+
+MIB = 1024 * 1024
+
+
+def release(where: str) -> None:
+    """Hand torch's CUDA arena back to the driver, and say how much came back.
+
+    Never raises, for the same reason :func:`referat.diarize.diarize` never
+    does: this runs in the `finally` of a block that may already be unwinding an
+    exception, and a failure to reclaim memory may not become the failure the
+    caller sees.
+
+    Guarded on ``torch.cuda.is_initialized()`` rather than ``is_available()``,
+    which would *create* a CUDA context on a machine that had deliberately
+    stayed on the CPU — the reverse of the point. A CPU run therefore costs an
+    attribute lookup and nothing else.
+
+    ``gc.collect()`` first, because torch frees only what has no live
+    references: the `del` this is called after leaves the tensors reachable from
+    a traceback, a cycle, or the frame of the function still unwinding.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_initialized():
+            return
+        reserved = torch.cuda.memory_reserved()
+        gc.collect()
+        torch.cuda.empty_cache()
+        freed = reserved - torch.cuda.memory_reserved()
+        # What the driver can now hand somebody else, which is the number
+        # `nvidia-smi` reports and the only one that answers the question this
+        # module exists for: is there room for a second large-v3? It counts
+        # CTranslate2's arena and the CUDA context too, neither of which torch
+        # knows about, so it is also how much of the residue is *not* torch's.
+        free, total = torch.cuda.mem_get_info()
+    except Exception:
+        log.debug("could not release CUDA memory after %s", where, exc_info=True)
+        return
+    log.info(
+        "released %.0f MiB after %s; %.0f MiB of %.0f MiB free on the device",
+        freed / MIB,
+        where,
+        free / MIB,
+        total / MIB,
+    )

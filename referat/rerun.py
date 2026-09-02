@@ -14,12 +14,22 @@ That is a different act from `referat label`, which rewrites the label field of
 an existing transcript and nothing else.
 
 **A rerun renumbers.** Diarization clusters from scratch, so this run's
-`SPEAKER_02` is not last run's, and the old `speaker_names` and `speakers/`
-snippets are cleared before the pipeline starts rather than carried over. No name
-is lost by that: every one of them is in the known-voices database, and
-identification looks each cluster up there again on the way through. Carrying the
-old mapping over is the one thing that *would* lose them — it would put last
-week's name on this run's numbering.
+`SPEAKER_02` is not last run's. No name is lost by that: every one of them is in
+the known-voices database, and identification looks each cluster up there again
+on the way through. Carrying the old mapping over is the one thing that *would*
+lose them — it would put last week's name on this run's numbering.
+
+What that costs up front is the **snippets and nothing else**. They have to go
+before the pipeline runs, because it writes `speakers/SPEAKER_NN_*.wav` as it
+goes and a run that finds fewer speakers than the last would leave the extras
+behind; they are regenerable by definition, since a rerun requires the audio.
+`speaker_names` is *not* cleared here, and used to be. Nothing in the pipeline
+reads it, and :func:`referat.transcribe.transcribe_meeting` replaces it wholesale
+from this run's transcripts anyway — so clearing it early bought nothing and cost
+everything on 2026-09-02, when a Ctrl+C during the model load left a meeting with
+an emptied `speaker_names` and a `transcript.md` still carrying all 314 of its
+labels. Until this run commits, the old map is the map that describes the file on
+disk.
 
 **Two large-v3 models do not fit in 12 GB of VRAM.** `transcribe._RUN_LOCK`
 serializes jobs inside one process and cannot see across one, so this command
@@ -62,14 +72,19 @@ def busy_tray() -> str | None:
     return None
 
 
-def clear_speakers(meeting: Meeting) -> None:
-    """Drop the previous run's speaker labels and snippets. Does not save.
+def clear_snippets(meeting: Meeting) -> None:
+    """Delete the previous run's speaker snippets. Touches no metadata.
 
-    Both are per-run facts: diarization renumbers from scratch, so keeping either
-    would attach last run's answers to this run's numbering. The names survive in
-    the known-voices database, where identification will find them again.
+    They are per-run facts: diarization renumbers from scratch, so a
+    `SPEAKER_05_1.wav` from a run that found five speakers would sit in the folder
+    claiming to be somebody this run never produced. Deleting them costs nothing —
+    a rerun has the audio by definition, and the pipeline cuts new ones.
+
+    Deliberately **not** `speaker_names`, which this function used to clear as
+    well. See the module docstring: the map is rewritten wholesale on success and
+    is the truth about `transcript.md` until then, so wiping it before the work
+    starts only created a way for an interrupt to destroy it.
     """
-    meeting.speaker_names = {}
     folder = meeting.speakers_dir
     if not folder.is_dir():
         return
@@ -138,8 +153,7 @@ def run(config: Config, meeting_id: str, *, force: bool = False) -> int:
     setup_logging(config.app.log_level)
     from referat.transcribe import TranscriptionError, transcribe_meeting
 
-    clear_speakers(meeting)
-    meeting.save()
+    clear_snippets(meeting)
 
     print(f"Re-transcribing {meeting.id} from {', '.join(p.name for p in audio)}...")
     try:
@@ -150,6 +164,19 @@ def run(config: Config, meeting_id: str, *, force: bool = False) -> int:
         # this command can be run again.
         print(f"referat rerun: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        # Caught for the message alone. `transcribe_meeting` has already put the
+        # meeting back the way it found it; what a bare traceback would not say is
+        # that nothing was lost, and that is the whole thing somebody who has just
+        # pressed Ctrl+C wants to know. 130 is the shell's convention for it.
+        # `transcribe_meeting` restores the status on the object it was handed,
+        # which is this one, so there is nothing to re-read off the disk.
+        print(
+            f"\nreferat rerun: interrupted; {meeting.id} is back to {meeting.status} "
+            f"with its transcript and speaker names untouched",
+            file=sys.stderr,
+        )
+        return 130
 
     seconds = meeting.transcription.get("seconds")
     backend = meeting.transcription.get("model", "?")

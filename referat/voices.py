@@ -233,6 +233,39 @@ class VoicesDB:
         """Delete a person outright and report how many embeddings went with them."""
         return len(self.people.pop(name, []))
 
+    def drop(self, meeting: str, speaker: str) -> dict[str, int]:
+        """Remove the voiceprints filed from one cluster of one meeting.
+
+        Returns how many went, per name. This is what :class:`Voiceprint`'s
+        provenance is *for* — see its docstring, which says a cluster that turned
+        out to hold the wrong thing produces an embedding of nobody, and that
+        without knowing which meeting and which cluster it came from there is no
+        way to find it again and pull it out. The verb simply had not been written
+        until an echo cluster put two of them in here under real names.
+
+        Addressed by where the print came from rather than by whom it is filed
+        under, because that is the fact you actually know: the label was *correct*,
+        and the recording behind it was not.
+
+        **Refuses to leave a name with no prints at all.** A person with nothing on
+        file is a person who has been forgotten, and forgetting somebody is
+        :func:`referat.label.forget`'s job — it also reverts their transcript
+        labels, which this must not do, because those labels are right.
+        """
+        removed: dict[str, int] = {}
+        for name, prints in list(self.people.items()):
+            keep = [p for p in prints if not (p.meeting == meeting and p.speaker == speaker)]
+            if len(keep) == len(prints):
+                continue
+            if not keep:
+                raise ValueError(
+                    f"{name} has no other voiceprint, so this would delete them "
+                    f"entirely; `referat label --forget {name}` is what does that"
+                )
+            removed[name] = len(prints) - len(keep)
+            self.people[name] = keep
+        return removed
+
 
 def ensure_voices_dir(folder: Path) -> Path:
     """Create the known-voices folder and seed its `DO-NOT-SYNC.md`.
@@ -436,6 +469,22 @@ class Cluster:
     """The name this speaker was resolved to, or empty while they are a number."""
     match: Match | None = None
     """The best candidate, accepted or not. Kept for calibrating the thresholds."""
+    echo: bool = False
+    """Whether :mod:`referat.bleed` found this to be the loopback coming back.
+
+    Set on microphone clusters only, and only after both channels are
+    transcribed — see :func:`referat.bleed.mark_clusters`. An echo cluster has no
+    lines left in `transcript.md`, so it must never be offered a name:
+    :func:`unknown_speakers` skips it and :func:`referat.label.apply_name`
+    refuses it. That is the whole defence, and it is here rather than in
+    :func:`identify` because the loopback does not exist yet when identification
+    runs.
+
+    The embedding is kept anyway. It is the record of what a room microphone
+    heard through a loudspeaker and the only material that will calibrate the
+    suppression thresholds, and it is inert now that the one thing that reads it
+    refuses.
+    """
 
     def to_json(self) -> dict[str, Any]:
         meta: dict[str, Any] = {"snippets": self.snippets}
@@ -443,6 +492,8 @@ class Cluster:
             meta["embedding"] = [round(float(x), 6) for x in self.embedding]
         if self.name:
             meta["name"] = self.name
+        if self.echo:
+            meta["echo"] = True
         if self.match is not None:
             meta["match"] = self.match.to_json()
         return meta
@@ -564,13 +615,23 @@ def unknown_speakers(meeting: Meeting) -> list[str]:
 
     Read out of `meta.json` rather than off the transcript, so the tray
     notification, `referat label` and step 11's tree all agree on the count.
+
+    **An echo cluster is not offered.** It is the loopback coming back into the
+    room microphone, its lines are not in `transcript.md` at all, and asking
+    somebody to name it is asking them to file a voiceprint recorded off a
+    loudspeaker under a real person's name — which is exactly how two of them got
+    into the database on 2026-09-02. One filter here covers `referat label`, the
+    extension's labeling panel, `referat list`'s unnamed column, the tray's
+    post-transcription notification and `label.run_json`'s gallery, because all
+    five ask this function.
     """
     channels = (meeting.transcription.get("channels") or {}).values()
     labels = {
         label
         for channel in channels
         if isinstance(channel, dict)
-        for label in (channel.get("speakers") or {})
+        for label, cluster in (channel.get("speakers") or {}).items()
+        if not (isinstance(cluster, dict) and cluster.get("echo"))
     }
     return sorted(labels - set(meeting.speaker_names))
 
@@ -605,6 +666,19 @@ def channel_speakers(meeting: Meeting, channel: str) -> list[str]:
     if not isinstance(entry, dict):
         return []
     return sorted(entry.get("speakers") or {})
+
+
+def is_echo(meeting: Meeting, speaker: str) -> bool:
+    """Whether `meta.json` records this cluster as the loopback coming back.
+
+    The question :func:`referat.label.apply_name` asks before filing a voiceprint.
+    Read off the stored record rather than recomputed, because the verdict was
+    reached with both channels' segments in hand and neither survives the pipeline
+    — the same reason the lifecycle is a value the pipeline writes rather than a
+    state every reader infers.
+    """
+    cluster = _stored_cluster(meeting, speaker)
+    return bool(cluster and cluster.get("echo"))
 
 
 def _stored_cluster(meeting: Meeting, speaker: str) -> dict[str, Any] | None:

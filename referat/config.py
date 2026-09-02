@@ -72,6 +72,32 @@ class TranscriptionConfig:
     language: str = "en"
     diarization: bool = True
     diarization_model: str = "pyannote/speaker-diarization-community-1"
+    keep_audio: bool = False
+    """Keep the WAVs even when the quality gate accepts the transcript.
+
+    The pipeline's default is to delete them the moment every channel comes out
+    clean, which is right: they are recordings of people who never asked to be
+    recorded, and `audio_released` is a promise. But the audio is also the only
+    material that can ever calibrate `[speakers].match_threshold` and
+    `match_margin` against real voices, and once it is gone no `rerun` brings it
+    back. Turn this on for a meeting worth keeping, and turn it off again.
+
+    A meeting kept this way is **not** `gate_failed` — the gate is still asked,
+    and still writes that status when the transcript looks bad. It stays
+    `transcribed` and stays in the staging folder, because no WAV may ever reach
+    the meetings folder; `referat promote <id> --release-audio` is the off-ramp
+    once the audio has served its purpose."""
+    hotword_extras: tuple[str, ...] = ()
+    """Terms belonging to no project and to no person, for the global hotword list.
+
+    The third and smallest source :func:`referat.hotwords.merge` draws on -- the
+    other two are every name in the known-voices database and every project's
+    `glossary`, both of which maintain themselves. Put here what neither of those
+    will ever hold: an acronym, a building, a piece of jargon.
+
+    A tuple rather than a list because every section here is frozen; TOML writes
+    it as an array of strings and :func:`_coerce` converts it.
+    """
 
 
 @dataclass(frozen=True)
@@ -100,6 +126,58 @@ class SpeakersConfig:
 
 
 @dataclass(frozen=True)
+class BleedConfig:
+    """Removing the microphone's copy of speech that also arrived on the loopback.
+
+    See :mod:`referat.bleed`. These are knobs against the rule elsewhere in this
+    project that knobs nobody asked for do not get added, and they earn it on the
+    same grounds `match_threshold` and `match_margin` did: this is the only place
+    a rule **deletes lines from a transcript**, and the numbers can only be
+    calibrated against real hybrid meetings, of which exactly one exists and its
+    audio has been released.
+
+    So the defaults below are **reasoned from a rendered transcript, not measured
+    against audio**. `contain`, `back_contain` and `min_tokens` were fitted to
+    `2026-09-02_1059` and have a false-pairing count behind them; `cluster_time`
+    and `cluster_text` have nothing of the kind and cannot until the next hybrid
+    meeting is recorded with `[transcription].keep_audio` on.
+    """
+
+    suppress: bool = True
+    window: float = 6.0
+    """Seconds of tolerance when deciding two segments describe one moment.
+
+    An interval overlap, not a gap between start times: two copies of one
+    utterance were measured a median of 2 seconds apart but as much as 34, and the
+    long ones are where one channel emitted a run-on segment covering what the
+    other split up."""
+    contain: float = 0.60
+    """How much of the microphone line's text the loopback line must contain."""
+    back_contain: float = 0.50
+    """...and how much of the loopback line's text the microphone line must contain.
+
+    Not symmetry for its own sake. Without the reverse direction a short line is
+    swallowed by any longer line nearby holding its words: forward-only produced
+    21 pairings of one room speaker against another on the meeting this was built
+    for, and requiring the reverse cut that to 8."""
+    min_tokens: int = 5
+    """Nothing shorter is ever dropped by text.
+
+    More than half of a hybrid meeting is one- and two-token backchannels, and
+    nothing distinguishes a remote person's second "Yeah" from the microphone's
+    copy of their first. Those are removed only when the cluster rule takes the
+    whole cluster, which decides by whose voice they are rather than by what they
+    say."""
+    cluster_time: float = 0.80
+    cluster_text: float = 0.50
+    """A whole microphone cluster is echo when this much of its speech time sits
+    under loopback speech *and* this much of its long-enough lines matches loopback
+    text. Both: a microphone in a room is voiced almost continuously — 97% of the
+    meeting this was built for — so time alone convicts anyone who talks while the
+    far end is talking."""
+
+
+@dataclass(frozen=True)
 class AppConfig:
     log_level: str = "INFO"
 
@@ -111,6 +189,7 @@ class Config:
     paths: PathsConfig = field(default_factory=PathsConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     speakers: SpeakersConfig = field(default_factory=SpeakersConfig)
+    bleed: BleedConfig = field(default_factory=BleedConfig)
     app: AppConfig = field(default_factory=AppConfig)
     source: Path | None = None
     """The file this config was read from, or None for pure defaults."""
@@ -179,6 +258,7 @@ _SECTIONS: dict[str, type] = {
     "paths": PathsConfig,
     "transcription": TranscriptionConfig,
     "speakers": SpeakersConfig,
+    "bleed": BleedConfig,
     "app": AppConfig,
 }
 
@@ -249,6 +329,13 @@ def _coerce(value: Any, declared: Any, section: str, key: str) -> Any:
         if not isinstance(value, str):
             raise ConfigError(f"[{section}].{key} must be a path string")
         return Path(value).expanduser()
+    if declared in ("tuple[str, ...]",):
+        # Refused at load rather than shrugged off later: a bare string here is
+        # the natural mistake, and Python would happily iterate it into one
+        # hotword per character.
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ConfigError(f"[{section}].{key} must be a list of strings")
+        return tuple(term for v in value if (term := " ".join(v.split())))
     if declared in (int, "int") and isinstance(value, bool):
         raise ConfigError(f"[{section}].{key} must be an integer")
     if declared in (float, "float") and isinstance(value, int) and not isinstance(value, bool):
@@ -283,6 +370,30 @@ def _validate(config: Config) -> None:
     if config.hotkeys.toggle_record.lower() == config.hotkeys.toggle_pause.lower():
         raise ConfigError("[hotkeys].toggle_record and toggle_pause must differ")
     _validate_speakers(config.speakers)
+    _validate_bleed(config.bleed)
+
+
+def _validate_bleed(b: BleedConfig) -> None:
+    """Check the suppression knobs. See :class:`BleedConfig` for what they mean."""
+    for name, value in (
+        ("contain", b.contain),
+        ("back_contain", b.back_contain),
+        ("cluster_time", b.cluster_time),
+        ("cluster_text", b.cluster_text),
+    ):
+        if not 0.0 <= float(value) <= 1.0:
+            raise ConfigError(f"[bleed].{name} must be between 0.0 and 1.0, got {value!r}")
+    if b.window <= 0:
+        raise ConfigError("[bleed].window must be positive")
+    # A floor on the floor. This is the knob whose wrong value is most
+    # destructive -- it is the only thing standing between a transcript and a rule
+    # that deletes a line for matching one word -- so it is refused rather than
+    # trusted, which no other numeric key here is.
+    if b.min_tokens < 3:
+        raise ConfigError(
+            f"[bleed].min_tokens must be at least 3, got {b.min_tokens!r}: below that "
+            "a containment rule matches lines that have nothing to do with each other"
+        )
 
 
 def _validate_speakers(s: SpeakersConfig) -> None:

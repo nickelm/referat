@@ -2,10 +2,11 @@
 
 `config` since build step 1, `label` since 7b, `list`, `rerun` and `status`
 since step 8, `devices` since the first USB microphone, `index` with the
-meetings folder scaffold at step 10, `project`, `tag`, `untag` and `state`
-at step 14, and `promote` at step 15. Between them they are the whole of Referat
-that is not the tray: what has been recorded, what still needs a name, what work
-each meeting belongs to, what the tray is doing, what it will record with, how to
+meetings folder scaffold at step 10, `hotwords` at step 12b, `project`, `tag`,
+`untag` and `state` at step 14, and `promote` at step 15. Between them they are
+the whole of Referat that is not the tray: what has been recorded, what still
+needs a name, what work each meeting belongs to, what the tray is doing, what it
+will record with, what Whisper is told about before it transcribes, how to
 transcribe a meeting again, how to accept a transcript the quality gate refused,
 and how to rebuild the dashboard over all of it.
 
@@ -18,7 +19,7 @@ package. The rule is one implementation, not one process boundary.
 
 **Light by default.** Only `rerun` needs the `transcribe` extra, and it imports
 it inside :func:`referat.rerun.run`, so `list` and `status` answer instantly
-without three gigabytes of torch. `project`, `tag`, `untag` and `state` are a
+without three gigabytes of torch. `project`, `tag`, `untag`, `state` and `hotwords` are a
 JSON read and a JSON write and need no extra at all — only step 13's `project
 link-doc` and `project sync` will need `digest`. `label` and `devices` are
 imported here rather than at module scope for the same kind of reason: a broken
@@ -30,13 +31,17 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import logging
+import signal
 import sys
-from dataclasses import asdict
+import time
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from referat import __version__, index, paths, projects, status, voices
+from referat import __version__, build_info, index, paths, projects, status, voices
 from referat.config import Config, ConfigError, load_config
 from referat.meeting import (
     Meeting,
@@ -46,10 +51,14 @@ from referat.meeting import (
     resolve_meeting,
 )
 
+log = logging.getLogger(__name__)
+
 NEEDS_CONFIG = (
     "config",
+    "debleed",
     "delete",
     "devices",
+    "hotwords",
     "index",
     "label",
     "list",
@@ -58,8 +67,10 @@ NEEDS_CONFIG = (
     "reflow",
     "relabel",
     "rerun",
+    "show",
     "state",
     "tag",
+    "transcript",
     "untag",
 )
 """`status` is missing from this on purpose: `status.json` lives in
@@ -102,6 +113,48 @@ def build_parser() -> argparse.ArgumentParser:
         dest="as_json",
         help="emit the same meetings as JSON, for the VS Code extension",
     )
+
+    show = subcommands.add_parser(
+        "show",
+        help="one meeting's whole record: lifecycle, models, speakers, scores",
+        description=(
+            "Everything meta.json holds about one meeting, plus the handful of "
+            "answers every other surface asks Python for rather than deriving: "
+            "the title, the formatted duration, whether the audio is still on "
+            "disk and whether the folder is still in staging. The per-channel "
+            "`speakers` block carries each cluster's match score and its "
+            "runner-up, recorded even where the match was refused, which is the "
+            "only material there is for calibrating [speakers]' thresholds."
+        ),
+    )
+    show.add_argument("meeting_id", help="e.g. 2026-08-27_1400")
+    show.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit the whole record as JSON, for the command center",
+    )
+
+    transcript = subcommands.add_parser(
+        "transcript",
+        help="a meeting's transcript, parsed: who spoke, how often, for how long",
+        description=(
+            "Read transcript.md back through the parser that lives beside the "
+            "renderer that wrote it. The table is one row per speaker label with "
+            "how many entries and how many words carry it, which is the one "
+            "question a rendered transcript answers badly. --json is the entries "
+            "themselves, timestamps in seconds as well as rendered, for the "
+            "command center's transcript pane."
+        ),
+    )
+    transcript.add_argument("meeting_id", help="e.g. 2026-08-27_1400")
+    transcript.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit the parsed entries as JSON, for the command center",
+    )
+
     tray_status = subcommands.add_parser(
         "status",
         help="what the tray app is doing right now",
@@ -126,6 +179,22 @@ def build_parser() -> argparse.ArgumentParser:
             "end of every transcription, so this is for after a /cleanup run has "
             "given a meeting its title. A different file from the repository's own "
             "INDEX.md, and never hand-edited."
+        ),
+    )
+
+    subcommands.add_parser(
+        "hotwords",
+        help="the words Whisper is told about before it transcribes",
+        description=(
+            "Print the one global hotword list, merged from three sources: "
+            "[transcription].hotword_extras, every name in the known-voices "
+            "database, and every project's glossary in projects.json. It is one "
+            "list for the machine and never one per project, because a meeting is "
+            "tagged after it has been transcribed. Whisper's prompt window leaves "
+            "223 tokens for it, so the list is capped in that priority order - "
+            "extras, then names, then glossaries - and this says what the cap "
+            "dropped. Capped here rather than by faster-whisper, which slices an "
+            "over-long list mid-name and says nothing."
         ),
     )
 
@@ -224,6 +293,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="a single meeting, e.g. 2026-08-27_1400. Omit for all of them",
     )
 
+    debleed = subcommands.add_parser(
+        "debleed",
+        help="collapse lines a transcript recorded twice, once per channel",
+        description=(
+            "When a hybrid meeting's remote audio comes out of a speaker in the "
+            "same room as the microphone, the far end is recorded twice and lands "
+            "in the transcript twice. New meetings have this suppressed during "
+            "transcription; this repairs the ones already written, whose audio is "
+            "gone and which no rerun can regenerate. It only touches a meeting "
+            "where a name resolved to clusters on both channels, it keeps "
+            "whichever copy contains the other, and it never touches a line short "
+            "enough to be a genuine second 'Yeah'. Dry by default: --apply writes, "
+            "and records every removed line in meta.json first, so the removal can "
+            "be read back and undone by hand."
+        ),
+    )
+    debleed.add_argument(
+        "meeting_id",
+        nargs="?",
+        help="a single meeting, e.g. 2026-08-27_1400. Omit for all of them",
+    )
+    debleed.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually remove the lines. Without it, nothing is written",
+    )
+
     delete = subcommands.add_parser(
         "delete",
         help="delete a meeting and everything in it",
@@ -286,9 +382,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="the name to give --speaker",
     )
     label.add_argument(
+        "--drop-voiceprint",
+        metavar="SPEAKER_NN",
+        dest="drop_voiceprint",
+        help="remove the voiceprint this meeting's cluster contributed, leaving the "
+        "person and their transcript labels alone. For a cluster that turned out "
+        "to be a loudspeaker rather than the person it was correctly named after",
+    )
+    label.add_argument(
         "--yes",
         action="store_true",
-        help="skip --forget's confirmation. Deleting a person is not reversible",
+        help="skip the confirmation --forget and --drop-voiceprint ask for",
     )
 
     _add_project_parser(subcommands)
@@ -440,12 +544,20 @@ def tags_cell(meeting: Meeting, known: dict[str, str]) -> str:
 
 
 def list_row(meeting: Meeting, known: dict[str, str]) -> tuple[str, ...]:
-    """One line of `referat list`, as its six columns."""
+    """One line of `referat list`, as its six columns.
+
+    A meeting that lost a channel says so in the STATUS cell. It is the only
+    thing in this table that is not a lifecycle value, and it earns the place:
+    `2026-09-02_1001` was twenty-four minutes with no microphone in it and this
+    row read `transcribed`, which is true of the transcription and worthless as
+    a description of the meeting.
+    """
     unnamed = len(voices.unknown_speakers(meeting))
+    lost = f" no {'/'.join(meeting.missing_channels)}" if meeting.missing_channels else ""
     return (
         meeting.id,
         format_duration(meeting.duration_seconds),
-        str(meeting.status),
+        str(meeting.status) + lost,
         audio_state(meeting),
         str(unnamed) if unnamed else "-",
         tags_cell(meeting, known),
@@ -515,6 +627,7 @@ def list_document(config: Config) -> dict[str, Any]:
                 "duration": format_duration(m.duration_seconds),
                 "status": str(m.status),
                 "audio": audio_state(m),
+                "missing_channels": list(m.missing_channels),
                 "staged": m.dir.parent != config.paths.meetings_dir,
                 "title": index.meeting_title(m),
                 "transcript": m.transcript_path.exists(),
@@ -546,11 +659,32 @@ def run_list(config: Config, as_json: bool = False) -> int:
     summary = f"\n{len(meetings)} meeting{'s' if len(meetings) != 1 else ''}"
     if pending:
         summary += f", {pending} with unnamed speakers - run: referat label"
-    staged = sum(1 for m in meetings if m.dir.parent != config.paths.meetings_dir)
-    if staged:
-        # Still in staging means the audio was kept, so the transcript was not
-        # trusted. Say so, or these read as identical to the finished ones.
-        summary += f", {staged} still local with audio kept - run: referat rerun"
+    # Still in staging means the audio is still there, and there are two reasons
+    # for that which want opposite advice. A meeting the gate refused wants a
+    # `rerun`; one kept on request has a fine transcript already and wants
+    # `promote --release-audio` when its audio has served its purpose. The
+    # `audio_kept` note in `meta.json` is what tells them apart — before
+    # `[transcription].keep_audio` existed there was only the first kind, and this
+    # line said `run: referat rerun` for both.
+    # A meeting still being recorded or transcribed is in staging because it has
+    # not finished, which is neither of those reasons and wants no advice at all —
+    # `referat rerun` on a live recording is the worst thing this line could
+    # suggest, and it suggested it.
+    staged = [
+        m
+        for m in meetings
+        if m.dir.parent != config.paths.meetings_dir
+        and m.status not in (MeetingStatus.RECORDING, MeetingStatus.TRANSCRIBING)
+    ]
+    untrusted = [m for m in staged if not m.transcription.get("audio_kept")]
+    on_request = [m for m in staged if m.transcription.get("audio_kept")]
+    if untrusted:
+        summary += f", {len(untrusted)} still local with audio kept - run: referat rerun"
+    if on_request:
+        summary += (
+            f", {len(on_request)} keeping audio on request "
+            f"- run: referat promote --release-audio"
+        )
     print(summary)
     return 0
 
@@ -569,6 +703,275 @@ def _resolve_meeting(config: Config, meeting_id: str, command: str) -> Meeting |
     if meeting is None:
         print(f"referat {command}: {why}", file=sys.stderr)
     return meeting
+
+
+# --- referat show, referat transcript ---------------------------------------
+
+
+def show_document(config: Config, meeting: Meeting) -> dict[str, Any]:
+    """`referat show <id> --json`: one meeting's whole record.
+
+    The fifth JSON document, and the first written for the command center rather
+    than for the extension. It is `meta.json` itself under `meta` — through
+    :meth:`referat.meeting.Meeting.to_json`, so the pipeline's own serializer
+    decides what a record is — wrapped in the derived answers every other surface
+    already asks Python for instead of working out: the title, the formatted
+    duration, the audio state and whether the folder is still staged.
+
+    Those four are the whole reason this is not `cat meta.json`. Each of them
+    exists exactly once in Python and is shared by three or more callers *so that
+    they cannot disagree*, which is the argument :func:`list_document` makes at
+    greater length.
+
+    The interesting half is inside `meta`, and it is `transcription`: the model
+    and device a run used, the per-channel quality numbers the gate judged, and
+    the per-channel `speakers` block with each cluster's match score and its
+    runner-up. That last is recorded even where the match was *refused*, and
+    nothing has ever printed it — which makes this the first way to read the
+    near-misses that are the only material for calibrating
+    `[speakers].match_threshold` and `match_margin` against real voices.
+    """
+    return {
+        "id": meeting.id,
+        "dir": str(meeting.dir),
+        "staged": meeting.dir.parent != config.paths.meetings_dir,
+        "title": index.meeting_title(meeting),
+        "duration": format_duration(meeting.duration_seconds),
+        "audio": audio_state(meeting),
+        "unnamed": voices.unknown_speakers(meeting),
+        "projects": projects.ProjectsDB.load(config).name_map(),
+        "files": {
+            "transcript": meeting.transcript_path.exists(),
+            "notes": (meeting.dir / paths.NOTES_MD).exists(),
+            "mic": meeting.mic_path.exists(),
+            "system": meeting.system_path.exists(),
+        },
+        "meta": meeting.to_json(),
+    }
+
+
+def run_show(config: Config, meeting_id: str, as_json: bool = False) -> int:
+    """`referat show`. The record for a person, or the document for the window."""
+    meeting = _resolve_meeting(config, meeting_id, "show")
+    if meeting is None:
+        return 1
+    document = show_document(config, meeting)
+    if as_json:
+        print(json.dumps(document, indent=2))
+        return 0
+
+    known = document["projects"]
+    lost = f" (no {'/'.join(meeting.missing_channels)})" if meeting.missing_channels else ""
+    paused = f", {len(meeting.pauses)} pause(s)" if meeting.pauses else ""
+    lines = [
+        meeting.id if document["title"] == meeting.id else f"{meeting.id}  {document['title']}",
+        f"  status     {meeting.status}{lost}",
+        f"  started    {meeting.started_at.isoformat(timespec='seconds')}",
+        f"  duration   {document['duration']}{paused}",
+        f"  audio      {document['audio']}",
+        f"  folder     {meeting.dir}" + ("  (staging)" if document["staged"] else ""),
+        f"  tags       {tags_cell(meeting, known)}",
+    ]
+    transcription = meeting.transcription
+    if transcription:
+        model = transcription.get("model") or "?"
+        device = transcription.get("device") or "?"
+        lines.append(f"  model      {model} on {device}")
+    for channel, block in sorted((transcription.get("channels") or {}).items()):
+        if isinstance(block, dict):
+            lines.append(f"  {channel:<10} {_channel_line(block)}")
+    for label, speaker in sorted(_speaker_blocks(transcription).items()):
+        lines.append(f"  {label:<10} {_speaker_line(meeting, label, speaker)}")
+    if document["unnamed"]:
+        lines.append(
+            f"  unnamed    {', '.join(document['unnamed'])} "
+            f"- run: referat label {meeting.id}"
+        )
+    print("\n".join(lines))
+    return 0
+
+
+CHANNEL_NUMBERS = ("avg_logprob", "compression_ratio", "no_speech_prob", "voiced_seconds")
+"""The quality numbers `referat show` prints, in the order the gate reads them.
+
+Not every key of the block: `peak`, `speech_seconds` and `language` are in the
+JSON for whoever needs them, and these four are the ones a person calibrating
+`[transcription]`'s thresholds is looking at. `voiced_seconds` is here because it
+is what decides a channel is *silent* rather than garbled, which is the verdict
+most likely to surprise — an in-person meeting's loopback is silent and clean."""
+
+
+def _channel_line(block: dict[str, Any]) -> str:
+    """One transcribed channel's quality numbers, as the gate saw them."""
+    parts = [f"{block.get('segments', 0)} segments"]
+    for key in CHANNEL_NUMBERS:
+        value = block.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            parts.append(f"{key}={value:.3f}")
+    if block.get("silent"):
+        parts.append("silent")
+    parts.append("clean" if block.get("clean") else "not clean")
+    diarization = block.get("diarization")
+    if isinstance(diarization, dict):
+        turns = diarization.get("turns")
+        state = diarization.get("status") or "?"
+        parts.append(f"diarization {state}" + (f", {turns} turns" if turns else ""))
+    return ", ".join(parts)
+
+
+def _speaker_blocks(transcription: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every `SPEAKER_NN` across both channels' `speakers` maps, flattened.
+
+    The numbering runs across the meeting rather than the channel — see
+    :func:`referat.diarize.assign` — so a label appears under exactly one channel
+    and flattening the two maps cannot put two people behind one key.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for block in (transcription.get("channels") or {}).values():
+        if not isinstance(block, dict):
+            continue
+        for label, speaker in (block.get("speakers") or {}).items():
+            if isinstance(speaker, dict):
+                out[str(label)] = speaker
+    return out
+
+
+def _speaker_line(meeting: Meeting, label: str, speaker: dict[str, Any]) -> str:
+    """What a diarized cluster resolved to, and what the match nearly said.
+
+    The candidate and its runner-up are printed whenever they are recorded,
+    including for a cluster the threshold-and-margin rule *refused*. Those are
+    the near-misses, and they are the only material there is for judging whether
+    the two numbers in `[speakers]` are set anywhere near right — the refused
+    ones more than the accepted, since a refusal is where a threshold is felt.
+
+    `speaker_names` wins over the per-channel `name` where the two differ,
+    because it is the authority on who a label is and `referat label` writes it.
+    The line then says what the match *would* have called the cluster, which on
+    a hand-named speaker is exactly the comparison worth having.
+    """
+    name = meeting.speaker_names.get(label) or speaker.get("name")
+    parts = [str(name) if name else "unnamed"]
+    if speaker.get("echo"):
+        parts.append("echo")
+    match = speaker.get("match")
+    if isinstance(match, dict):
+        verdict = "accepted" if match.get("accepted") else "refused"
+        parts.append(f"match {match.get('name') or '?'} {verdict}")
+        for key, caption in (("score", "score"), ("runner_up", "runner-up")):
+            value = match.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                parts.append(f"{caption} {value:.3f}")
+    snippets = speaker.get("snippets")
+    if isinstance(snippets, list) and snippets:
+        parts.append(f"{len(snippets)} snippets")
+    return "  ".join(parts)
+
+
+def transcript_document(config: Config, meeting: Meeting) -> dict[str, Any]:
+    """`referat transcript <id> --json`: the rendered transcript, parsed back.
+
+    The sixth JSON document, for the command center's transcript pane. The window
+    could read `transcript.md` itself — it is Markdown in a folder — and
+    deliberately does not, for the reason it may not read `meta.json`: the shape
+    of an entry is :mod:`referat.transcribe`'s to describe, and a second parser
+    in the UI would be the first thing to disagree with the renderer the day that
+    shape moves. :func:`referat.transcribe.parse_transcript` is the one parser,
+    and it lives beside :func:`referat.transcribe.render_transcript`.
+
+    Each entry carries its timestamp twice, as seconds and as the `HH:MM:SS` the
+    file renders, because the two are used for different things: the number is
+    what a cross-link from `notes.md` is matched against, and the string is what
+    a reader sees — and formatting it in the UI would put
+    :func:`referat.transcribe.format_timestamp`'s three lines in a second place.
+
+    **The timestamp is audio-elapsed with pauses excluded, and it is not an
+    offset into audio.** By the time anybody reads a transcript the WAVs are
+    normally deleted, so a cross-link is a scroll position and never a seek.
+
+    `labels` is the distinct speaker labels in order of first appearance, which
+    is the order :func:`referat.diarize.assign` numbers them in.
+    """
+    from referat.transcribe import parse_transcript
+
+    path = meeting.transcript_path
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    entries, unparsed = parse_transcript(text)
+    labels: list[str] = []
+    for _at, label, _text in entries:
+        if label not in labels:
+            labels.append(label)
+    return {
+        "id": meeting.id,
+        "dir": str(meeting.dir),
+        "title": index.meeting_title(meeting),
+        "path": str(path),
+        "exists": path.exists(),
+        "duration_seconds": meeting.duration_seconds,
+        "duration": format_duration(meeting.duration_seconds),
+        "labels": labels,
+        "unparsed": unparsed,
+        "entries": [
+            {"at": at, "time": _hms(at), "label": label, "text": text}
+            for at, label, text in entries
+        ],
+    }
+
+
+TRANSCRIPT_HEADERS = ("SPEAKER", "ENTRIES", "WORDS", "SHARE")
+TRANSCRIPT_RIGHT_ALIGNED = (1, 2, 3)
+
+
+def run_transcript(config: Config, meeting_id: str, as_json: bool = False) -> int:
+    """`referat transcript`. Who spoke, how often, and how much of the talking.
+
+    The table is deliberately not the transcript itself, which is a file you can
+    already open and which this console cannot reliably print — the code page
+    here is not UTF-8, and a transcript is the document in this project most
+    likely to hold a character it cannot encode. What it prints instead is the
+    question a rendered transcript answers worst: how the meeting divided up.
+
+    `SHARE` is a share of words rather than of time. Time would read better and
+    is not recoverable: the file records where an entry *started* and never how
+    long it ran, so a share of seconds would have to invent an end for each one.
+    """
+    meeting = _resolve_meeting(config, meeting_id, "transcript")
+    if meeting is None:
+        return 1
+    document = transcript_document(config, meeting)
+    if as_json:
+        print(json.dumps(document, indent=2))
+        return 0
+
+    if not document["exists"]:
+        print(f"referat transcript: {meeting.id} has no transcript.md yet", file=sys.stderr)
+        return 1
+    entries = document["entries"]
+    if not entries:
+        print(f"{meeting.id}: transcript.md holds no entry this parser recognises.")
+        return 1
+
+    counts: dict[str, list[int]] = {}
+    for entry in entries:
+        row = counts.setdefault(entry["label"], [0, 0])
+        row[0] += 1
+        row[1] += len(entry["text"].split())
+    total = sum(row[1] for row in counts.values()) or 1
+    rows = [
+        (label, str(said), str(words), f"{100 * words / total:.0f}%")
+        for label, (said, words) in sorted(counts.items(), key=lambda item: -item[1][1])
+    ]
+    print(render_table(rows, TRANSCRIPT_HEADERS, TRANSCRIPT_RIGHT_ALIGNED))
+    summary = f"\n{len(entries)} entries, {len(counts)} speakers, {document['duration']}"
+    # Never zero — the `## Meeting ...` header is one of them — so this only says
+    # something when there is more than the header it already expects.
+    if document["unparsed"] > 1:
+        summary += f", {document['unparsed'] - 1} lines this parser did not recognise"
+    print(summary)
+    return 0
 
 
 PROJECT_HEADERS = ("ID", "NAME", "MEETINGS", "DOCS")
@@ -634,6 +1037,59 @@ def run_project_list(config: Config, as_json: bool = False) -> int:
     return 0
 
 
+def project_names(config: Config) -> tuple[dict[str, str], str]:
+    """Every project id and what it is called, or the complaint that stopped it.
+
+    The tag picker's whole reading vocabulary. It needs the map **fresh every
+    time it opens** — the sidebar's picker took it from a cached listing and
+    offered one of two projects, because nothing invalidated that cache — and it
+    may not open `projects.json` itself, so this is the one call that answers
+    both.
+
+    Deliberately not :func:`project_document`, which answers a superset and pays
+    a full `load_meetings` scan of both roots for the per-project meeting counts.
+    A picker wants a map of names, and this is one file read.
+
+    The complaint is `writing=False`'s, because that is what this is: with no
+    names loaded every tag would render as an orphan, which is a worse thing to
+    show than a refusal.
+    """
+    db = projects.ProjectsDB.load(config)
+    if db.unreadable:
+        return {}, _unreadable_complaint(db, writing=False)
+    return db.name_map(), ""
+
+
+def create_project(config: Config, name: str) -> tuple[projects.Project | None, str]:
+    """Make a project, or say why not. The only implementation of creating one.
+
+    Returns the :class:`referat.projects.Project` **object**, which is the whole
+    point: an id is `slugify` plus a `-2` collision suffix, so no caller can work
+    it out from the name, and looking it back out of `project list` by display
+    name is wrong the moment two projects share one — which is allowed. The
+    extension had exactly that bug before `project add --json` existed; in
+    process there is no JSON to go through at all.
+
+    The shape is :func:`referat.meeting.resolve_meeting`'s — a value and an
+    unprefixed complaint, empty when it worked — rather than an
+    :class:`Outcome`, because `None` and a failure flag would be the same fact
+    twice.
+
+    The unreadable guard comes before the name check, as it always has: a name
+    complaint about a file that is about to be overwritten with an empty list is
+    advice about the wrong problem.
+    """
+    db = projects.ProjectsDB.load(config)
+    if db.unreadable:
+        return None, _unreadable_complaint(db, writing=True)
+    complaint = projects.name_complaint(name)
+    if complaint:
+        return None, f"a project name {complaint}"
+    project = db.add(name)
+    db.save()
+    return project, ""
+
+
 def run_project(config: Config, args: argparse.Namespace) -> int:
     """`referat project <verb>`. Every verb here is a JSON read and a JSON write."""
     if args.verb is None:
@@ -643,28 +1099,23 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
     if args.verb == "list":
         return run_project_list(config, as_json=args.as_json)
 
-    db = projects.ProjectsDB.load(config)
-    if db.unreadable:
-        return _unreadable_projects(db, f"project {args.verb}", writing=True)
-
     if args.verb == "add":
-        complaint = projects.name_complaint(args.name)
-        if complaint:
-            print(f"referat project add: a project name {complaint}", file=sys.stderr)
+        # Delegated before the shared load below, or `project add` would read
+        # `projects.json` twice: once for the guard here and once inside
+        # `create_project`, which owns the guard for its own callers anyway.
+        project, complaint = create_project(config, args.name)
+        if project is None:
+            print(f"referat project add: {complaint}", file=sys.stderr)
             return 1
-        project = db.add(args.name)
-        db.save()
         if getattr(args, "as_json", False):
-            # The id is `slugify` plus a collision suffix, so a caller cannot work
-            # it out from the name — and matching the name back out of `project
-            # list` is wrong whenever two projects share one, which is allowed.
-            # The extension had that bug: it created the project and then tagged
-            # the meeting with the first project of the same name, or with
-            # nothing at all.
             print(json.dumps(project.to_json(), indent=2))
             return 0
         print(f"{project.id}  {project.name}")
         return 0
+
+    db = projects.ProjectsDB.load(config)
+    if db.unreadable:
+        return _unreadable_projects(db, f"project {args.verb}", writing=True)
 
     if args.verb == "rename":
         complaint = projects.name_complaint(args.name)
@@ -700,8 +1151,33 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
     return 2
 
 
-def _unreadable_projects(db: projects.ProjectsDB, command: str, writing: bool) -> int:
-    """Stop a command that cannot tell an empty projects file from an unparseable one.
+@dataclass(frozen=True)
+class Outcome:
+    """What a mutation did, in the words of whoever owns the rule.
+
+    The in-process form of what `cli.ts`'s `mutate` gives the VS Code extension:
+    a refusal reaches the user as the sentence the rule's owner wrote, never as
+    something the caller paraphrased. The extension gets it as the CLI's stderr;
+    the command center gets it as this.
+
+    **`message` is unprefixed and the caller adds its own.** Not a style
+    preference — the prefix is direction-dependent. `referat tag` says `referat
+    tag:` and `referat untag` says `referat untag:`, while the command center's
+    picker calls both directions in one gesture and has no command to name, so a
+    prefix baked in here would be wrong for somebody. That is exactly the
+    reasoning :func:`referat.meeting.resolve_meeting` already records for
+    returning its complaint rather than printing it.
+
+    Deliberately not named for writing: an idempotent no-op comes back `ok` with
+    nothing written, and that is the case this report exists to describe.
+    """
+
+    ok: bool
+    message: str
+
+
+def _unreadable_complaint(db: projects.ProjectsDB, writing: bool) -> str:
+    """Why a command stops when it cannot tell an empty projects file from a broken one.
 
     An unreadable file loads as *no projects*. That is right for reading — the
     meetings table still renders, with every tag shown as an orphan — and
@@ -717,81 +1193,133 @@ def _unreadable_projects(db: projects.ProjectsDB, command: str, writing: bool) -
         if writing
         else "so nothing can be tagged until it is"
     )
-    print(
-        f"referat {command}: {db.path} exists but could not be read, "
-        f"{consequence}. Fix or delete that file first.",
-        file=sys.stderr,
+    return (
+        f"{db.path} exists but could not be read, {consequence}. "
+        f"Fix or delete that file first."
     )
+
+
+def _unreadable_projects(db: projects.ProjectsDB, command: str, writing: bool) -> int:
+    print(f"referat {command}: {_unreadable_complaint(db, writing)}", file=sys.stderr)
     return 1
+
+
+def _unknown_complaint(db: projects.ProjectsDB, ids: Sequence[str]) -> str:
+    """Ids nothing resolves, and what would have worked. One id or many, one sentence."""
+    known = ", ".join(sorted(db.projects)) or "none yet"
+    return f"no project {', '.join(ids)} (known: {known})"
 
 
 def _no_such_project(db: projects.ProjectsDB, pid: str, command: str) -> int:
-    """Complain about an id nothing resolves, and say what would have worked."""
-    known = ", ".join(sorted(db.projects)) or "none yet"
-    print(f"referat {command}: no project {pid} (known: {known})", file=sys.stderr)
+    print(f"referat {command}: {_unknown_complaint(db, [pid])}", file=sys.stderr)
     return 1
 
 
-def run_tag(config: Config, meeting_id: str, project_ids: list[str]) -> int:
-    """`referat tag <meeting-id> <project-id>...`. Idempotent, and several at a time.
+def apply_tags(
+    config: Config,
+    meeting_id: str,
+    *,
+    add: Sequence[str] = (),
+    remove: Sequence[str] = (),
+) -> Outcome:
+    """Add and remove project tags on one meeting. The only implementation of that.
 
-    Unknown ids are **refused**, unlike in `untag`: an id no project answers to is
-    an orphan, and the one way to create one on purpose should be deleting a
-    project rather than mistyping at a prompt.
+    `referat tag` is this with `add` alone, `referat untag` is this with `remove`
+    alone, and the command center's tag picker is this with both — which is why
+    it takes both rather than being two functions. A picker is a diff, and doing
+    it in one call means one `meta.json` write rather than two.
+
+    Deliberately a **diff and never a replacement**. A `tags=[...]` form that
+    worked out the difference in here is tempting, and it would make the
+    two-sets bug in a picker structurally impossible — but it cannot express
+    `referat tag`, which must not remove anything, and a replacement silently
+    drops any tag the caller failed to render. A tag disappearing quietly off
+    three meetings is the failure this codebase keeps designing against, so the
+    diff form is the safe one.
+
+    **The projects file is opened only when something is being added**, and that
+    asymmetry is load-bearing rather than an optimization. `remove_tags` asks
+    nothing about whether an id names a real project, because an orphan is
+    precisely the tag somebody needs to be able to take off a meeting; guarding
+    an untag on the file being readable would make a broken `projects.json` the
+    one thing that pins an orphan to a meeting forever. So a pure removal never
+    reads it, exactly as `referat untag` never has.
+
+    Additions are applied before removals. Nothing here refuses an id in both
+    lists — the picker cannot produce one, since its two sets are disjoint by
+    construction — and if one ever arrived it would be added and then removed,
+    which is what the arguments literally ask for.
     """
-    db = projects.ProjectsDB.load(config)
-    if db.unreadable:
-        return _unreadable_projects(db, "tag", writing=False)
-    unknown = [pid for pid in project_ids if pid not in db.projects]
-    if unknown:
-        known = ", ".join(sorted(db.projects)) or "none yet"
-        print(
-            f"referat tag: no project {', '.join(unknown)} (known: {known})",
-            file=sys.stderr,
-        )
-        return 1
+    add, remove = list(add), list(remove)
+    if add:
+        db = projects.ProjectsDB.load(config)
+        if db.unreadable:
+            return Outcome(False, _unreadable_complaint(db, writing=False))
+        unknown = [pid for pid in add if pid not in db.projects]
+        if unknown:
+            # Refused, unlike a removal: an id no project answers to is an
+            # orphan, and the one way to make one on purpose should be deleting a
+            # project rather than mistyping at a prompt.
+            return Outcome(False, _unknown_complaint(db, unknown))
 
-    meeting = _resolve_meeting(config, meeting_id, "tag")
+    meeting, why = resolve_meeting(config, meeting_id)
     if meeting is None:
-        return 1
+        return Outcome(False, why)
 
-    added = projects.add_tags(meeting, project_ids)
-    if added:
+    added = projects.add_tags(meeting, add) if add else []
+    removed = projects.remove_tags(meeting, remove) if remove else []
+    if added or removed:
         meeting.save()
-    print(_tag_report(meeting, added, project_ids, "tagged", "already tagged"))
+    lines = [
+        *_tag_lines(meeting.id, added, add, "tagged", "already tagged"),
+        *_tag_lines(meeting.id, removed, remove, "untagged", "was not tagged"),
+        f"tags: {', '.join(meeting.tags) if meeting.tags else 'none (untagged)'}",
+    ]
+    return Outcome(True, "\n".join(lines))
+
+
+def _tag_lines(
+    meeting_id: str, changed: list[str], asked: list[str], verb: str, unchanged: str
+) -> list[str]:
+    """What one direction of a tag change says, as zero, one or two lines.
+
+    Idempotent commands that print nothing are indistinguishable from ones that
+    failed silently, so both halves are named: what changed, and what was asked
+    for and did not.
+
+    The meeting's whole tag list is *not* appended here, which is the one thing
+    that stopped this being reusable. It has to be printed once, after **both**
+    directions have been applied — printed per direction it would appear twice,
+    the first time showing a list that was true for a moment in the middle of a
+    write nobody asked to see.
+    """
+    lines = []
+    if changed:
+        lines.append(f"{meeting_id}: {verb} {', '.join(changed)}")
+    skipped = [pid for pid in asked if pid not in changed]
+    if skipped:
+        lines.append(f"{meeting_id}: {', '.join(skipped)} {unchanged}")
+    return lines
+
+
+def run_tag(config: Config, meeting_id: str, project_ids: list[str]) -> int:
+    """`referat tag <meeting-id> <project-id>...`. Idempotent, and several at a time."""
+    outcome = apply_tags(config, meeting_id, add=project_ids)
+    if not outcome.ok:
+        print(f"referat tag: {outcome.message}", file=sys.stderr)
+        return 1
+    print(outcome.message)
     return 0
 
 
 def run_untag(config: Config, meeting_id: str, project_ids: list[str]) -> int:
     """`referat untag <meeting-id> <project-id>...`. Idempotent, and orphans included."""
-    meeting = _resolve_meeting(config, meeting_id, "untag")
-    if meeting is None:
+    outcome = apply_tags(config, meeting_id, remove=project_ids)
+    if not outcome.ok:
+        print(f"referat untag: {outcome.message}", file=sys.stderr)
         return 1
-
-    removed = projects.remove_tags(meeting, project_ids)
-    if removed:
-        meeting.save()
-    print(_tag_report(meeting, removed, project_ids, "untagged", "was not tagged"))
+    print(outcome.message)
     return 0
-
-
-def _tag_report(
-    meeting: Meeting, changed: list[str], asked: list[str], verb: str, unchanged: str
-) -> str:
-    """What `tag` and `untag` say afterwards, including when they did nothing.
-
-    Idempotent commands that print nothing are indistinguishable from ones that
-    failed silently, so both halves are named and the meeting's whole tag list is
-    printed after.
-    """
-    lines = []
-    if changed:
-        lines.append(f"{meeting.id}: {verb} {', '.join(changed)}")
-    skipped = [pid for pid in asked if pid not in changed]
-    if skipped:
-        lines.append(f"{meeting.id}: {', '.join(skipped)} {unchanged}")
-    lines.append(f"tags: {', '.join(meeting.tags) if meeting.tags else 'none (untagged)'}")
-    return "\n".join(lines)
 
 
 def run_state(config: Config, meeting_id: str, transition: str) -> int:
@@ -867,13 +1395,20 @@ def run_promote(config: Config, meeting_id: str, *, release_audio: bool) -> int:
     if kept and not release_audio:
         names = ", ".join(p.name for p in kept)
         megabytes = sum(p.stat().st_size for p in kept) / 1e6
+        # A rerun is the advice for a meeting the gate refused, and no advice at
+        # all for one kept on request: its gate already passed, so a rerun would
+        # keep the audio all over again.
+        retry = (
+            ""
+            if meeting.transcription.get("audio_kept")
+            else f" - or `referat rerun {meeting.id}` to try for a transcript the gate accepts"
+        )
         print(
             f"referat promote: {meeting.id} still holds {names} ({megabytes:.1f} MB), "
             f"and audio may never enter {config.paths.meetings_dir}.\n"
             f"                 pass --release-audio to delete "
             f"{'them' if len(kept) != 1 else 'it'} and promote anyway - the "
-            f"transcript is all that would be left - or `referat rerun "
-            f"{meeting.id}` to try for a transcript the gate accepts",
+            f"transcript is all that would be left{retry}",
             file=sys.stderr,
         )
         return 1
@@ -1095,6 +1630,241 @@ def run_relabel(config: Config, meeting_id: str | None) -> int:
     return 0
 
 
+# --- referat debleed --------------------------------------------------------
+
+
+def _debleed_complaint(meeting: Meeting) -> str:
+    """Why this meeting cannot be de-duplicated from its rendered transcript, or `""`.
+
+    The structural gate, and it is the whole reason this command is defensible on
+    a file with no channel column. A rendered entry does not say which WAV it came
+    out of, but `meta.json` still records which `SPEAKER_NN` clustered on which
+    channel and what each resolved to — so a **name resolving to clusters on both
+    channels** is a person who was recorded twice, and a name on the microphone
+    alone is somebody in the room who cannot have been. Everything this command
+    removes is a pair where at least one side carries a two-channel name.
+
+    What the gate cannot do is say which of two `Benjamin:` lines is the
+    microphone's. That is unrecoverable for a file whose audio is gone, and it is
+    why the kept copy is chosen by containment rather than by provenance.
+    """
+    channels = meeting.transcription.get("channels") or {}
+    if not isinstance(channels, dict) or not channels:
+        return "no meta.json record of which channels held which speakers"
+    if (meeting.transcription.get("bleed") or {}).get("status") == "suppressed":
+        # Already cleaned where the evidence was strongest. Running the weaker
+        # rule over the result would be double jeopardy on the survivors.
+        return "the pipeline already suppressed this meeting's bleed"
+    system = channels.get("system")
+    if not isinstance(system, dict) or system.get("silent") or not system.get("segments"):
+        return "the loopback channel held no voice, so nothing here was recorded twice"
+    if not _two_channel_names(meeting):
+        return "no name resolves to clusters on both channels, so nothing here is echo"
+    return ""
+
+
+def _two_channel_names(meeting: Meeting) -> set[str]:
+    """Names whose clusters appear on more than one channel — the ones recorded twice."""
+    where: dict[str, set[str]] = {}
+    for channel, entry in (meeting.transcription.get("channels") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for label in entry.get("speakers") or {}:
+            if name := meeting.speaker_names.get(label):
+                where.setdefault(name, set()).add(str(channel))
+    return {name for name, channels in where.items() if len(channels) > 1}
+
+
+def run_debleed(config: Config, meeting_id: str | None, *, apply: bool = False) -> int:
+    """`referat debleed [<meeting-id>] [--apply]` - collapse lines recorded twice.
+
+    The repair for a transcript written before the pipeline suppressed bleed,
+    whose audio has since been released so no `rerun` can regenerate it. Third in
+    the family after `reflow` and `relabel`, and by some distance the most
+    invasive: those two insert whitespace and rewrite a metadata field, and this
+    one **deletes whole entries**.
+
+    So it is dry by default and says what it would do. `--apply` writes, and
+    writes `meta.json` *first*: every removed entry is recorded under
+    `transcription.debleed.removed` with the line kept in its place, before the
+    transcript is touched. That is what keeps this on the right side of the
+    immutability rule, whose stated reason is that a transcript somebody has fixed
+    is no longer evidence of what was said. A removal you can read back and undo
+    by hand is still evidence; one you cannot is not. It is the same move
+    `speaker_names` makes for `--forget` — keep the mapping that makes the
+    operation reversible, because the Markdown alone cannot say what it used to
+    be. An interruption between the two writes leaves a record of a removal that
+    did not happen, which is noise; the other order would leave a removal with no
+    record, which is the thing being avoided.
+
+    **Which copy is kept is decided by containment and nothing else**: the one
+    whose words include the other's, and on a tie the longer. Not the
+    better-punctuated one, which is the obvious rule and was measured to be a coin
+    flip - across 67 pairs the longer copy was better punctuated 24 times, worse
+    20, tied 23. Containment is the only tie-break that cannot lose a word.
+
+    Whole lines are deleted from the file and nothing is re-rendered, exactly as
+    :func:`referat.transcribe.reflow_transcript` works: every surviving line stays
+    byte-identical, so a hand-annotated transcript is not quietly reformatted and
+    no timestamp is rounded back through `format_timestamp`.
+
+    **Convergent rather than idempotent**, which is the one place this differs
+    from `reflow` and `relabel`. Pairing is greedy and disjoint, so removing a
+    line can leave two others adjacent that were not before: on
+    `2026-09-02_1059` the passes went 66, then 1, then none. It reaches a fixed
+    point and stops, and `transcription.debleed.removed` **accumulates across
+    passes** rather than being replaced - without that, a second pass would leave
+    67 lines gone from the file and 1 recorded, which is exactly the
+    unreviewable deletion the record exists to prevent.
+    """
+    from referat.bleed import duplicates, tokens
+    from referat.transcribe import parse_entry
+
+    if meeting_id:
+        meeting = _resolve_meeting(config, meeting_id, "debleed")
+        if meeting is None:
+            return 1
+        meetings = [meeting]
+    else:
+        meetings = load_meetings(config)
+
+    if not meetings:
+        print(f"No meetings in {config.paths.meetings_dir} yet.")
+        return 0
+
+    settings = config.bleed
+    rewritten = 0
+    for meeting in meetings:
+        if not meeting.transcript_path.exists():
+            print(f"{meeting.id}: no transcript.md")
+            continue
+        why = _debleed_complaint(meeting)
+        if why:
+            print(f"{meeting.id}: left alone - {why}")
+            continue
+
+        try:
+            text = meeting.transcript_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"referat debleed: could not read {meeting.transcript_path}: {exc}")
+            continue
+        lines = text.split("\n")
+        # Line numbers are carried through so the removal is by position in the
+        # file rather than by matching the text again later.
+        entries = [
+            (i, *parsed) for i, line in enumerate(lines) if (parsed := parse_entry(line))
+        ]
+        both = _two_channel_names(meeting)
+        collapsed = _collapse(entries, settings, both, duplicates, tokens)
+
+        short = sum(
+            1 for _i, _at, label, t in entries if label in both and len(tokens(t)) < settings.min_tokens
+        )
+        if not collapsed:
+            print(f"{meeting.id}: no duplicated remote lines ({short} too short to judge)")
+            continue
+
+        if not apply:
+            print(f"\n{meeting.id}: would remove {len(collapsed)} entr(ies)\n")
+            for drop, keep in collapsed:
+                print(f"  - [{_hms(drop[1])}] {drop[2]}: {drop[3]}")
+                print(f"  keep [{_hms(keep[1])}] {keep[2]}: {keep[3]}\n")
+            print(
+                f"  {len(collapsed)} of {sum(1 for e in entries if e[2] in both)} entries "
+                f"under a two-channel name; {short} of those are under "
+                f"{settings.min_tokens} tokens and were never eligible.\n"
+                f"  Dry run. Use --apply to write."
+            )
+            continue
+
+        removed = [
+            {
+                "at": _hms(drop[1]),
+                "label": drop[2],
+                "text": drop[3],
+                "kept_at": _hms(keep[1]),
+                "kept_label": keep[2],
+            }
+            for drop, keep in collapsed
+        ]
+        block = dict(meeting.transcription)
+        # **Appended, never replaced.** A second pass can find a further pair -
+        # removing one line makes two others adjacent that were not before - and
+        # the first draft of this overwrote `removed` on that second pass, so
+        # 67 lines were gone from the file and 1 was recorded. That destroys the
+        # reversibility this whole command is justified by, which makes the
+        # accumulation load-bearing rather than tidy.
+        previous = meeting.transcription.get("debleed") or {}
+        earlier = previous.get("removed") if isinstance(previous, dict) else None
+        block["debleed"] = {
+            "at": dt.datetime.now().isoformat(timespec="seconds"),
+            "settings": {
+                "window": settings.window,
+                "contain": settings.contain,
+                "back_contain": settings.back_contain,
+                "min_tokens": settings.min_tokens,
+            },
+            "removed": (earlier if isinstance(earlier, list) else []) + removed,
+        }
+        meeting.transcription = block
+        meeting.save()
+
+        doomed = {drop[0] for drop, _keep in collapsed}
+        kept_lines = [line for i, line in enumerate(lines) if i not in doomed]
+        try:
+            paths.write_text_atomic(meeting.transcript_path, "\n".join(kept_lines))
+        except OSError as exc:
+            print(f"referat debleed: could not write {meeting.transcript_path}: {exc}")
+            return 1
+        rewritten += 1
+        print(f"{meeting.id}: removed {len(collapsed)} entr(ies), recorded in meta.json")
+
+    if len(meetings) > 1:
+        print(f"\n{len(meetings)} meeting(s), {rewritten} rewritten")
+    return 0
+
+
+def _hms(seconds: float) -> str:
+    total = max(0, int(seconds))
+    return f"{total // 3600:02d}:{total % 3600 // 60:02d}:{total % 60:02d}"
+
+
+def _collapse(entries, settings, both, duplicates, tokens):
+    """Disjoint `(drop, keep)` pairs among the entries of one rendered transcript.
+
+    Greedy and disjoint: once an entry has been paired it is neither removed twice
+    nor used to justify a second removal, so the count printed is the count of
+    lines that would actually go.
+
+    At least one side must carry a name that resolved on both channels - see
+    :func:`_debleed_complaint`. Without that gate this is a rule about text alone,
+    and a rule about text alone pairs one room speaker with another.
+    """
+    found, used = [], set()
+    for a, first in enumerate(entries):
+        if a in used:
+            continue
+        for b in range(a + 1, len(entries)):
+            if b in used:
+                continue
+            second = entries[b]
+            if second[1] - first[1] > settings.window:
+                break
+            if first[2] not in both and second[2] not in both:
+                continue
+            if not duplicates(first[3], second[3], settings):
+                continue
+            keep, drop = (
+                (first, second)
+                if len(tokens(first[3])) >= len(tokens(second[3]))
+                else (second, first)
+            )
+            found.append((drop, keep))
+            used.update({a, b})
+            break
+    return found
+
+
 # --- referat delete ---------------------------------------------------------
 
 
@@ -1265,7 +2035,33 @@ def run_status(as_json: bool = False) -> int:
     jobs = f", {current.jobs} transcription job{'s' if current.jobs != 1 else ''}"
     print(f"tray pid {current.pid}{jobs if current.jobs else ''}")
     print(f"updated {current.updated_at}")
+    print(_code_line(current.code_mtime))
     return 0
+
+
+def _code_line(code_mtime: str | None) -> str:
+    """What code the running tray loaded, and whether the checkout has moved since.
+
+    This is the half of the build stamp the tray cannot do for itself: a process
+    cannot see edits made after it started, and this one is a fresh interpreter
+    that reads the checkout as it is now. The tray menu shows the same timestamp
+    without the comparison, which is why this line exists.
+    """
+    if not code_mtime:
+        return "code (this tray predates the build stamp; restart it to get one)"
+    try:
+        loaded = dt.datetime.fromisoformat(code_mtime)
+    except ValueError:
+        return "code unknown"
+    line = f"code {loaded.strftime(build_info.STAMP)}"
+    on_disk = build_info.source_mtime()
+    if build_info.outdated(loaded, on_disk) and on_disk is not None:
+        # Said without the word "stale", which two lines above means a status file
+        # left by a tray that died. Editing the code while the tray runs is the
+        # normal way of working here; this is only the reminder that the running
+        # process is not what is on disk yet.
+        return f"{line} - newer code on disk ({on_disk.strftime(build_info.STAMP)}); restart the tray"
+    return line
 
 
 def _elapsed_short(started_at: str | None) -> str | None:
@@ -1401,6 +2197,45 @@ def _loopback_section(recorder: ModuleType, wanted: str) -> str:
     return "\n".join(lines)
 
 
+HOTWORD_HEADERS = ("TERM", "SOURCE")
+
+
+def run_hotwords(config: Config) -> int:
+    """`referat hotwords` -- the list, where each term came from, and what was cut.
+
+    No `--json`. Nothing reads this document: the JSON verbs exist because a
+    surface asked for them, and one nobody consumes would be speculative. Two JSON
+    reads, so it needs no optional extra -- naming what Whisper will be told
+    should not cost three gigabytes of resident torch.
+    """
+    from referat import hotwords
+
+    terms = hotwords.collect(config)
+    if not terms:
+        print("No hotwords. A term reaches this list from one of three places:")
+        print("  [transcription].hotword_extras in config.toml")
+        print("  a name in the known-voices database (referat label)")
+        print("  a project's glossary, hand-edited into projects.json")
+        return 0
+
+    kept, dropped = hotwords.cap(terms)
+    print(render_table([(t.term, t.source) for t in kept], HOTWORD_HEADERS))
+    used = sum(hotwords.estimate_tokens(t.term) for t in kept)
+    print()
+    print(
+        f"{len(kept)} term{'s' if len(kept) != 1 else ''}, "
+        f"about {used} of {hotwords.TOKEN_BUDGET} tokens of Whisper's prompt window"
+    )
+    if dropped:
+        # Named rather than counted. A cap nobody can see is how this turns into a
+        # bug report about one specific name that is never heard right.
+        print(
+            f"{len(dropped)} dropped by the cap, lowest priority first: "
+            + ", ".join(f"{t.term} ({t.source})" for t in dropped)
+        )
+    return 0
+
+
 def run_devices(config: Config) -> int:
     """`referat devices`. What is plugged in, and what `[audio]` does with it."""
     import sounddevice as sd
@@ -1425,9 +2260,14 @@ def _label_complaint(args: argparse.Namespace) -> str | None:
     Saying so in a sentence beats argparse naming the flags and leaving the
     caller to work out which pair it objected to.
     """
-    modes = sum(bool(x) for x in (args.forget, args.speaker, args.as_json))
+    modes = sum(
+        bool(x) for x in (args.forget, args.speaker, args.as_json, args.drop_voiceprint)
+    )
     if modes > 1:
-        return "--forget, --speaker and --json are three different operations; pick one"
+        return (
+            "--forget, --speaker, --json and --drop-voiceprint are four different "
+            "operations; pick one"
+        )
     if args.speaker and not args.name:
         return "--speaker needs --name"
     if args.name and not args.speaker:
@@ -1439,15 +2279,62 @@ def _label_complaint(args: argparse.Namespace) -> str | None:
         # Forgetting is global by definition: it reverts the labels in *every*
         # transcript, so a meeting id here means the caller expects it not to.
         return "--forget acts on every meeting; it takes no meeting id"
-    if args.yes and not args.forget:
-        return "--yes only answers --forget's confirmation"
+    # And this one is the opposite: a voiceprint is addressed by the meeting and
+    # the cluster it came from, which is the only handle on it that exists.
+    if args.drop_voiceprint and not args.meeting_id:
+        return "--drop-voiceprint needs the meeting id the voiceprint came from"
+    if args.yes and not (args.forget or args.drop_voiceprint):
+        return "--yes only answers the confirmation --forget and --drop-voiceprint ask for"
     return None
 
 
 # --- Entry point ------------------------------------------------------------
 
 
+def log_interrupts() -> None:
+    """Log the moment a Ctrl+C *arrives*, which is not when it is felt.
+
+    Windows delivers `CTRL_C_EVENT` to every process attached to the console, and
+    Python can only turn one into a `KeyboardInterrupt` at a bytecode boundary. A
+    long call into C — `ctranslate2.models.Whisper(...)`, which is minutes of
+    model loading and inference — swallows the delay entirely, so the traceback
+    points at wherever the interpreter next got a turn and says nothing about when
+    the signal came in or how many arrived.
+
+    That difference is the whole diagnosis. A run started from the VS Code
+    terminal died six seconds in, three times, while the same command in a plain
+    shell completed; the arrival time is what distinguishes something typed by a
+    person from something the terminal injected on its own schedule. So the
+    handler logs and then does exactly what the default one does.
+
+    Installed in `main` and nowhere else: the tray must keep Python's default
+    handling, and a library that changed signal disposition on import would be a
+    trap.
+    """
+    started = time.monotonic()
+    seen = 0
+
+    def handler(signum: int, frame: Any) -> None:
+        nonlocal seen
+        seen += 1
+        log.warning(
+            "SIGINT #%d arrived %.1fs in; it surfaces as KeyboardInterrupt at the "
+            "next bytecode boundary, which inside a model load can be seconds later",
+            seen,
+            time.monotonic() - started,
+        )
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, handler)
+    except (ValueError, OSError):
+        # Not the main thread, or a platform that will not have it. The default
+        # handler stays, which is the behaviour this only annotates.
+        log.debug("could not install the SIGINT logger", exc_info=True)
+
+
 def main(argv: list[str] | None = None) -> int:
+    log_interrupts()
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -1477,6 +2364,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "list":
         return run_list(config, as_json=args.as_json)
 
+    if args.command == "show":
+        return run_show(config, args.meeting_id, as_json=args.as_json)
+
+    if args.command == "transcript":
+        return run_transcript(config, args.meeting_id, as_json=args.as_json)
+
     if args.command == "index":
         return index.run(config)
 
@@ -1498,6 +2391,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "reflow":
         return run_reflow(config, args.meeting_id)
 
+    if args.command == "debleed":
+        return run_debleed(config, args.meeting_id, apply=args.apply)
+
     if args.command == "relabel":
         return run_relabel(config, args.meeting_id)
 
@@ -1506,6 +2402,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "devices":
         return run_devices(config)
+
+    if args.command == "hotwords":
+        return run_hotwords(config)
 
     if args.command == "label":
         # Imported here rather than at module scope so `referat --version` and
@@ -1522,6 +2421,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if args.forget:
             return labelling.run_forget(config, args.forget, assume_yes=args.yes)
+        if args.drop_voiceprint:
+            assert args.meeting_id
+            return labelling.run_drop_voiceprint(
+                config, args.meeting_id, args.drop_voiceprint, assume_yes=args.yes
+            )
         if args.speaker:
             assert args.meeting_id and args.name
             return labelling.run_apply(config, args.meeting_id, args.speaker, args.name)

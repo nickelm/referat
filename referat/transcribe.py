@@ -32,6 +32,7 @@ Control on this machine blocks that at whatever moment it feels like it.
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import logging
 import os
 import re
@@ -48,7 +49,7 @@ from typing import Any
 
 import numpy as np
 
-from referat import diarize, index, merge, paths, voices
+from referat import bleed, diarize, gpu, hotwords, index, merge, paths, voices
 from referat.config import Config
 from referat.meeting import Meeting, MeetingStatus
 
@@ -657,6 +658,35 @@ def load_model(backend: Backend) -> Any:
 # --- Transcribing -----------------------------------------------------------
 
 
+def _hotword_kwargs(model: Any, config: Config) -> dict[str, str]:
+    """The `hotwords` keyword for this model, or nothing at all.
+
+    Built **here rather than in `cli.py`**, because the tray reaches this pipeline
+    through :func:`transcribe_meeting` and never through the CLI. A merge living
+    in the CLI would apply to `referat rerun` alone, and a rerun would then
+    produce a different transcript from the recording it came from -- which is the
+    one thing a rerun must not do.
+
+    The signature is inspected rather than the call being retried on a
+    `TypeError`, because `model.transcribe` does real work (VAD, features) before
+    it hands back its generator, and a `TypeError` from inside that must not be
+    mistaken for a keyword faster-whisper has renamed. Either way this costs
+    hotwords and never a transcript.
+    """
+    prompt = hotwords.prompt(config)
+    if not prompt:
+        return {}
+    try:
+        accepted = "hotwords" in inspect.signature(model.transcribe).parameters
+    except (TypeError, ValueError):
+        accepted = False
+    if not accepted:
+        log.warning("this faster-whisper takes no `hotwords`; transcribing without the list")
+        return {}
+    log.info("hotwords: %s", prompt)
+    return {"hotwords": prompt}
+
+
 def transcribe_channel(
     meeting: Meeting,
     path: Path,
@@ -679,6 +709,11 @@ def transcribe_channel(
     backend's, so both follow Whisper onto the GPU or the CPU rather than
     choosing for themselves. `meeting` is here for the same reason — the speaker
     snippets are written into its folder.
+
+    The hotword list is merged and handed over here rather than by any caller —
+    see :func:`_hotword_kwargs`. It is the one correction that acts before the
+    transcript exists; everything else is corrected downstream in `notes.md`,
+    because this file is immutable.
     """
     language = config.transcription.language.strip() or None
     started = time.monotonic()
@@ -687,7 +722,9 @@ def transcribe_channel(
     # Two passes over the array rather than one over `np.abs(audio)`, which would
     # copy a quarter of a gigabyte to find a single number.
     peak = float(max(audio.max(initial=0.0), -audio.min(initial=0.0)))
-    segments, info = model.transcribe(audio, language=language, vad_filter=VAD_FILTER)
+    segments, info = model.transcribe(
+        audio, language=language, vad_filter=VAD_FILTER, **_hotword_kwargs(model, config)
+    )
     # How much of the file the VAD took for voice, before any transcription. A
     # channel with no segments *and* nothing voiced held no speech to lose; one
     # with voiced audio and no segments is exactly the case worth keeping. Fall
@@ -808,6 +845,15 @@ def transcribe_channels(
     in tens of minutes, and a resident large-v3 would occupy the GPU for the rest
     of the session.
 
+    `del model` is not by itself what frees it, which is the correction this
+    paragraph carries: torch's caching allocator keeps everything it has taken
+    from the driver, so the tray sat on 8.4 GB of a 12 GB card while idle and the
+    next process to want a model stalled. :func:`referat.gpu.release` is what
+    actually gives it back, and it runs here rather than only at the end of
+    :func:`transcribe_meeting` because the CUDA -> CPU fallback calls this
+    function a second time -- an out-of-memory on the first attempt is precisely
+    when the arena is worth reclaiming.
+
     A channel whose file is missing is skipped — either device may have failed to
     open, and half a meeting is worth far more than none.
 
@@ -865,6 +911,7 @@ def transcribe_channels(
             return results, errors
         finally:
             del model
+            gpu.release(f"transcribing {meeting.id}")
 
 
 # --- Writing transcript.md --------------------------------------------------
@@ -905,6 +952,70 @@ imported from :mod:`referat.label`, whose patterns anchor on a *known speaker* i
 order to rewrite that field; this one asks the weaker question of whether a line
 has the shape this module writes.
 """
+
+
+ENTRY_PARSE_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\] ([^:]+): (.*)$")
+"""One rendered entry, with its three fields captured.
+
+Deliberately separate from :data:`ENTRY_RE` rather than a widening of it. That
+one asks the weak question of whether a line *has* this shape, which is all
+:func:`reflow_transcript` needs to know before putting a blank line beside it;
+this one takes the line apart, which is a stronger claim about the format and is
+used where a wrong answer would delete a line rather than indent one.
+"""
+
+
+def parse_entry(line: str) -> tuple[float, str, str] | None:
+    """One rendered entry back into `(seconds, label, text)`, or None.
+
+    The inverse of the body :func:`render_transcript` writes, and it lives here
+    beside it so the two cannot come to disagree about the format — putting the
+    inverse in another module is the second-place-to-say-it mistake this codebase
+    has already pulled `voices_dir` and `format_duration` back from.
+
+    The label group runs to the **first** colon, which is sound only because
+    :func:`referat.voices.name_complaint` refuses a name containing one, on the
+    stated grounds that it goes into a transcript label. That refusal is what
+    keeps this correct: relax it and this silently starts cutting names in half.
+
+    Seconds come back as a float for the caller's convenience, but the rendering
+    is whole seconds, so a parsed timestamp is never more precise than the file.
+    """
+    match = ENTRY_PARSE_RE.match(line)
+    if match is None:
+        return None
+    hours, minutes, seconds, label, text = match.groups()
+    return float(int(hours) * 3600 + int(minutes) * 60 + int(seconds)), label, text
+
+
+def parse_transcript(text: str) -> tuple[list[tuple[float, str, str]], int]:
+    """A whole `transcript.md` back into its entries, plus the lines that were not.
+
+    The inverse of :func:`render_transcript`'s body, and it lives here beside it
+    for the reason :func:`parse_entry` does: the format is described in one file,
+    so the renderer and the parser cannot drift. That is the same argument
+    :data:`ENTRY_SEPARATOR` makes for being one constant shared with `referat
+    reflow`.
+
+    Returns the entries in file order and a count of the non-blank lines that did
+    not parse. That count is reported rather than swallowed: the header is always
+    one of them, so it is never zero for a real transcript, and a *large* one is
+    how a reader finds out it is looking at a file this module did not write —
+    a hand-annotated transcript, or a format from some later version. Refusing
+    the file outright would be worse, because the entries that did parse are
+    still the meeting.
+    """
+    entries: list[tuple[float, str, str]] = []
+    unparsed = 0
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
+        parsed = parse_entry(line)
+        if parsed is None:
+            unparsed += 1
+        else:
+            entries.append(parsed)
+    return entries, unparsed
 
 
 def render_transcript(meeting: Meeting, entries: list[tuple[float, str, str]]) -> str:
@@ -956,8 +1067,8 @@ def reflow_transcript(text: str) -> tuple[str, int]:
 # --- Releasing the audio ----------------------------------------------------
 
 
-def release_audio_if_clean(meeting: Meeting) -> bool:
-    """Delete the WAVs once every channel has a transcript that looks trustworthy.
+def audio_is_clean(meeting: Meeting) -> bool:
+    """Whether every recorded channel transcribed well enough to delete its audio.
 
     Recording costs about 460 MB an hour, so something has to reclaim it — but
     only when the transcript is certainly good enough to stand in for the audio.
@@ -969,9 +1080,11 @@ def release_audio_if_clean(meeting: Meeting) -> bool:
     the loopback records nothing but silence and notification chimes, would
     otherwise pin every recording to the disk forever.
 
-    **This function is the gate and nothing else.** The deletion itself is
-    :func:`release_audio`, which `referat promote --release-audio` also calls when
-    a person overrules this gate on a `gate_failed` meeting.
+    **The verdict alone**, split out of :func:`release_audio_if_clean` so that
+    `[transcription].keep_audio` can suppress the deletion without costing the
+    verdict. A meeting kept on purpose is not a meeting whose gate failed, and a
+    `keep_audio` guard that simply made the old combined function return `False`
+    would have written `gate_failed` into `meta.json` as a lie.
     """
     if meeting.status is not MeetingStatus.TRANSCRIBED:
         return False
@@ -991,7 +1104,19 @@ def release_audio_if_clean(meeting: Meeting) -> bool:
         log.info("keeping the audio of %s: %s looks unreliable", meeting.id, ", ".join(unclean))
         return False
 
-    return release_audio(meeting) >= 0
+    return True
+
+
+def release_audio_if_clean(meeting: Meeting) -> bool:
+    """Delete the WAVs once every channel has a transcript that looks trustworthy.
+
+    The gate is :func:`audio_is_clean` and the deletion is :func:`release_audio`,
+    which `referat promote --release-audio` also calls when a person overrules
+    the gate on a `gate_failed` meeting. This pairs the two, which is what every
+    caller wanted before `keep_audio` existed and what the pipeline still does
+    whenever it is off.
+    """
+    return audio_is_clean(meeting) and release_audio(meeting) >= 0
 
 
 def release_audio(meeting: Meeting) -> int:
@@ -1044,7 +1169,11 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
     The single entry point: the tray's background thread now, and `referat rerun`
     at build step 8. Raises :class:`TranscriptionError` after marking the meeting
     `failed`, so a folder is never left stuck at `transcribing` with nobody
-    working on it.
+    working on it — and that promise covers `BaseException` and not merely
+    `Exception`, which it did not until 2026-09-02. A `KeyboardInterrupt` is not
+    an `Exception`, so a Ctrl+C walked straight past the handler below and left a
+    meeting saying `transcribing` forever, which `referat delete` then refused to
+    touch and every listing rendered as a lie.
 
     A run where one channel failed and another did not still writes
     `transcript.md` from the channel that worked, and still raises — the meeting
@@ -1053,8 +1182,23 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
     """
     log.info("transcribing %s", meeting.id)
     started = time.monotonic()
+    # Kept so an interrupt can put them back. Everything on disk after a Ctrl+C
+    # is exactly what was there before this call, so the state that describes it
+    # is the state this meeting already had -- unless that state was already
+    # `transcribing`, which is the one value that cannot be restored: it is what
+    # a process killed outright leaves behind, and putting it back would re-create
+    # the very lie this handler exists to prevent. Such a meeting has audio and no
+    # trustworthy transcript, which is `recorded`.
+    was = MeetingStatus.RECORDED if meeting.status is MeetingStatus.TRANSCRIBING else meeting.status
+    had = dict(meeting.transcription)
     meeting.status = MeetingStatus.TRANSCRIBING
-    meeting.transcription = {"status": str(MeetingStatus.TRANSCRIBING)}
+    # Merged rather than replaced. The previous run's `model`, `seconds`,
+    # `audio_released` and `audio_kept` are still true of the files in the folder
+    # until this run overwrites them, and discarding them up front meant an
+    # interrupted rerun destroyed the record of a run that had succeeded. Nothing
+    # stale survives a completed run: `_transcription_meta` below rebuilds the
+    # whole block.
+    meeting.transcription = {**had, "status": str(MeetingStatus.TRANSCRIBING)}
     meeting.save()
 
     backend = resolve_backend(config)
@@ -1080,8 +1224,16 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
                 meeting, config, backend, tolerate_failures=True
             )
 
+        # Both channels exist here and nowhere earlier, which is why suppression
+        # is its own step rather than part of `transcribe_channels`: the mic is
+        # transcribed first so its speakers number from SPEAKER_01, so the loopback
+        # does not exist yet when the mic finishes. The same fact that makes
+        # `merge` a separate step.
+        suppression = bleed.suppress(transcripts, config.bleed, config.speakers.owner_name)
+        bleed.describe(suppression)
         paths.write_text_atomic(
-            meeting.transcript_path, render_transcript(meeting, merge.merge(transcripts))
+            meeting.transcript_path,
+            render_transcript(meeting, merge.merge(bleed.apply(transcripts, suppression))),
         )
     except Exception as exc:
         meeting.status = MeetingStatus.FAILED
@@ -1091,17 +1243,65 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
         meeting.save()
         log.exception("transcription of %s failed", meeting.id)
         raise TranscriptionError(f"could not transcribe {meeting.id}: {exc}") from exc
+    except BaseException as exc:
+        # Ctrl+C, and whatever else arrives as a BaseException. Deliberately
+        # *after* the handler above, since Python matches in source order and
+        # every ordinary failure belongs there.
+        #
+        # The prior state is restored rather than `failed` being written, because
+        # `failed` would be a claim about the artifacts and the artifacts did not
+        # change: the transcript in the folder, the names in `speaker_names` and
+        # both WAVs are the ones that were there when this call began. A meeting
+        # interrupted during its first transcription goes back to `recorded`,
+        # which is what it is; a `rerun` interrupted goes back to `transcribed`,
+        # which is also what it is. `interrupted` records that the attempt
+        # happened, so the abandoned run is written down rather than hidden.
+        meeting.status = was
+        meeting.transcription = {
+            **had,
+            "interrupted": {
+                "at": dt.datetime.now().isoformat(timespec="seconds"),
+                "why": type(exc).__name__,
+                "after_seconds": round(time.monotonic() - started, 1),
+            },
+        }
+        meeting.save()
+        log.warning(
+            "transcription of %s was interrupted by %s; back to %s",
+            meeting.id,
+            type(exc).__name__,
+            meeting.status,
+        )
+        raise
 
     elapsed = time.monotonic() - started
     status = MeetingStatus.FAILED if errors else MeetingStatus.TRANSCRIBED
     meeting.status = status
-    meeting.transcription = _transcription_meta(backend, transcripts, elapsed, status=status)
+    # Marked before the block is built, so `channels` carries `echo: true` and
+    # every surface that reads a cluster out of `meta.json` agrees about which
+    # ones are the loopback coming back.
+    for _label in bleed.mark_clusters(transcripts, suppression):
+        # Cut a minute ago by `_identify`, which had no way to know: the loopback
+        # had not been transcribed yet. They exist only to be played by a prompt
+        # that will now never offer this cluster, and leaving
+        # `speakers/SPEAKER_NN_1.wav` on disk is an invitation to name it by hand.
+        voices.drop_snippets(meeting, _label)
+    meeting.transcription = _transcription_meta(
+        backend, transcripts, elapsed, status=status, suppression=suppression
+    )
     # Re-derived from this run rather than carried over: `referat rerun`
     # re-diarizes and renumbers from scratch, so last week's SPEAKER_02 is not
     # this run's. The names survive anyway, because they are looked up in the
     # database each time rather than remembered here.
+    #
+    # An echo cluster is left out entirely. Its lines are not in the transcript,
+    # so a name here would be a claim about a speaker the file does not contain --
+    # and `speaker_names` is the authority on who a label is.
     meeting.speaker_names = {
-        label: name for t in transcripts for label, name in t.speaker_names.items()
+        label: name
+        for t in transcripts
+        for label, name in t.speaker_names.items()
+        if not getattr((t.speakers or {}).get(label), "echo", False)
     }
     if errors:
         meeting.transcription["errors"] = errors
@@ -1123,15 +1323,43 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
     # deletes. It writes only to the voices database, and it costs nothing when
     # it declines — which is every meeting held in person.
     voices.bootstrap_owner(meeting, transcripts, config)
-    if release_audio_if_clean(meeting):
-        promote_meeting(meeting, config)
-    else:
+    # The gate is asked first and unconditionally, so that `keep_audio` costs the
+    # deletion and never the verdict: a garbled transcript still says
+    # `gate_failed` whether or not somebody asked to keep the audio.
+    if not audio_is_clean(meeting):
         # The lifecycle value that used to be a three-way inference: status is
         # `transcribed`, the WAVs are still there, the folder is still in
         # staging. Every reader worked it out again and none of them could
         # render it honestly, so the pipeline writes it down instead. The
         # transcript itself is fine — `meeting.transcription["status"]` still
         # says so — it is the *audio* that was not trusted enough to delete.
+        meeting.status = MeetingStatus.GATE_FAILED
+        meeting.save()
+    elif config.transcription.keep_audio:
+        # The gate passed and the audio is kept anyway. That is not
+        # `gate_failed`: the status stays `transcribed`, and the meeting stays in
+        # staging only because no WAV may ever reach the meetings folder — see
+        # `promote_meeting`, which refuses it in any case. `referat promote <id>
+        # --release-audio` is the off-ramp once the audio has served its purpose.
+        meeting.transcription["audio_kept"] = {
+            "reason": "config [transcription].keep_audio",
+            "gate": "passed",
+            "at": dt.datetime.now().isoformat(timespec="seconds"),
+        }
+        meeting.save()
+        log.info(
+            "keeping the audio of %s: [transcription].keep_audio is on; "
+            "it stays in %s until `referat promote %s --release-audio`",
+            meeting.id,
+            meeting.dir.parent,
+            meeting.id,
+        )
+    elif release_audio(meeting) >= 0:
+        promote_meeting(meeting, config)
+    else:
+        # The gate accepted the transcript but the deletion itself failed, so the
+        # WAVs are still there and the meeting is still stuck in staging. Same
+        # state, same value, same off-ramp.
         meeting.status = MeetingStatus.GATE_FAILED
         meeting.save()
     # After the promotion, so the meeting that just finished is already in the
@@ -1187,6 +1415,7 @@ def _transcription_meta(
     *,
     status: MeetingStatus = MeetingStatus.TRANSCRIBED,
     error: str | None = None,
+    suppression: bleed.Suppression | None = None,
 ) -> dict[str, Any]:
     """The `transcription` block of `meta.json`: what ran, and how well it went."""
     meta: dict[str, Any] = {
@@ -1199,6 +1428,12 @@ def _transcription_meta(
         "channels": {t.channel: t.to_json() for t in transcripts},
         "audio_released": False,
     }
+    # Every cluster, convicted or not, with the two numbers that decided. The kept
+    # ones are the point: they are the only material that will ever calibrate
+    # `[bleed].cluster_time` and `cluster_text`, exactly as `voices.Match` is
+    # recorded for the near-misses it refused rather than only for the hits.
+    if suppression is not None:
+        meta["bleed"] = suppression.to_json()
     if error:
         meta["error"] = error
     return meta

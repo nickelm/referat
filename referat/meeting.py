@@ -157,6 +157,17 @@ class Meeting:
     status: MeetingStatus = MeetingStatus.RECORDING
     pauses: list[Pause] = field(default_factory=list)
     audio: dict[str, ChannelAudio] = field(default_factory=dict)
+    missing_channels: list[str] = field(default_factory=list)
+    """Channels that would not open at all this run, as a written fact.
+
+    A channel that never opened shows up in `audio` only as an *absent* key, and
+    inferring "no microphone" from a missing key is exactly the shape this
+    codebase refuses for the lifecycle: nobody inferred it, so a meeting with no
+    microphone in it read as `transcribed` and no surface ever said otherwise.
+    Twenty-four minutes went that way on 2026-09-02. It is `["mic"]` far more
+    often than the other way round, and for a meeting held in a room that means
+    nothing was recorded.
+    """
     transcription: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     """The project ids this meeting carries. Absent or empty means *untagged*.
@@ -267,6 +278,9 @@ class Meeting:
             pauses=[Pause.from_json(p) for p in raw.get("pauses", []) if isinstance(p, dict)],
             audio=audio,
             transcription=raw.get("transcription") or {},
+            missing_channels=[
+                str(c) for c in (raw.get("missing_channels") or []) if str(c).strip()
+            ],
             tags=[str(t) for t in (raw.get("tags") or []) if str(t).strip()],
             speaker_names={
                 str(k): str(v) for k, v in (raw.get("speaker_names") or {}).items()
@@ -286,6 +300,7 @@ class Meeting:
             "status": str(self.status),
             "pauses": [p.to_json() for p in self.pauses],
             "audio": {name: channel.to_json() for name, channel in self.audio.items()},
+            "missing_channels": self.missing_channels,
             "transcription": self.transcription,
             "tags": self.tags,
             "speaker_names": self.speaker_names,

@@ -66,8 +66,8 @@ class Machine:
     """The state machine, safe to drive from any thread.
 
     Hotkey callbacks arrive on the `keyboard` hook thread, transcription jobs
-    finish on their own threads, and pystray owns the main thread, so every
-    mutation takes the lock. Listeners are called outside it, both to keep the
+    finish on their own threads, and Qt owns the main thread, so every mutation
+    takes the lock. Listeners are called outside it, both to keep the
     lock short and so a listener may read the machine without deadlocking.
     """
 

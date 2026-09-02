@@ -7,8 +7,10 @@ speakers with `pyannote.audio`. Each meeting lands in `~/Meetings` as a folder
 with the raw audio, a timestamped speaker-labeled `transcript.md`, and a
 `meta.json`.
 
-There is no GUI beyond the tray icon and no automatic summarization. Notes are
-written afterwards, on demand, by running Claude Code against the transcripts.
+Its graphical surfaces are the tray icon and a command center window the tray
+opens — no web server and no Electron — and there is no automatic summarization.
+Notes are written afterwards, on demand, by running Claude Code against the
+transcripts.
 
 ## Status
 
@@ -45,13 +47,23 @@ The `referat` CLI is the rest of it: `list` (the inventory and the queue),
 `state`, `index` and `config`.
 
 A `/cleanup` slash command writes `notes.md` beside a transcript when asked —
-lazily, never automatically — and a VS Code extension is the primary UI: a
-sidebar of meetings with their lifecycle and their tags, the buttons that write
-notes, re-transcribe, tag and name speakers, and a status bar item saying what
-the tray is doing. It packages to a `.vsix` and installs, so it is in every
-window rather than only in a development host. What is next: tagging from the
-tray, and per-project digests pushed into Google Docs. See [TODO.md](TODO.md) for the plan
-and [CHANGELOG.md](CHANGELOG.md) for what has landed.
+lazily, never automatically. The graphical surface is a **command center** — a
+desktop window the tray app owns and opens from its own icon, built on three
+things rather than one list: meetings, with an untagged inbox and a transcript
+shown beside its notes; projects, kept deliberately light; and people, a page per
+voice unifying who somebody is with the projects and meetings they turn up in.
+Its first, read-only part is built: the meetings list, the transcript-and-notes
+viewer with timestamps in the notes navigating into the transcript, and record,
+pause and stop buttons driving the same recorder the two hotkeys do.
+
+A VS Code extension held that job until then — a sidebar of meetings with their
+lifecycle and their tags, the buttons that write notes, re-transcribe, tag and
+name speakers, and a status bar item saying what the tray is doing. It still
+works and is still installed; it is in maintenance, and retires when the window
+reaches parity with it. What is next: tagging and speaker labeling inside the
+window, then tagging from the tray, then per-project digests pushed into Google
+Docs. See [TODO.md](TODO.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for
+what has landed.
 
 ## Quick start
 

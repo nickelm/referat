@@ -10,7 +10,8 @@ that is a reason to keep the laptop awake.
 **Why there is a thread in here.** ``SetThreadExecutionState`` is per *thread*:
 the flags belong to the thread that called it and die with that thread. Referat
 changes state from at least three — the ``keyboard`` hook thread on a hotkey,
-the pystray thread on a menu click, and a transcription thread finishing a job
+the Qt GUI thread on a menu click or a window button, and a transcription
+thread finishing a job
 in :meth:`referat.state.Machine.end_job`. Setting the hold on one and clearing
 it from another would silently leave the machine awake forever, so
 :class:`SleepBlocker` owns a single keeper thread and every call to the API is

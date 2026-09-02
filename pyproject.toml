@@ -6,11 +6,19 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 authors = [{ name = "Niklas Elmqvist", email = "niklas.elmqvist@gmail.com" }]
 
-# Base dependencies: tray, hotkeys, dual-stream audio capture (build steps 2-4).
-# Kept free of CUDA wheels so a plain `uv sync` stays small and fast.
+# Base dependencies: tray, hotkeys, dual-stream audio capture, and since build
+# step 20 the command center. Kept free of CUDA wheels so a plain install stays
+# small and fast.
+#
+# PySide6-Essentials is a deliberate exception to the minimal-dependencies
+# convention, recorded as one in CLAUDE.md rather than left to look like drift.
+# It is the command center, and because Qt owns the tray icon it is also on the
+# recording path -- which is why step 20 gated it on a signature audit before
+# anything was built on it. Essentials and not the full PySide6: QtWebEngine
+# lives in PySide6-Addons, is 168 MB of wheel, spawns a Chromium helper process,
+# and buys nothing QTextBrowser does not already do here.
 dependencies = [
-    "pystray>=0.19.5",
-    "pillow>=10.4",
+    "PySide6-Essentials>=6.8",
     "keyboard>=0.13.5",
     "sounddevice>=0.5",
     "numpy>=2.0",

@@ -85,6 +85,17 @@ machine and it is no part of any note.
   `REMOTE` is a normal, complete transcript with the speaker names missing — check
   `transcription.channels.system.diarization` in `meta.json` for why.
 - Lines are in chronological order across both channels.
+- **An older hybrid meeting may record the same person twice.** When a call's
+  audio came out of a loudspeaker standing in the room, the microphone heard it
+  as well as the loopback did, so the same sentence appears twice a second or two
+  apart — usually under one name, one copy punctuated and one a lowercase run-on
+  keeping the stutters. Referat suppresses this during transcription now, and
+  `transcription.bleed` in `meta.json` says what it removed; transcripts written
+  before that still carry it. **Summarise such a pair once.** Do not read a
+  repetition as emphasis, as somebody agreeing with themselves, or as two people
+  saying the same thing — and do not edit the transcript to remove it, which is
+  `referat debleed`'s job and not yours. If a meeting is visibly full of these,
+  say so once in the note rather than silently working around it.
 
 **The speech is immutable. The labels are not.** Nothing may ever change a word
 of what was said. A speaker label is metadata that happens to live in this file,

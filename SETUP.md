@@ -60,9 +60,15 @@ uv run referat --version
 system Python: 3.13 and 3.14 are too new for the torch, CTranslate2 and pyannote
 wheels this project needs.
 
-The base install is deliberately kept to the tray and the audio capture, so a
-plain `uv sync` gives you a working recorder in seconds. You need
+The base install is deliberately kept to the tray, the audio capture and the
+command center, so a plain `uv sync` gives you a working recorder in about a
+minute — `PySide6-Essentials` is a 77 MB wheel and the rest are small. You need
 `--extra transcribe` before anything is transcribed.
+
+**Essentials, never the full `PySide6`.** The full package pulls in
+`PySide6-Addons`, which is another 168 MB and carries QtWebEngine — a bundled
+Chromium that Referat does not use and that would put a second process on the
+recording path. If a `pip install PySide6` ever creeps in, take it back out.
 
 ### If Smart App Control blocks uv — and then blocks Python itself
 
@@ -359,7 +365,50 @@ loopback_device = ""
 **Leave `loopback_device` empty on purpose.** Empty means "loopback of whatever
 the current default output device is", so system audio follows whatever is
 actually playing — which is what you want when you move between headphones and
-speakers mid-day.
+speakers mid-day. Pinning it to a device name is the obvious-looking hardening
+and it is a **trap**: the loopback decides where Referat *listens*, not where the
+sound *comes out*, so a pinned loopback that disagrees with what the call is
+actually playing through records silence and loses the far end completely. That
+is a worse failure than the one section 4a is about.
+
+---
+
+## 4a. Hybrid meetings: where the remote audio comes out
+
+A meeting with people in the room *and* people on a call is the one setup that
+can record the same speech twice. Referat captures two channels — the microphone
+and a loopback of what the machine is playing — and if the call's audio comes out
+of a **loudspeaker standing in the same room as the microphone**, the room
+microphone hears it too. The far end then lands in `transcript.md` twice: once
+from the loopback, clean, and once off the air, degraded.
+
+**So send the call's output to a headset, or to the Jabra.** The Jabra Speak 510
+does hardware echo cancellation and will not feed its own playback back into its
+own capture, which is exactly what it is for. Anything else in the room — laptop
+speakers, a monitor, a television over HDMI — will.
+
+**The trap is that setting the Windows default output is not enough.** Zoom and
+Teams each keep their *own* speaker selection, independent of the system default,
+and Referat cannot see it: `referat devices` reports the device Referat will
+record from, not the device the meeting app will play through. Check it inside
+the call, in Zoom's audio settings, not in Windows'.
+
+This happened on 2026-09-02. The default output had become a television over
+HDMI, Zoom followed it, and 56 minutes of a four-person hybrid meeting came out
+with roughly 761 duplicated lines. What it looks like afterwards:
+
+- a remote person appears twice under one name, once punctuated and once as a
+  lowercase run-on with the stutters left in;
+- `referat label` offers more speakers than were in the meeting, because the
+  microphone clustered the echo as people of its own;
+- the microphone channel's `voiced_seconds` is nearly its whole duration, because
+  the room mic was hearing the loudspeaker continuously.
+
+**Referat suppresses this during transcription anyway**, and records what it did
+under `transcription.bleed` in `meta.json` — which is also how you find out it
+happened. The suppression is not a reason to stop caring where the audio comes
+out: it recovers the transcript, and it cannot recover a recording made through a
+loudspeaker.
 
 ---
 
@@ -729,6 +778,15 @@ committed.
 ---
 
 ## 12. The VS Code extension
+
+**This extension is in maintenance.** Build step 20 made a command center — a
+desktop window the tray app opens from its own icon — the primary UI, and this
+extension is retired once that window reaches parity with it. The window's
+read-only half exists as of 2026-09-02: the meetings list, the transcript beside
+its notes, and recording controls. Tagging and speaker labeling are still only
+here, which is why nothing below has been removed and the install is still worth
+doing. When the window has those too, this section is replaced rather than
+added to.
 
 Build it and install it:
 

@@ -103,7 +103,23 @@ def apply_name(config: Config, meeting: Meeting, speaker: str, name: str) -> boo
     the module docstring for why that order and no other. Returns False when
     there is no embedding to file, which is the one case that cannot be repaired
     by asking again.
+
+    **An echo cluster is refused outright.** `voices.unknown_speakers` already
+    stops one being offered, but that is the wrong place to rely on: this function
+    is reached directly by `referat label <id> --speaker SPEAKER_NN --name <n>`,
+    which is the path the VS Code extension uses and which asks nothing about who
+    is unknown. Naming an echo cluster files a voiceprint recorded off a
+    loudspeaker under a real person's name, and that print then sits in the
+    database producing false accepts that `match_margin` cannot catch, because the
+    margin compares names and this one is filed under the right one.
     """
+    if voices.is_echo(meeting, speaker):
+        log.warning(
+            "%s: %s is the loopback coming back into the microphone, not a person to name",
+            meeting.id,
+            speaker,
+        )
+        return False
     embedding = voices.stored_embedding(meeting, speaker)
     if embedding is None:
         log.warning("%s has no stored embedding in %s", speaker, meeting.id)
@@ -498,4 +514,63 @@ def run_forget(config: Config, name: str, assume_yes: bool = False) -> int:
     # Forgetting puts labels back to SPEAKER_NN, so the Unnamed column goes up.
     index.write_index(config)
     print(f"Deleted {deleted} voiceprint(s) of {name}; reverted {reverted} transcript(s).")
+    return 0
+
+
+def run_drop_voiceprint(
+    config: Config, meeting_id: str, speaker: str, assume_yes: bool = False
+) -> int:
+    """`referat label <meeting-id> --drop-voiceprint SPEAKER_NN`.
+
+    The narrow counterpart to `--forget`, for a cluster that was named correctly
+    and recorded wrongly: the remote person's voice coming back off a loudspeaker
+    into the room microphone, which somebody was offered by `referat label` and
+    quite reasonably called by their name. The name is right. The recording is a
+    loudspeaker, and the print it produced makes `voices.match` accept a
+    loudspeaker as that person — a false accept `match_margin` cannot catch,
+    because the margin compares *names* and this one is filed under the right one.
+
+    So this touches the database and nothing else. It reverts no label, because
+    the labels are correct; that is the whole difference from `forget`, and it is
+    why this could not have been a flag on it.
+    """
+    meeting, complaint = resolve_meeting(config, meeting_id)
+    if meeting is None:
+        print(f"referat label: {complaint}", file=sys.stderr)
+        return 1
+
+    db = voices.VoicesDB.load(config)
+    doomed = {
+        name: sum(1 for p in prints if p.meeting == meeting.id and p.speaker == speaker)
+        for name, prints in db.people.items()
+    }
+    doomed = {name: n for name, n in doomed.items() if n}
+    if not doomed:
+        print(
+            f"referat label: no voiceprint in the database came from {speaker} "
+            f"of {meeting.id}"
+        )
+        return 0
+
+    who = ", ".join(f"{name} ({n})" for name, n in sorted(doomed.items()))
+    if not assume_yes and not _confirm(
+        f"Delete the voiceprint(s) {speaker} of {meeting.id} contributed to {who}? "
+        "Their transcript labels are not touched"
+    ):
+        print("Nothing was deleted.")
+        return 0
+
+    try:
+        removed = db.drop(meeting.id, speaker)
+    except ValueError as exc:
+        print(f"referat label: {exc}", file=sys.stderr)
+        return 1
+    db.save()
+    total = sum(removed.values())
+    left = {name: len(db.people.get(name, [])) for name in removed}
+    print(
+        f"Deleted {total} voiceprint(s) from {speaker} of {meeting.id}: "
+        + ", ".join(f"{name} keeps {n}" for name, n in sorted(left.items()))
+    )
+    # No `index.write_index`: no label moved, so no column on the dashboard did.
     return 0

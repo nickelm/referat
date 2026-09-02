@@ -16,12 +16,14 @@
 
 A personal system-tray application that records meetings (in person and over
 Zoom/Teams), transcribes them offline with speaker diarization, and writes
-Markdown transcripts into a meetings folder. There is **no GUI but the tray icon
-and a VS Code extension — no web UI, ever** — and **no automatic LLM cleanup
-pass**: notes are generated lazily by the user, through a `/cleanup` slash
-command run by Claude Code in the meetings folder — interactively, or headless
-via `claude -p` from the VS Code extension. Notes for a meeting tagged with a
-project are pushed, on request, into that project's Google Doc digests.
+Markdown transcripts into a meetings folder. Its graphical surfaces are the tray
+icon and a **command center** the tray owns and opens — **no web server and no
+Electron, ever**, a rule stated exactly in Conventions — plus a VS Code extension
+that used to be the primary UI and is now in maintenance. There is **no automatic
+LLM cleanup pass**: notes are generated lazily by the user, through a `/cleanup`
+slash command run by Claude Code in the meetings folder — interactively, or
+headless via `claude -p` from the command center. Notes for a meeting tagged with
+a project are pushed, on request, into that project's Google Doc digests.
 
 Target machine: Asus Zephyrus G14, Windows 11, RTX 5070 Ti Laptop GPU
 (Blackwell / sm_120, needs CUDA 12.8 builds of PyTorch). Python 3.12, managed by
@@ -30,9 +32,10 @@ wheels.
 
 ## Architecture
 
-**Tray app** — `pystray` icon (gray idle, red recording, yellow paused, distinct
-transcribing state), two global hotkeys via the `keyboard` library emitted by
-programmable USB buttons, and a state machine:
+**Tray app** — a `QSystemTrayIcon` (gray idle, red recording, yellow paused,
+distinct transcribing state, and hollowed into a ring for a run that lost a
+channel), two global hotkeys via the `keyboard` library emitted by programmable
+USB buttons, and a state machine:
 
 ```
 idle -> recording -> (paused <-> recording) -> stopped -> transcribing -> idle
@@ -42,12 +45,26 @@ This is the *recorder's* state, deliberately not the meeting's — the meeting's
 lifecycle lives in `meta.json`'s `status` and has no `paused`, because a paused
 meeting is still being recorded.
 
+**The tray is two halves and the seam is deliberate.** `referat/tray.py` is the
+recorder core — the machine, the hotkeys, the recorder, the sleep hold, the
+transcription jobs and `status.json` — and it imports no toolkit at all;
+`referat/ui/shell.py` is the icon, the menu and the event loop. `main` starts the
+core first and imports Qt second, so the rule that *the recorder comes up before
+the window* is a fact about the order of four lines rather than an intention. The
+one seam between them is `App.notify`, which the shell replaces with a real
+balloon and which logs when nothing has. Transitions arrive on the `keyboard`
+hook thread and on transcription threads, so the shell reaches Qt through a
+queued signal (`ui.shell.Bridge`) and registers its listener **last** — after the
+sleep hold's and the status write's, which `Machine._notify` therefore runs
+first and which no Qt failure can cost.
+
 **The tray tags meetings too, from step 16.** On stop it raises a toast asking
 which project(s), offering recent ones and defaulting to untagged if it times
 out; its menu grows a lazily built *Tag recent…* submenu of untagged meetings
 from the last seven days. That toast needs a real WinRT notification —
-`pystray`'s `icon.notify` is a buttonless balloon that does not persist in Action
-Center — which is a new base dependency taken deliberately against the
+`QSystemTrayIcon.showMessage` is as buttonless as `pystray`'s `icon.notify` was,
+and neither persists in Action Center — which is a new base dependency taken
+deliberately against the
 minimal-dependencies rule, and whose activation half may not prove workable here;
 if it does not, the toast degrades to a plain notification and the menu carries
 the feature. **A notification that fails is a log line and never touches the stop
@@ -75,6 +92,61 @@ wall-clock seconds since the start, so the timeline stays honest. Positions in
 the WAV files are audio time, with pauses excluded; the two are inter-convertible
 from the pause list.
 
+**The two channels are not disjoint, and `referat/bleed.py` is what makes them
+behave as if they were.** When a call's audio comes out of a loudspeaker standing
+in the same room as the microphone — a television over HDMI, on 2026-09-02 —
+every remote utterance is recorded twice, and because both channels are diarized
+and both get labeled by hand, twice under *one name*. That is what makes it
+invisible rather than obvious: `2026-09-02_1059` has 1239 lines under a remote
+speaker's name against 478 loopback segments, so roughly **761 of them are the
+microphone's second copy**. TODO.md predicted this and declined to act until it
+was observed; it now has been.
+
+**Suppression is one-directional, and the reason is not audio quality.** The
+loopback copy is better — it is a tap on the render mix before the DAC — but what
+decides is that a conferencing application does not loop your own capture back
+into what it plays, so **speech from the room can only ever exist on the
+microphone**. Dropping a microphone segment risks a second copy; dropping a
+loopback segment risks the only copy of the far end. So microphone segments may
+go and loopback segments never do, which `bleed.apply` states as an invariant it
+has no code path to violate.
+
+Two mechanisms answering different questions. The **cluster rule** convicts a
+microphone cluster whose speech time sits under loopback speech *and* whose text
+the loopback matches — both, because a room microphone is voiced almost
+continuously, so time alone convicts anybody who talks *over* the far end, while
+text alone misses a cluster that is mostly "Yeah." The **per-segment rule** is
+the complement, for echo that diarization filed under a room person instead. Below
+`[bleed].min_tokens` nothing is ever dropped by text: more than half of a hybrid
+meeting is backchannels, and nothing distinguishes a remote person's second "Yeah"
+from the microphone's copy of their first — those go only when the cluster rule
+takes the whole cluster, which decides by *whose voice they are*.
+
+**A refusal has to hold at both levels or it is not a refusal.** Two clusters are
+spared rather than merely cleared — the owner's, and every cluster when the rule
+convicted the entire channel, which is likelier to be a bug than a meeting — and
+`spared` exists as a separate flag because the per-segment rule was measured
+undoing both refusals one line at a time. A cleared cluster stays eligible; a
+spared one is untouchable.
+
+An echo cluster is also **never offered a name**. `voices.unknown_speakers` skips
+it and `label.apply_name` refuses it outright, the second because
+`--speaker`/`--name` reaches that function directly and asks nothing about who is
+unknown. This is the second cost the same TODO item predicted, and it predicted
+the right outcome by the wrong mechanism: the pipeline never writes to the
+voices database — `bootstrap_owner`'s one-cluster gate worked exactly as designed
+and refused — so the two poisoned voiceprints arrived through `referat label`,
+from a person correctly naming a cluster that should never have been shown to
+them. **The defence belongs where a human is offered a cluster, not where the
+pipeline matches one.**
+
+Prevention is a routing habit and cannot be a config knob. `[audio].loopback_device`
+stays empty: it decides where Referat *listens*, not where sound *comes out*, so
+pinning it to a headset while the call plays through a television records silence
+and loses the far end entirely — a worse failure than the one it would be
+mitigating. SETUP.md section 4a is the habit, and `transcription.bleed` in
+`meta.json` is how you find out the habit lapsed.
+
 **Sleep prevention** — hold `SetThreadExecutionState(ES_CONTINUOUS |
 ES_SYSTEM_REQUIRED)` through `ctypes` only while recording or paused, released on
 stop. Transcription runs without the hold.
@@ -91,6 +163,26 @@ first appearance. The numbering runs across the **meeting**, not the channel —
 at `SPEAKER_01` would put two different people behind one label in the same
 transcript. Both channels are merged into one chronological, timestamped
 transcript.
+
+**Both models are dropped when the job ends, and dropping them is not what frees
+the card.** `transcribe_channels` and `diarize._run` have always ended with a
+`del`, and both said in their docstrings that this was so a resident large-v3
+would not occupy the GPU for the rest of the session. It did anyway: `del`
+returns the *Python reference*, while torch's caching allocator keeps every block
+it has taken from the driver so the next allocation of that size is free. Nothing
+but `torch.cuda.empty_cache()` gives the arena back, and nothing was calling it —
+measured on 2026-09-02, an idle tray holding **8484 MiB of 12227** and a `referat
+rerun` in a second process stalling inside `ctranslate2.models.Whisper(...)` with
+what was left. `referat/gpu.py` is the fix and it is one function, called from
+each `finally` that has just dropped a model and last from the tray's own job
+thread — outside its `except`, because a release running while an exception
+propagates is partial: the traceback holds the frames that hold the tensors, and
+only `gc.collect()` reaches that cycle. It reclaims **torch's** share and says so
+in its log line: CTranslate2 allocates outside torch entirely, and the CUDA
+context lives as long as the process does. The target is room for a second model,
+not zero. This is the same shape of lesson as the Smart App Control paragraphs
+below — a documented intention that the code did not deliver — and the general
+form is that *a comment claiming a resource was released is worth measuring once*.
 
 **Hotwords are the only correction that happens before the transcript exists.**
 Every transcription is handed one global list through faster-whisper's
@@ -109,7 +201,22 @@ transcript from the recording it came from. It reads the voices database live
 rather than a cached copy, so a `referat label --forget` takes that name out of
 the list with it. Whisper's prompt window is 224 tokens, so the list is capped
 in a fixed priority order — extras, then names, then glossaries — and whatever
-is dropped is logged rather than dropped quietly.
+is dropped is logged rather than dropped quietly. `referat hotwords` prints the
+merged list with the source of each term and names what the cap dropped.
+
+**The cap counts tokens by estimate, and the estimate is measured.** There is no
+tokenizer to ask: `hotwords.py` must run without the `transcribe` extra, because
+nobody should need three gigabytes of resident torch to see what Whisper will be
+told. So a term is assumed to cost `ceil(len / 2) + 2` tokens, which errs
+upwards on purpose — over-estimating drops a term off the bottom of a fixed
+priority order and says so, while under-estimating hands faster-whisper a list
+it slices at token 223, mid-name, silently. `ceil(len / 3) + 1` was written
+first and was **30% under** on 40 hyphenated `Synthetic-Term-003`-shaped
+strings, measured against the real large-v3 tokenizer; the rule that replaced it
+came out between 1.10x and 2.04x the true count across eight lists and never
+once under. The budget itself is read out of faster-whisper rather than
+inferred: `generate_with_fallback` slices at `max_length // 2 - 1` with
+`max_length = 448`, so it is 223.
 
 **The owner is rendered by name, like everybody else, and `ME` means only
 "nothing attributed this".** The pipeline used to rewrite a voiceprint-matched
@@ -185,6 +292,26 @@ state of `system.wav` for a meeting held in person — counts as clean, measured
 by faster-whisper's `duration_after_vad` rather than by amplitude, or an
 untouched loopback would pin every recording to the disk forever.
 
+**`[transcription].keep_audio` is the one exception, and it costs the deletion
+rather than the verdict.** Off by default, because the WAVs are recordings of
+people who never asked to be recorded and `audio_released` is a promise; on, the
+pipeline keeps them even when the gate accepts the transcript. It exists because
+the audio is also the only material that can calibrate `[speakers]`'
+`match_threshold` and `match_margin` against real voices, and once it is gone no
+`rerun` brings it back. The gate is therefore **asked first and
+unconditionally** — `transcribe.audio_is_clean` is the verdict, split out of
+`release_audio_if_clean`, which still pairs it with `release_audio` — so a
+garbled transcript is still `gate_failed` whether or not somebody asked to keep
+the audio. A meeting kept on request is not `gate_failed`: it stays
+`transcribed`, records `transcription.audio_kept` in `meta.json` saying why, and
+stays **in staging**, because `promote_meeting` refuses a folder holding WAVs and
+no WAV may ever reach the meetings folder. `referat promote <id>
+--release-audio` is its off-ramp. The distinction matters to two messages that
+used to assume kept audio meant a failed gate: `referat list`'s footer and
+`promote`'s bare refusal both split on `audio_kept`, offering a `rerun` for the
+meetings the gate refused and `promote --release-audio` for the ones kept on
+purpose.
+
 **Smart App Control is enforcing on this machine**, so unsigned bundled DLLs are
 blocked — PyAV's FFmpeg among them, which made `import faster_whisper` fail.
 Referat therefore decodes its own WAVs (`transcribe.decode_wav`) and stubs `av`
@@ -250,21 +377,98 @@ must **not** trigger the CPU fallback: the second pass would fail in the same
 place several minutes later and bury the real cause inside a duplicated
 traceback, which is exactly what the scipy block produced.
 
+**Qt is the fourth instance, it was the first where a block would have cost a
+recording, and it is the one the audit cleared.** PyAV, torchcodec and scipy each
+threatened a transcript and each degrades; step 20 put PySide6 in the tray
+process, which puts native code in front of the recorder itself, and a block
+there means the tray does not start and **no meeting is recorded** — a total
+failure, which is the thing this codebase does not otherwise have. So it was
+gated on measurement rather than on reasoning, the way the venv migration was:
+**all 247 native files under `PySide6/` and `shiboken6/` are Authenticode-signed
+by The Qt Company Oy**, timestamped, on a DigiCert chain valid to 2028, with
+nothing unsigned. Compare torch, which is 26 unsigned DLLs out of 38, and scipy,
+all 106 of whose `.pyd` files are unsigned. Qt is by a wide margin the
+best-signed native code in this venv, and putting it on the recording path
+lowered that path's exposure rather than raising it.
+
+Two things follow and neither is cancelled by a clean audit. The scipy rule is
+still applied one layer earlier — **the recorder, the hotkeys, the state machine
+and `status.json` come up first and independently, and the window is opened
+after**, a window that fails to open being a log line and a tray that still
+records, the same degradation diarization and the step 16 toast run under. And
+**QtWebEngine stays out**: it lives in `PySide6-Addons`, is 168 MB of wheel
+against Essentials' 77, and spawns a sandboxed Chromium helper process — a second
+process on the recording path buying nothing `QTextBrowser` does not already do.
+The escape hatch, unused: put the icon back on `pystray` and make the window a
+child process that shells out to the CLI.
+
+**The measurement is the reusable part, not the verdict.** A wheel is signed or
+not by whoever built it, so the audit is `Get-AuthenticodeSignature` over every
+`.dll`, `.pyd` and `.exe` in the package, grouped by `Status` — and it is worth
+re-running after a PySide6 upgrade, because nothing guarantees the next release
+is signed the way this one is.
+
 **CLI** (`referat`), for the user, for Claude Code and — since step 11 — for the
-VS Code extension: `config`, `list`, `rerun <id>`, `label <id>`, `status`,
-`devices`, `index`, `project <verb>`, `tag`, `untag`, `state`, `promote <id>`,
-`reflow [<id>]`, `relabel [<id>]`, `delete <id>`. All of them are built except
+VS Code extension, whose documents the command center reads by calling the same
+functions rather than by spawning: `config`, `list`, `show <id>`,
+`transcript <id>`, `rerun <id>`,
+`label <id>`, `status`,
+`devices`, `hotwords`, `index`, `project <verb>`, `tag`, `untag`, `state`,
+`promote <id>`,
+`reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `delete <id>`. All of them are built except
 `project link-doc`, `project unlink-doc` and `project sync`, which wait for the
 digests at step 13 — and which are deliberately absent from the parser rather
 than present and answering "not built yet".
 
-`reflow` and `relabel` are the two repairs, and they are the same shape: both
-exist because a rendering rule changed after transcripts had already been written
-whose audio has since been released, so no `rerun` can regenerate them. Both are
-idempotent, both write nothing when there is nothing to change, and neither is an
-exception to the immutability rule — `reflow` inserts whitespace *between* lines
-and `relabel` rewrites the label field alone, through the same
-`label.relabel_transcript` that `referat label` uses.
+`reflow`, `relabel` and `debleed` are the three repairs, and they are the same
+shape: all exist because a rendering rule changed after transcripts had already
+been written whose audio has since been released, so no `rerun` can regenerate
+them. All write nothing when there is nothing to change. `reflow` and `relabel`
+are idempotent; **`debleed` is convergent instead**, and that is a real
+difference rather than a quibble — its pairing is greedy and disjoint, so
+removing one line can leave two others adjacent that were not before. On
+`2026-09-02_1059` the passes go 66, then 1, then none. Which is why
+`transcription.debleed.removed` **accumulates across passes rather than being
+replaced**: the first draft overwrote it, and a second pass left 67 lines gone
+from the file and 1 recorded — precisely the unreviewable deletion the record
+exists to prevent.
+
+`reflow` and `relabel` are not exceptions to the immutability rule — `reflow`
+inserts whitespace *between* lines and `relabel` rewrites the label field alone,
+through the same `label.relabel_transcript` that `referat label` uses.
+
+**`debleed` is a genuine exception and is treated as one.** It deletes whole
+entries, which is larger than either, and filing it under their exemption would
+be dishonest. The argument for it is that an echo copy is not a second utterance
+but a second *recording* of one — which Referat already asserts every time it
+merges, since `merge.py` puts both channels on one timeline on the claim that the
+same position in each WAV is the same moment. The argument against is the rule's
+own stated reason, checkability: a reflow is verifiable by eye because every word
+is still there, while a deletion removes the evidence that the deleted line was a
+duplicate. So the resolution is neither to delete freely nor to refuse: **it
+deletes only where the removal stays checkable**, recording every removed entry
+under `transcription.debleed.removed` with the line kept in its place, and writing
+`meta.json` before the transcript so an interruption leaves a record of a removal
+that did not happen rather than a removal with no record. Same move
+`speaker_names` makes for `--forget`.
+
+It is dry by default, gated on a name resolving to clusters on **both** channels —
+the one piece of provenance a rendered transcript still has, since `meta.json`
+records which cluster came out of which channel — and it keeps whichever copy
+*contains* the other. Deliberately not the better-punctuated one, which is the
+obvious rule and was measured across 67 pairs at 24 better, 20 worse, 23 tied: a
+coin flip. Containment is the only tie-break that cannot lose a word.
+
+**What it cannot do is the reason `2026-09-02_1059` was left alone.** A rendered
+line does not say which channel it came from, and no `meta.json` key records
+per-segment provenance, so the repair has only text and time; against ~761 echo
+lines it reaches 66, because 764 of the two-channel entries are under
+`min_tokens` and permanently ineligible. Removing 66 of 761 leaves a file that is
+still mostly duplicated but *looks* deduplicated, and a reader who sees no obvious
+repeats stops looking for them. That meeting's correction belongs in its
+`notes.md`, which is where the immutability rule points corrections anyway. The
+command still earns its place: the dry run is the only way to see the problem in a
+rendered file, and the next such transcript may have a far better ratio.
 
 **`relabel` is deliberately narrow**, because the label it is replacing means two
 things and only one of them is repairable. It spells the owner's name into `ME:`
@@ -293,13 +497,19 @@ extension could not confirm without it, exactly as with `label --forget`.
 **The CLI owns every mutation, and is the only implementation of any of this.**
 The projects file, the tag logic, the lifecycle vocabulary and the rules about
 what a name may be live in Python exactly once. The VS Code extension shells out
-to them because it is TypeScript and has no other way in; the tray imports them,
-because it is already a Python process inside this package and spawning a
-subprocess of its own CLI would buy nothing. The rule is one implementation, not
-one process boundary — worth saying in both directions, since a later reader
-could "fix" it either way.
+to them because it is TypeScript and has no other way in; the tray and the
+command center import them, because they are one Python process inside this
+package already and spawning a subprocess of its own CLI would buy nothing but an
+interpreter start per refresh. The rule is one implementation, not one process
+boundary — worth saying in both directions, since a later reader could "fix" it
+either way.
 
-**Five commands answer in JSON**, and only because the extension asks. `referat
+**Seven commands answer in JSON**, and the first five only because the extension
+asked. Step 20 added `transcript <id> --json` and `show <id> --json`, and will
+add `people --json` and a `gallery` field on `label <id> --json`; they exist even
+though the command center calls the functions directly, because the document is
+the shape both surfaces agree on and one you can print is one you can test.
+`referat
 list --json` is every meeting with its duration, status, audio state, title,
 unnamed speakers, `tags` and folder, across both roots, plus one top-level map of
 project id to display name; `referat project list --json` is every project with
@@ -315,12 +525,30 @@ duration, and a `stale` flag that tells a tray which died apart from one that
 never ran. The fifth is `referat project add <name> --json`, which emits the
 project it just created: an id is `slugify` plus a `-2` collision suffix, so a
 caller cannot work it out, and looking it back out of `project list` by display
-name is wrong the moment two projects share one. All five are the same functions the
+name is wrong the moment two projects share one. The sixth and seventh arrived
+with the command center. `referat show <id> --json` is one meeting's whole
+record: `meta.json` itself under `meta`, through `Meeting.to_json` so the
+pipeline's own serializer decides what a record is, wrapped in the four derived
+answers every surface already asks Python for — title, formatted duration, audio
+state, staged. Its point is the `transcription` block, which nothing had ever
+printed: the model and device a run used, the per-channel quality numbers the
+gate judged, and each cluster's `match` **with its runner-up, recorded even where
+the match was refused** — the near-misses being the only material there is for
+calibrating `[speakers].match_threshold` and `match_margin` against real voices.
+And `referat transcript <id> --json` is `transcript.md` read back through
+`transcribe.parse_transcript`, which lives beside `render_transcript` so the
+format is described in one file; each entry carries its timestamp twice, as
+seconds and as the `HH:MM:SS` the file renders, because a cross-link is matched
+on the number and a reader sees the string. All seven are the same functions the
 human-readable forms call, so the table, the dashboard and the sidebar cannot
 drift apart — and the id-to-name map inside `list --json` comes out of the very
 `ProjectsDB.name_map` that `project list --json` hands out, so one subprocess
 feeds the whole sidebar and the join between a tag and its name cannot drift
-either. The tables themselves are unchanged and stay the default.
+either. The tables themselves are unchanged and stay the default: `referat show`
+prints the record for a person, and `referat transcript` prints **who spoke, how
+often and what share of the words** rather than the transcript itself — which is
+a file you can already open, is the document here most likely to hold a character
+this console's code page cannot encode, and answers that one question worst.
 
 `referat label` also grew the three flags that let something without a terminal
 name somebody: `--speaker SPEAKER_NN --name <name>` applies one name,
@@ -344,9 +572,15 @@ quietly off three meetings is how you lose track of what a meeting was about. `s
 `status.json` and asks Windows whether that pid is still alive — through
 `OpenProcess`, never `os.kill(pid, 0)`, which on Windows *terminates* the
 process it is asked about. `rerun` transcribes a meeting again from the audio it
-kept; it renumbers the speakers, so it clears the previous run's names and
-snippets first and lets identification find the names again in the known-voices
-database.
+kept; it renumbers the speakers, so it clears the previous run's **snippets**
+first and lets identification find the names again in the known-voices database.
+Deliberately the snippets and not the `speaker_names`, which it also used to
+clear. Nothing in the pipeline reads that map, the success path replaces it
+wholesale from this run's transcripts, and until then it is the map that
+describes the `transcript.md` still on disk — so clearing it up front bought
+nothing and cost a meeting's names to a Ctrl+C on 2026-09-02. **A rerun must
+leave a meeting it did not finish exactly as it found it**, which is the same
+reason `transcript.md` is written atomically at the end rather than streamed.
 
 `devices` exists because `[audio].mic_device` and `[audio].loopback_device` are
 **substring matches that fail silently**: one that matches nothing falls back to
@@ -377,7 +611,7 @@ transcribing — `transcribe._RUN_LOCK` serializes jobs within one process and
 cannot see across one, and two large-v3 models do not fit in 12 GB of VRAM.
 `--force` overrides it.
 
-## Notes and browsing (build steps 10-12)
+## Notes and browsing (build steps 10-12, and 20)
 
 **Steps 10, 11, 15 and 12 are built**, in that order — 12 was re-sequenced to run
 after 15 because it would otherwise have packaged the TreeView step 15 deleted.
@@ -458,15 +692,137 @@ meeting id; it is deliberately not a `meta.json` key, since the cleanup layer
 must not edit the raw record. Note that this is a *different* file from this
 repository's `INDEX.md`, which the standing instruction above is about.
 
-**VS Code is the primary UI**, with a `referat-vscode/` extension. Step 11 built
-it as a meetings TreeView; **step 15 replaced that with a sidebar webview** — one
-row per meeting, reverse chronological, carrying date, duration, project tag
-chips and a strip rendering the lifecycle state, with project CRUD, the tag
-picker and speaker labeling all inside it, and a status bar item for ambient
-state. **There is no web UI in this project and never will be**, so the extension
-is where every graphical surface above the tray icon lives. A VS Code webview is
-part of the extension and is not a web UI; a localhost server would be, and there
-is none.
+**The command center is the primary UI** since step 20 — a desktop window the
+tray app owns and opens from the tray icon. It is **PySide6 with native Qt
+widgets**, and the toolkit half of that was decided by measurement (see the Smart
+App Control paragraphs above) while the widgets half was decided in phase 1
+against the criteria step 20 wrote down: `QTextBrowser` renders Markdown, holds
+anchors and answers a custom URL scheme, which is every criterion this UI has,
+and the one argument for QtWebEngine — reusing `referat-vscode/media/sidebar.js`
+— is an argument for keeping the three-hundred-pixel column this step exists to
+escape. Qt owns the tray icon too: `QSystemTrayIcon` replaces `pystray`, so one
+process holds the icon, the hotkeys, the recorder and the window, with one event
+loop and no IPC between them. That is also what lets the window carry **record,
+pause and stop buttons calling the same methods the hotkey handlers call** — no
+new CLI verb and, more to the point, no second path into the state machine.
+`on_toggle_record` was split into `App.start_meeting` and `App.stop_meeting` for
+exactly that: one button has to mean both, three buttons each know which they
+mean, and there is still one implementation of each.
+
+It is built on **three entities**. *Meetings*: new ones land in an untagged
+inbox, each row shows its lifecycle stage, and a tabbed Markdown viewer puts
+`transcript.md` beside `notes.md` with timestamp references in the notes
+navigating to that point in the transcript — a scroll position, since the
+timestamp is audio-elapsed with pauses excluded and the audio is normally gone.
+*Projects*: deliberately lightweight, a tag and a name and an optional one-line
+description, with assignment strictly manual. *People*: a page unifying the
+voiceprint identity with which projects and meetings that person appears in,
+opened by clicking a name in any document — which is the thing a three-hundred
+pixel column could never hold and the real argument for the window. The opening
+screen is a **dashboard**: recent meetings, pending untagged meetings, pending
+unlabeled speakers, and later the themes and action items extracted from notes.
+
+**Phases 1 and 2 are built.** Phase 1 was deliberately read-only — the meetings
+list, the viewer, the cross-links, the recording buttons and the ambient state —
+so the toolkit was settled against real meetings rather than against a prototype,
+with nothing at risk. Phase 2 is the first thing this window writes, and it
+writes **tags and only tags**: an untagged inbox behind an *Untagged only*
+toggle, a search box, and a tag picker that also creates a project inline.
+Labeling is phase 3, and nothing in `referat/ui/` writes a name or any other
+`meta.json` key.
+
+**The picker is two sets, and that is the whole of its design.** `carried` is
+what the meeting already has — the baseline, never mutated — and `checked` is the
+tick state, which *grows* when a project is created inside the dialog. The VS
+Code picker shipped with one set serving as both, so a project created in it was
+already in the baseline when the diff ran, landed in neither `added` nor
+`removed`, and was never applied: the project existed and the meeting stayed
+untagged. `checked` is also the only truth the dialog has — filtering hides rows
+rather than rebuilding, creating appends one, and nothing reads the check states
+back in bulk, because rebuilding a checkable list and then restoring its states
+races the widget. The reopen-the-picker workaround the extension needs has no
+counterpart in Qt and is deliberately not copied.
+
+**A refusal reaches the window as `cli.Outcome`, and the message is
+unprefixed.** That is the in-process form of what `cli.ts`'s `mutate` gives the
+extension — the sentence its rule's owner wrote, never a paraphrase — and the
+prefix is left to the caller because it is direction-dependent: `referat tag`
+says one thing, `referat untag` another, and a picker calling both directions at
+once has no command to name. `meeting.resolve_meeting` already returns its
+complaint for exactly that reason, which is why this is the same pattern rather
+than a new one.
+
+**`cli.apply_tags` opens `projects.json` only when something is being added**,
+and the asymmetry is load-bearing. `remove_tags` validates nothing on purpose,
+because an orphan is precisely the tag somebody needs to take off a meeting;
+guarding an untag on the file being readable would make a broken `projects.json`
+the one thing that pins an orphan to a meeting forever. So a pure removal never
+reads it, exactly as `referat untag` never has.
+
+**The transcript pane is built from the parsed entries, and the notes pane is
+not.** The transcript is rendered as HTML from `cli.transcript_document`, which
+is what makes a timestamp addressable: every entry gets an anchor, so a
+`[HH:MM:SS]` in the notes has something to scroll to. Rendering the raw Markdown
+through `setMarkdown` would be one line and would leave nothing to navigate to.
+The notes are the opposite and do go through `setMarkdown`, because they are
+somebody's prose; the one thing done to them first is rewriting each timestamp
+into a `referat:` link this widget answers. Both browsers run with
+`setOpenLinks(False)`, or an unknown scheme would be *loaded into the pane* and
+blank it. The cross-link resolves to the **nearest entry at or before** the
+target, because a note's timestamp is approximate and an exact hit would usually
+miss — leaving a click that visibly did nothing. Every node is escaped: the text
+is whatever Whisper heard and the label is whatever somebody typed into `referat
+label`, which is the same reason the sidebar builds its nodes with `textContent`.
+
+**Two flow rules.** *Project-scoped identification*: when a meeting carries a
+project, the names the labeling UI offers are the people associated with that
+project, everybody else behind a *show all*. It narrows and orders what a human
+is offered and nothing else — the automatic match during the pipeline stays
+global and stays exactly the threshold-and-margin rule in `voices.match`, because
+nothing is tagged yet when it runs, and **project membership never touches
+clustering**. And *the UI nudges project tagging before speaker labeling*, so the
+restricted gallery exists at label time. A nudge and never a gate: labeling an
+untagged meeting stays possible with the full gallery, since refusing would make
+a missing tag cost a name.
+
+**The UI layer stays OS-portable; capture stays Windows-only.** That is a
+code-layer discipline rather than a shipping target — no Win32 call and no
+Windows-only Qt API inside `referat/ui/` — and it is not a promise that Referat
+runs anywhere else, because WASAPI, the sleep hold and the `keyboard` hooks say
+it does not.
+
+**The command center imports; it does not shell out.** It is already a Python
+process inside this package, exactly as the tray is, so it calls the same
+functions the CLI calls — `cli.list_document`, `cli.show_document`,
+`cli.transcript_document`, `cli.status_document`, `cli.project_names`,
+`cli.apply_tags`, `cli.create_project`, `audio_state`,
+`meeting.format_duration`, `index.meeting_title`, `voices.unknown_speakers`,
+`label.apply_name` — and spawning a subprocess of its own CLI would buy nothing
+but an interpreter start per refresh.
+
+**The write verbs are reached through `cli` and never through `projects`**, and
+that distinction is the rule rather than a preference. `projects.add_tags` is
+three lines that append to a list; what makes tagging *correct* is everything
+around it — the unreadable-file guard, the unknown-id refusal, the resolve and
+the single `meta.json` write — and that is `cli.apply_tags`. A window calling
+`add_tags` directly would have to grow all four, which is the second
+implementation the whole arrangement exists to prevent. The rule is one implementation, not one process boundary, which is
+the same sentence said above about the tray. The `--json` documents stay and grow
+anyway: they are the shape both surfaces agree on, the extension still reads them
+while it lives, and a document you can print is a document you can test. **The
+window may not read `meta.json`, `voices.json` or `projects.json` itself**, and
+the day it does is the day this stops being one implementation.
+
+**The VS Code extension is in maintenance**, and is deleted once the command
+center reaches parity with it. Step 11 built it as a meetings TreeView; **step 15
+replaced that with a sidebar webview** — one row per meeting, reverse
+chronological, carrying date, duration, project tag chips and a strip rendering
+the lifecycle state, with project CRUD, the tag picker and speaker labeling all
+inside it, and a status bar item for ambient state. It was the primary UI from
+step 15 until step 20. Everything it does keeps working and keeps being fixed
+when it breaks; nothing new is added to it, and it is not packaged again. Because
+it is TypeScript it shells out where the command center imports — the same rule
+reached two ways.
 
 **The rows are grouped by project**, one collapsible section per project ordered
 by its most recent meeting, then one per orphaned tag id, then *Untagged* last —
@@ -563,7 +919,9 @@ time and is never persisted**: a resolved absolute path stored anywhere would
 still be there a week later, pointing at a directory that has been deleted, and
 would fail silently at the moment somebody clicks *Generate notes*.
 
-**The extension is packaged and installed** since step 12: `npm run package`
+**The extension was packaged and installed** at step 12, and step 20 closed that
+work: `referat-vscode-0.2.0.vsix` stays installed and no further one is built.
+`npm run package`
 gives a `.vsix` of five files — `dist/extension.js`, `media/`, `package.json`,
 `README.md`, `LICENSE` — and `code --install-extension` puts it in every window
 instead of only in an F5 development host. `.vscodeignore` is written as `**`
@@ -767,6 +1125,24 @@ was refused, because the near-misses are the only material for calibrating the
 thresholds. `speaker_names` is the authority on who a label is; the per-channel
 `name` follows it, and `referat label --forget` clears both.
 
+The `transcription` block also carries `bleed`, what `referat/bleed.py` decided:
+the status, and **every** microphone cluster with the two coverages that judged
+it, kept ones included. The kept ones are the point — they are the only material
+that will ever calibrate `[bleed].cluster_time` and `cluster_text`, exactly as
+each speaker's `match` is recorded even when it was refused. The settings are
+recorded beside the verdict, so a transcript suppressed under old thresholds is
+distinguishable from one suppressed under new. Nothing about it is written into
+`transcript.md`: that file is prose about what was said, and this is the pipeline
+saying what it did.
+
+The `transcription` block gains `interrupted` — `{at, why, after_seconds}` —
+when a run was abandoned rather than finished, and a clean run drops it again by
+rebuilding the block whole. Note also that starting a run **merges** into that
+block rather than replacing it: the previous run's `model`, `seconds`,
+`audio_released` and `audio_kept` stay true of the files in the folder until this
+run overwrites them, and discarding them up front was how an interrupted rerun
+destroyed the record of a run that had succeeded.
+
 **`status` is the meeting's lifecycle, and it is explicit rather than derived:**
 
 ```
@@ -788,6 +1164,21 @@ it. The one transition no pipeline can make is `notes_written`, because
 `/cleanup` is forbidden from touching `meta.json`; whoever spawned it calls
 `referat state <id> notes-written` afterwards, and that verb accepts no other
 transition, and only from `transcribed`.
+
+**An interrupt is not a state.** A Ctrl+C out of a transcription restores the
+status the meeting arrived with and records `transcription.interrupted`; it does
+not write `failed`, which means *the transcription raised* and is a verdict on
+the material. Nothing on disk changed — the transcript, the names and both WAVs
+are the ones that were there when the run began — so the state that described the
+folder before is the state that describes it now: a first run goes back to
+`recorded`, an interrupted `rerun` back to `transcribed`. This needed saying
+because `KeyboardInterrupt` is a `BaseException` and walked straight past the
+failure handler until 2026-09-02, leaving a good meeting stuck at `transcribing`
+with an emptied `speaker_names`, which `referat delete` then refused to touch and
+every listing rendered as a lie. The one value never restored is `transcribing`
+itself — it is what a process killed outright leaves behind — and it clamps to
+`recorded`. **A hard kill can still leave it**, and no handler inside a process
+can promise otherwise; that residue is a known gap rather than a solved one.
 
 **The meetings already on this machine are not migrated**, deliberately. The
 legacy values map on load, so every one of them reads correctly as `recorded` or
@@ -856,17 +1247,33 @@ when the format changes — by hand, since nothing overwrites a seeded file.
 
 ## Conventions
 
-- **Windows only.** No cross-platform abstraction layers, no `if sys.platform`
-  branches for other OSes. WASAPI, `%LOCALAPPDATA%`, and Win32 calls are fair
-  game and used directly.
-- **One package**, `referat/`. Flat modules, no sub-packages.
+- **Windows only, except that the UI layer stays portable.** No cross-platform
+  abstraction layers, no `if sys.platform` branches for other OSes; WASAPI,
+  `%LOCALAPPDATA%` and Win32 calls are fair game in the recorder, the sleep hold
+  and the hotkeys, and used directly. The one part held to a different standard
+  is `referat/ui/`, which carries no Win32 call and no Windows-only Qt API. That
+  is a code-layer discipline and **not a shipping target**: it keeps the UI from
+  ever being the reason a port is impossible, and it is not a promise that
+  Referat runs anywhere but Windows, because everything below it says otherwise.
+- **One package**, `referat/`. Flat modules, and one sub-package: `referat/ui/`,
+  the command center. That is a deliberate exception taken at step 20 rather than
+  drift — a GUI is a dozen modules and flattening it would make the package
+  unreadable — and it is the only one. Nothing else grows a sub-package.
 - **Type hints throughout**, `from __future__ import annotations` at the top of
   every module.
-- **Minimal dependencies.** Base install is tray + audio only; the ~3 GB
-  transcription stack lives behind the `transcribe` extra. Step 16's WinRT toast
-  library is the one deliberate exception in the base install, taken because
-  `pystray` cannot raise an actionable notification and recorded as an exception
-  rather than left to look like an inconsistency.
+- **Minimal dependencies.** Base install is tray + audio + UI; the ~3 GB
+  transcription stack lives behind the `transcribe` extra. There are two
+  deliberate exceptions in the base install, both recorded as exceptions rather
+  than left to look like inconsistencies. Step 16's WinRT toast library, taken
+  because a tray icon cannot raise an actionable notification on its own. And
+  step 20's **PySide6-Essentials**, which is the command center and, because Qt
+  owns the tray icon, is now on the recording path — see the Smart App Control
+  paragraphs in Architecture for the audit that gated it and cleared it.
+  *Essentials* and not the full `PySide6`: QtWebEngine lives in `PySide6-Addons`
+  and is refused there on its merits, so the base install never carries it. It
+  replaced `pystray` and `pillow`, which are gone — the exception is a
+  substitution rather than an addition, and the base install got one dependency
+  smaller in count while getting larger on disk.
 - **Nothing is inferred from a transcript.** No keyword rules, no guessing which
   project a meeting belongs to, nothing tagged at the end of the pipeline. That is
   what keeps the untagged meetings a queue somebody works through rather than a
@@ -900,18 +1307,22 @@ when the format changes — by hand, since nothing overwrites a seeded file.
   editing it. Where a correction can be *prevented* instead — a name the model
   was never told exists — that is what the hotword list is for, and it acts
   before the transcript exists.
-- **No web UI.** The tray icon and the VS Code extension are the only graphical
-  surfaces this project has. No Flask, no FastAPI, no localhost dashboard, no
-  browser front end — anything a person needs to look at or click is a tray menu
-  item, a row in the extension's sidebar, or Markdown rendered in VS Code. The
-  sidebar is a VS Code webview, which is part of the extension and is not a web
-  UI; a localhost server would be, and there is none.
+- **No web server, and no Electron.** This rule used to read *no web UI, ever*
+  and was relaxed at step 20; the two things it was actually aimed at have not
+  moved an inch. Still forbidden: **any localhost server** — Flask, FastAPI,
+  anything binding a port — and **Electron**. Now permitted: a **desktop window
+  whose content is an embedded full-window web view**, a window this machine owns
+  that serves nothing and listens on nothing. The test is whether something binds
+  a socket, not whether something renders HTML — which is why a VS Code webview
+  was always on the right side of the line, and why the command center is too.
+  Anything a person needs to look at or click is a tray menu item, something in
+  the command center, or Markdown rendered in an editor.
 - **No Anthropic API key, ever.** All LLM work goes through the official
   `claude` binary under the user's Claude Code subscription login. No module in
   this project may call the Anthropic API directly, no key belongs in
-  `config.toml`, in the environment, or in the VS Code extension, and no
-  Anthropic SDK belongs in `pyproject.toml`. The extension spawns `claude` as a
-  child process and never handles credentials.
+  `config.toml`, in the environment, in the command center or in the VS Code
+  extension, and no Anthropic SDK belongs in `pyproject.toml`. Both surfaces
+  spawn `claude` as a child process and neither handles credentials.
 - **Voiceprints never leave the machine.** The known-voices database is not
   synced, not backed up, not readable by the `/cleanup` pass, and never sent
   anywhere. Deleting a person deletes them.

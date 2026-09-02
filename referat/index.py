@@ -107,18 +107,27 @@ def _row(meeting: Meeting) -> tuple[str, ...]:
 COLUMNS = ("Date", "Title", "Duration", "Status", "Unnamed", "Transcript", "Notes")
 
 
-def render_index(meetings: list[Meeting], staged: int = 0) -> str:
+def render_index(meetings: list[Meeting], *, gate_failed: int = 0, kept: int = 0) -> str:
     """The whole file, as Markdown.
 
     Newest first, unlike `referat list`. The list is read at a prompt with the
     last line closest to the cursor; this one is read from the top.
 
-    `staged` is the count of meetings that are still in the staging folder because
-    they kept their audio. They get a **footer line rather than rows**: they are
-    not in this folder, so there is nothing here to link to, and naming them with
-    absolute paths would put this machine's layout into a synced file. The line
-    mirrors what `referat list` already prints, so the two do not disagree about
-    what is waiting.
+    The two counts are meetings still in the staging folder because they still
+    have their audio. They get a **footer line rather than rows**: they are not in
+    this folder, so there is nothing here to link to, and naming them with
+    absolute paths would put this machine's layout into a synced file.
+
+    They are counted separately because the two say opposite things about what to
+    do next, and this footer used to say only the first — which is what sent
+    somebody to `referat rerun` on 2026-09-02 for a meeting that had transcribed
+    perfectly. `gate_failed` is audio the pipeline did not trust its own
+    transcript enough to delete, and a rerun is the answer. `kept` is audio
+    somebody asked for with `[transcription].keep_audio`, whose transcript the
+    gate already accepted, and where a rerun changes nothing: it is released with
+    `referat promote --release-audio`. That is the same split `referat list`'s
+    footer and `promote`'s refusal make, on the same `transcription.audio_kept`
+    key, so the surfaces cannot disagree about what is waiting.
     """
     lines = [HEADER]
     if not meetings:
@@ -139,13 +148,26 @@ def render_index(meetings: list[Meeting], staged: int = 0) -> str:
             )
         lines.append(summary)
 
-    if staged:
+    if gate_failed or kept:
         lines.append("")
+        staged = gate_failed + kept
         lines.append(
             f"{staged} further meeting{'s are' if staged != 1 else ' is'} still local "
-            f"with the audio kept, because the transcript did not come out clean — "
-            f"not listed above, and not in this folder. Run `referat rerun <id>`; "
-            f"`referat list` shows them."
+            f"with the audio kept — not listed above, and not in this folder. "
+            f"`referat list` shows {'them' if staged != 1 else 'it'}."
+        )
+        lines.append("")
+    if gate_failed:
+        lines.append(
+            f"- {gate_failed} because the transcript did not come out clean. "
+            f"Run `referat rerun <id>`."
+        )
+    if kept:
+        lines.append(
+            f"- {kept} because `[transcription].keep_audio` is on. The transcript is "
+            f"fine and a rerun would change nothing; run "
+            f"`referat promote <id> --release-audio` when the audio has served its "
+            f"purpose."
         )
 
     lines.append("")
@@ -169,14 +191,22 @@ def write_index(config: Config) -> Path | None:
         found = [Meeting.load(d) for d in paths.list_meeting_dirs(meetings_dir)]
         meetings = [m for m in found if m is not None]
         # Every root except the meetings folder itself is staging, and a meeting is
-        # only there while it still has its audio.
-        staged = sum(
-            len(paths.list_meeting_dirs(root))
+        # only there while it still has its audio. Loaded rather than counted, so
+        # the footer can split the ones the gate refused from the ones somebody
+        # asked to keep — two different next steps, and one of them used to be
+        # printed for both.
+        staged = [
+            m
             for root in config.meeting_roots()
             if root != meetings_dir
-        )
+            for d in paths.list_meeting_dirs(root)
+            if (m := Meeting.load(d)) is not None
+        ]
+        kept = sum(1 for m in staged if m.transcription.get("audio_kept"))
         target = meetings_dir / paths.INDEX_MD
-        paths.write_text_atomic(target, render_index(meetings, staged))
+        paths.write_text_atomic(
+            target, render_index(meetings, gate_failed=len(staged) - kept, kept=kept)
+        )
     except Exception:
         log.warning("could not write the meetings INDEX.md", exc_info=True)
         return None

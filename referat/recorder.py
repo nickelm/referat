@@ -34,6 +34,7 @@ import threading
 import time
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import numpy as np
 
@@ -305,23 +306,38 @@ def _matches(name: str, wanted: str) -> bool:
     return wanted.lower() in name.lower()
 
 
-def resolve_mic_device(wanted: str) -> int | None:
-    """Index of the input device matching `wanted`, or None for the system default.
+def mic_device_candidates(wanted: str) -> list[int | None]:
+    """Every way in to the wanted microphone, best first, ending in the default.
 
-    A substring that matches nothing is a warning, not an error: recording on
-    the default microphone beats not recording at all. Several host APIs expose
-    the same physical device, so WASAPI wins the tie when it is among them.
+    **One device is not enough, which cost a meeting.** On 2026-09-02 the
+    configured Jabra resolved to its WASAPI entry, that entry refused to open
+    with `Insufficient memory [PaErrorCode -9992]` — PortAudio's report for a
+    device another process is holding, among other things — and the recorder
+    gave up, recording twenty-four minutes of an in-person meeting from the
+    loopback alone. Windows was at that moment exposing the same physical
+    microphone under MME, DirectSound and WDM-KS as well, and none of them was
+    tried.
+
+    So this returns a ranked list rather than a winner. WASAPI first, because it
+    is the low-latency path and the one `[audio].mic_samplerate` is written for;
+    then the other host APIs in enumeration order; then `None`, the system
+    default, which is the answer to a microphone that has genuinely gone away
+    with a change of room. A caller walks the list until a stream opens.
+
+    The `None` at the end is a deliberate widening of what this used to do only
+    when nothing matched: a laptop's own array is a poor substitute for the
+    Jabra, and it is an enormously better one than silence.
     """
     import sounddevice as sd
 
     if not wanted.strip():
-        return None
+        return [None]
     try:
         devices = sd.query_devices()
         hostapis = sd.query_hostapis()
     except Exception:
         log.exception("could not enumerate input devices")
-        return None
+        return [None]
 
     matches = [
         (i, d)
@@ -330,14 +346,30 @@ def resolve_mic_device(wanted: str) -> int | None:
     ]
     if not matches:
         log.warning("no input device matching %r; using the default", wanted)
-        return None
-    for index, device in matches:
-        if "WASAPI" in str(hostapis[device["hostapi"]]["name"]).upper():
-            log.info("mic device: %s (WASAPI)", device["name"])
-            return index
-    index, device = matches[0]
-    log.info("mic device: %s", device["name"])
-    return index
+        return [None]
+
+    def wasapi_first(pair: tuple[int, Any]) -> int:
+        return 0 if "WASAPI" in str(hostapis[pair[1]["hostapi"]]["name"]).upper() else 1
+
+    ranked = sorted(matches, key=wasapi_first)
+    log.info(
+        "mic candidates for %r: %s",
+        wanted,
+        ", ".join(f"{i} {d['name']}" for i, d in ranked),
+    )
+    return [i for i, _ in ranked] + [None]
+
+
+def resolve_mic_device(wanted: str) -> int | None:
+    """The device `[audio].mic_device` resolves to, or None for the system default.
+
+    The first of :func:`mic_device_candidates`, which is what recording will
+    actually try first. Kept as its own function because `referat devices` marks
+    one row `<- config` and must not have its own opinion about which — a listing
+    that disagreed with what gets recorded would be worse than no listing.
+    """
+    first = mic_device_candidates(wanted)[0]
+    return first
 
 
 def resolve_loopback_device(audio: object, wanted: str) -> dict:
@@ -388,6 +420,8 @@ class Recorder:
         self._mic_stream: object | None = None
         self._loopback_stream: object | None = None
         self._audio: object | None = None
+        self.missing_channels: list[str] = []
+        """Channels that would not open this run: read by the tray for its toast."""
         self._lock = threading.Lock()
         self._stopped = False
 
@@ -417,6 +451,19 @@ class Recorder:
 
         meeting.status = MeetingStatus.RECORDING
         meeting.audio = self._audio_info()
+        # Written down rather than left to be noticed. A channel that never
+        # opened used to show up only as an *absent* key under `audio`, which is
+        # the "infer it from what is missing" shape this codebase refuses
+        # everywhere else — and no reader inferred it, so `referat list` called a
+        # meeting with no microphone in it `transcribed` and nothing ever said
+        # otherwise. `missing_channels` is the fact; the toast and the icon are
+        # how somebody finds out in time to do something about it.
+        self.missing_channels = [
+            name
+            for name, channel in (("mic", self._mic), ("system", self._system))
+            if channel is None
+        ]
+        meeting.missing_channels = list(self.missing_channels)
         meeting.save()
         log.info(
             "recording %s (mic=%s, system=%s)",
@@ -424,29 +471,69 @@ class Recorder:
             "on" if self._mic else "off",
             "on" if self._system else "off",
         )
+        if self._mic is None:
+            # Loud, because for a meeting held in a room the microphone *is* the
+            # recording and the loopback is the silent one. Twenty-four minutes
+            # were lost to this being an INFO line.
+            log.error(
+                "%s is recording WITHOUT A MICROPHONE - only system audio will be "
+                "captured, which is silence unless this is a call",
+                meeting.id,
+            )
         return meeting
 
     def _start_mic(self, meeting: Meeting) -> None:
+        """Open the first microphone that will actually open, and record from it.
+
+        Every candidate from :func:`mic_device_candidates` is tried in turn, and
+        each is tried at the configured rate and then at its own default rate.
+        One device used to be the whole of this, and the day it refused —
+        `-9992`, with three other routes to the same Jabra sitting in the device
+        list — an in-person meeting was recorded from the loopback alone.
+
+        The rate retry is guarded on the two rates *differing*, which it was not.
+        `default_samplerate` for that Jabra is 16000, which is exactly what
+        `[audio].mic_samplerate` asks for, so the fallback re-attempted the rate
+        that had just failed and logged "falling back to 16000 Hz" from 16000 Hz.
+        It was also answering a failure that had nothing to do with rate: a
+        device held by another process refuses every rate equally.
+        """
         import sounddevice as sd
 
-        device = resolve_mic_device(self.config.audio.mic_device)
-        rate = self.config.audio.mic_samplerate
-        try:
-            stream = self._open_mic_stream(sd, device, rate)
-        except Exception:
-            # A device that will not do 16 kHz mono still gets recorded, at
-            # whatever it does support; transcription resamples anyway.
-            fallback = int(sd.query_devices(device, "input")["default_samplerate"])
-            log.warning("mic rejected %d Hz; falling back to %d Hz", rate, fallback)
-            stream = self._open_mic_stream(sd, device, fallback)
-            rate = fallback
+        wanted = self.config.audio.mic_samplerate
+        failures: list[str] = []
+        for device in mic_device_candidates(self.config.audio.mic_device):
+            try:
+                info = sd.query_devices(device, "input")
+            except Exception as exc:
+                failures.append(f"device {device}: {exc}")
+                continue
+            name = str(info["name"])
+            default = int(info["default_samplerate"])
+            # Deduplicated, so a device whose default *is* the configured rate is
+            # tried once rather than twice with the same argument.
+            for rate in dict.fromkeys((wanted, default)):
+                try:
+                    stream = self._open_mic_stream(sd, device, rate)
+                except Exception as exc:
+                    failures.append(f"{name} at {rate} Hz: {exc}")
+                    log.warning("mic %s refused %d Hz: %s", name, rate, exc)
+                    continue
+                if rate != wanted:
+                    # Recorded at whatever the device does support; transcription
+                    # resamples anyway.
+                    log.warning("mic %s took %d Hz rather than %d", name, rate, wanted)
+                channel = Channel("mic", meeting.mic_path, rate, self.clock, device=name)
+                self._mic = channel
+                self._mic_stream = stream
+                channel.start()
+                stream.start()
+                log.info("mic device: %s at %d Hz", name, rate)
+                return
 
-        name = str(sd.query_devices(device, "input")["name"])
-        channel = Channel("mic", meeting.mic_path, rate, self.clock, device=name)
-        self._mic = channel
-        self._mic_stream = stream
-        channel.start()
-        stream.start()
+        raise RecorderError(
+            "no microphone could be opened; tried " + "; ".join(failures)
+        )
 
     def _open_mic_stream(self, sd: ModuleType, device: int | None, rate: int) -> object:
         def callback(indata, frames, time_info, status) -> None:  # noqa: ANN001

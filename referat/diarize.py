@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from referat import gpu
 from referat.config import Config
 
 if TYPE_CHECKING:
@@ -277,11 +278,19 @@ def _run(
         # it; the two are separate halves and both are needed.
         waveform = torch.from_numpy(np.ascontiguousarray(audio)).unsqueeze(0)
         result = pipeline({"waveform": waveform, "sample_rate": sample_rate})
-        return _read_output(result)
+        turns, embeddings = _read_output(result)
+        # Read out and dropped here rather than left to the return statement:
+        # pyannote's output holds GPU tensors of its own, and a `result` still
+        # alive in this frame is memory `gpu.release` below cannot reclaim.
+        del result
+        return turns, embeddings
     finally:
         # Dropped rather than held warm, for the same reason the Whisper model
         # is: meetings are minutes apart at best, and the VRAM is worth more.
+        # `del` alone never achieved that -- see :mod:`referat.gpu`, which is the
+        # half that hands the arena back to the driver.
         del pipeline
+        gpu.release("diarizing")
 
 
 def _read_output(result: Any) -> tuple[list[Turn], dict[str, np.ndarray]]:
@@ -396,8 +405,10 @@ def _embed(
             return None
         return np.mean(vectors, axis=0).astype(np.float32)
     finally:
-        # Dropped rather than held warm, for the same reason `_run` drops it.
+        # Dropped rather than held warm, for the same reason `_run` drops it, and
+        # given back to the driver for the same reason `_run` gives it back.
         del pipeline
+        gpu.release("embedding")
 
 
 # --- Aligning turns to segments ---------------------------------------------

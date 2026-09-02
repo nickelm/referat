@@ -18,7 +18,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Any
 
-from referat import __version__, paths
+from referat import __version__, build_info, paths
 from referat.state import Machine, State
 
 log = logging.getLogger(__name__)
@@ -39,6 +39,14 @@ class Status:
     jobs: int
     updated_at: str
     referat_version: str
+    code_mtime: str | None = None
+    """When the code this tray *loaded* was last written. See :mod:`referat.build_info`.
+
+    Recorded here because the comparison that answers "is this tray running the
+    latest code?" spans two processes: a running tray cannot see edits made after
+    it started, and `referat status` is a fresh interpreter that can. Optional, so
+    a `status.json` written by an older tray still parses.
+    """
 
 
 def write_status(machine: Machine) -> None:
@@ -52,6 +60,11 @@ def write_status(machine: Machine) -> None:
         "jobs": machine.jobs,
         "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "referat_version": __version__,
+        "code_mtime": (
+            build_info.CODE_MTIME.isoformat(timespec="seconds")
+            if build_info.CODE_MTIME
+            else None
+        ),
     }
     try:
         paths.write_json_atomic(paths.status_path(), payload)
@@ -84,6 +97,7 @@ def read_status() -> Status | None:
             jobs=int(raw.get("jobs", 0)),
             updated_at=raw.get("updated_at", ""),
             referat_version=raw.get("referat_version", ""),
+            code_mtime=raw.get("code_mtime"),
         )
     except (KeyError, TypeError, ValueError):
         log.warning("ignoring malformed %s", paths.status_path())

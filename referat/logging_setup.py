@@ -19,6 +19,17 @@ MAX_BYTES = 2_000_000
 BACKUP_COUNT = 3
 
 
+CHATTY = ("httpx", "httpcore", "urllib3", "huggingface_hub", "filelock", "fsspec")
+"""Libraries whose INFO logging says nothing about Referat's work.
+
+`httpx` is the one that actually misled somebody: `faster_whisper` asks the
+Hugging Face API for the model's current revision on every load, and that one
+`GET .../revision/main` line in the log reads exactly like a 3 GB download
+starting. The model is cached on disk and loads in about four seconds. Raised to
+WARNING rather than silenced, so a real failure still says so.
+"""
+
+
 def setup_logging(level: str = "INFO", *, console: bool = True) -> Path:
     """Install the rotating file handler (and optionally a console one).
 
@@ -41,6 +52,9 @@ def setup_logging(level: str = "INFO", *, console: bool = True) -> Path:
     )
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
+
+    for name in CHATTY:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     # Under pythonw.exe there is no usable stderr, so only attach a console
     # handler when one actually exists.

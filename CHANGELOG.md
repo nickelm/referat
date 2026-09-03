@@ -2,6 +2,80 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-03 (third) — A queue, real progress, and chips that wrap
+
+The second round of feedback, after the window had been used to name speakers
+and write notes for real.
+
+### /cleanup was a black box, and the cause was the invocation
+
+The progress phase said "starting claude" for the entire pass. Plain `-p` prints
+one blob when it is over — visible in the log, where the 10:53:30 run said
+nothing until 10:58:41 and then said everything at once.
+
+`--output-format stream-json --verbose` emits one JSON object per event instead,
+and `notes._phase` turns the useful ones into a sentence: *reading
+transcript.md*, *looking for meta.json*, *writing notes.md*. The verdict now
+comes from the final `result` event, which carries `is_error` and a message,
+rather than from the exit code alone.
+
+### Queueing notes, and running them all
+
+*Notes for all…* queues every promoted meeting that has a transcript and no
+notes, oldest first. **One worker and a FIFO**, not a thread each: every pass is
+a real subprocess against one rate limit writing into one folder, and sequential
+is also what makes a queue legible. A staged meeting is skipped, because
+`/cleanup` runs with cwd at the meetings folder and cannot reach one.
+
+Each id is announced to `progress` as *queued* the moment it is accepted, so the
+whole backlog shows rather than only the job in flight — `generate_notes`
+re-announces the same key when it actually starts, replacing the queued entry in
+place.
+
+### An Activity tab
+
+Two panes and two kinds of truth. The queue on top, live from `progress`. The
+**real rotating log** beneath — not a parallel history kept in memory, which
+would be a worse copy of a file that already records every transition, model
+load, gate verdict and refusal.
+
+It is the one page with a timer, which is a deliberate exception to the window's
+refresh-on-event rule: a log grows with no event this process can see. It runs
+only while the page is in front.
+
+### The Whisper model was never being re-downloaded
+
+Measured: 2.9 GB cached on disk, ~4 seconds to load. The alarming line is
+`faster_whisper` asking Hugging Face for the model's current revision — one
+metadata call that reads exactly like a download starting. `logging_setup.CHATTY`
+raises httpx and five other libraries to WARNING, and the Activity tab filters
+them out too. A log line that reliably misleads is a bug in the log line.
+
+### Chips that wrap
+
+`referat/ui/flow.py` is the classic Qt flow layout, which Qt does not ship.
+`QHBoxLayout` makes itself as wide as its contents, so nine names pushed the
+speaker dialog's detail pane past the window edge — and the gallery only grows.
+The subtle part is `hasHeightForWidth`: without it the parent grants one row's
+height and clips everything under it.
+
+They are styled as chips as well — rounded, palette-coloured, sized to their
+text — because a row of push buttons reads as a row of commands and this is a
+gallery to pick from. The `SPEAKER_NN` list beside them is fixed at 150 px,
+since that is all it holds.
+
+### Deferred, with the design written down
+
+Two asks went to the build plan rather than into this batch, both because they
+are larger than they look. **Marking a cluster as noise** deletes lines from a
+transcript and has to inherit all four of `debleed`'s conditions — recorded
+before the deletion, dry by default, checkable, and a repair rather than an
+edit — plus one debleed does not need: it is a human judgement with no evidence
+behind it, so nothing may ever infer it. **Full and short names** is a schema
+change to the voices database, and two people filed under one name is the worst
+failure this system has, so the uniqueness rule has to be decided before a line
+is written. Steps 20b and 20c.
+
 ## 2026-09-03 (later) — The crash, and the window becoming usable
 
 Two sessions in one day. The first was phase 5; this is the crash that followed

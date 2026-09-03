@@ -42,6 +42,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
+from typing import Any
 
 from referat import progress
 from referat.config import Config
@@ -164,6 +165,13 @@ def generate_notes(config: Config, meeting_id: str) -> tuple[bool, str]:
         ALLOWED_TOOLS,
         "--permission-mode",
         "acceptEdits",
+        # Without these two the pass is a black box: plain `-p` prints one blob
+        # when it is finished, so the progress phase said "starting claude" for
+        # the whole two minutes and there was no way to tell work from a hang.
+        # `stream-json` emits one JSON object per event as it happens.
+        "--output-format",
+        "stream-json",
+        "--verbose",
     ]
     key = progress_key(meeting_id)
     log.info("running %s in %s", " ".join(args[1:]), meetings_dir)
@@ -180,13 +188,69 @@ def generate_notes(config: Config, meeting_id: str) -> tuple[bool, str]:
         progress.end(key)
 
 
-def _run(args: list[str], cwd: Path, key: str, meeting_id: str) -> tuple[bool, str]:
-    """Spawn, stream the output into the progress phase, and judge the exit code.
+TOOL_PHRASES = {
+    "Read": "reading",
+    "Write": "writing",
+    "Edit": "editing",
+    "Glob": "looking for",
+}
+"""How a tool call reads as a sentence. Only the three `/cleanup` may use, plus
+`Edit`, which it may not — shown rather than hidden if it ever appears, because
+a pass doing something it was not allowed is worth seeing rather than silently
+rendering as a bare tool name."""
 
-    The last non-empty line becomes the phase, which is what makes this legible
-    while it runs: a cleanup pass takes a minute or two and says what it is doing
-    the whole time. The whole of the output goes to the log, because the phase is
-    a glimpse and a failure needs the rest.
+
+def _phase(event: dict[str, Any]) -> str:
+    """One streamed event as a phase somebody can read, or `""` to ignore it.
+
+    Tool calls first, because they are what a cleanup pass spends its time on and
+    they name a file — *reading transcript.md* is the sentence that makes the
+    difference between watching work and watching a spinner. Prose second, since
+    the model narrates as it goes. Everything else — the init blob, rate-limit
+    notices, usage accounting — is noise on a progress bar.
+
+    A basename rather than a path: the pane is one line wide and the folder is
+    the same for every file in the pass.
+    """
+    if event.get("type") == "result":
+        return "finishing up"
+    if event.get("type") != "assistant":
+        return ""
+    phase = ""
+    for block in event.get("message", {}).get("content", []) or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use":
+            name = str(block.get("name", ""))
+            target = block.get("input", {}) or {}
+            what = target.get("file_path") or target.get("pattern") or target.get("path") or ""
+            verb = TOOL_PHRASES.get(name, name.lower())
+            phase = f"{verb} {Path(str(what)).name}".strip() if what else verb
+        elif block.get("type") == "text" and not phase:
+            # Only when no tool call is in the same message: what it is *doing*
+            # beats what it is saying about it.
+            if text := " ".join(str(block.get("text", "")).split()):
+                phase = text[:100]
+    return phase
+
+
+def _run(args: list[str], cwd: Path, key: str, meeting_id: str) -> tuple[bool, str]:
+    """Spawn, turn each streamed event into a progress phase, and judge the result.
+
+    **The events are the point.** Plain `-p` prints one blob when the whole pass
+    is over, so the phase read "starting claude" for two solid minutes and a hang
+    looked exactly like work. `--output-format stream-json --verbose` emits one
+    JSON object per event instead, and :func:`_phase` turns the interesting ones
+    into a sentence — *reading transcript.md*, *writing notes.md* — so the
+    activity strip tracks what the pass is actually doing.
+
+    The verdict comes from the final `result` event rather than only from the
+    exit code, because that event carries `is_error` and the message. The exit
+    code is still checked: a `claude` that dies without emitting a result has no
+    event to read.
+
+    Every line goes to the log whatever it is, because a phase is a glimpse and a
+    failure needs the rest.
 
     `windowsHide` has no Python equivalent, so `CREATE_NO_WINDOW` does the same
     job — without it the tray, which runs under `pythonw.exe` and owns no
@@ -204,21 +268,36 @@ def _run(args: list[str], cwd: Path, key: str, meeting_id: str) -> tuple[bool, s
         env={**os.environ, "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"},
     )
 
-    tail: list[str] = []
     errors: list[str] = []
+    result: dict[str, Any] = {}
 
-    def drain(stream, sink: list[str], phase: bool) -> None:
+    def read_events(stream) -> None:
         for line in stream:
-            text = line.rstrip()
-            sink.append(text)
-            if text:
-                log.info("claude: %s", text)
-                if phase:
-                    progress.step(key, text[:120], None)
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except json.JSONDecodeError:
+                # Not every line is an event — a warning on stdout, say. Logged
+                # and skipped rather than allowed to end the stream.
+                log.info("claude: %s", text[:400])
+                continue
+            if event.get("type") == "result":
+                result.update(event)
+            log.debug("claude event: %s", text[:400])
+            if phase := _phase(event):
+                progress.step(key, phase, None)
+
+    def read_errors(stream) -> None:
+        for line in stream:
+            if text := line.rstrip():
+                errors.append(text)
+                log.info("claude stderr: %s", text)
 
     threads = [
-        threading.Thread(target=drain, args=(process.stdout, tail, True), daemon=True),
-        threading.Thread(target=drain, args=(process.stderr, errors, False), daemon=True),
+        threading.Thread(target=read_events, args=(process.stdout,), daemon=True),
+        threading.Thread(target=read_errors, args=(process.stderr,), daemon=True),
     ]
     for thread in threads:
         thread.start()
@@ -226,6 +305,9 @@ def _run(args: list[str], cwd: Path, key: str, meeting_id: str) -> tuple[bool, s
     for thread in threads:
         thread.join(timeout=5)
 
+    if result.get("is_error") or (result and result.get("subtype") != "success"):
+        complaint = str(result.get("result") or result.get("subtype") or "it reported an error")
+        return False, f"claude could not write notes for {meeting_id}: {complaint[:300]}"
     if code != 0:
         complaint = next((line for line in reversed(errors) if line), f"exit code {code}")
         return False, f"claude could not write notes for {meeting_id}: {complaint}"

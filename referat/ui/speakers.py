@@ -57,6 +57,7 @@ from referat import cli
 from referat import label as labelling
 from referat.config import Config
 from referat.state import State
+from referat.ui import flow
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +87,24 @@ NO_EMBEDDING = (
 )
 
 RECORDING = "Not while a meeting is recording: the snippets would be captured into it."
+
+CHIP_STYLE = """
+QPushButton {
+    border: 1px solid palette(mid);
+    border-radius: 11px;
+    padding: 3px 11px;
+    background: palette(button);
+}
+QPushButton:hover { border-color: palette(highlight); }
+QPushButton:disabled { color: palette(mid); }
+"""
+"""A chip rather than a button: rounded, quiet, sized to its text.
+
+Every colour is a palette role rather than a literal, so this follows the
+system theme the way the rest of the window does — a hard-coded grey reads as
+a disabled control in dark mode. The shape is the whole difference: a row of
+push buttons reads as a row of *commands*, and these are a gallery of names to
+pick from."""
 
 UNTAGGED = (
     "This meeting carries no project, so every known name is offered. Tagging it "
@@ -120,7 +139,10 @@ class SpeakerDialog(QDialog):
         self.resize(720, 520)
 
         self.speakers = QListWidget()
-        self.speakers.setMaximumWidth(200)
+        # Fixed rather than merely capped: this list holds `SPEAKER_NN` and
+        # nothing else, so it needs exactly as much room as that and every pixel
+        # beyond is taken from the panel that has something to say.
+        self.speakers.setFixedWidth(150)
         self.speakers.currentItemChanged.connect(self._on_row_changed)
 
         self.heading = QLabel()
@@ -132,9 +154,11 @@ class SpeakerDialog(QDialog):
         self.lines.setTextFormat(Qt.TextFormat.PlainText)
         self.lines.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        self.chips = QWidget()
-        self.chip_row = QHBoxLayout(self.chips)
-        self.chip_row.setContentsMargins(0, 0, 0, 0)
+        # A wrapping layout, not a row. `QHBoxLayout` makes itself as wide as its
+        # contents, so nine chips pushed the detail pane wider than the window and
+        # squeezed everything else — and the gallery only grows. See
+        # :mod:`referat.ui.flow`.
+        self.chips, self.chip_row = flow.wrapping(spacing=6)
         self.show_all = QPushButton()
         self.show_all.setFlat(True)
         self.show_all.clicked.connect(self._on_show_all)
@@ -320,8 +344,9 @@ class SpeakerDialog(QDialog):
                 chip.setToolTip(summary)
             chip.clicked.connect(lambda _checked=False, n=name: self._pick(n))
             chip.setEnabled(speaker["has_embedding"])
+            chip.setStyleSheet(CHIP_STYLE)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
             self.chip_row.addWidget(chip)
-        self.chip_row.addStretch(1)
 
         hidden = len(self.document["gallery"]["rest"])
         scoped = bool(self.document["gallery"]["scoped"])

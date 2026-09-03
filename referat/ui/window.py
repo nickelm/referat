@@ -28,6 +28,7 @@ column this step exists to escape.
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 from typing import Any
 
@@ -51,9 +52,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from referat import cli, paths
+from referat import cli, paths, progress
 from referat.state import State
 from referat.ui import speakers, tags
+from referat.ui.activity import ActivityPage
 from referat.ui.people import PeoplePage
 from referat.ui.projects import ProjectsPage
 from referat.ui.viewer import Viewer
@@ -126,6 +128,10 @@ class CommandCenter(QMainWindow):
 
         self._document: dict[str, Any] = {"meetings": [], "projects": {}}
         self._selected: str | None = None
+        self._notes_queue: queue.Queue[str] = queue.Queue()
+        self._notes_worker: threading.Thread | None = None
+        self._queued: set[str] = set()
+        """What is already on the notes queue, so a double click queues once."""
 
         self.record_button = QPushButton("Record")
         self.pause_button = QPushButton("Pause")
@@ -181,6 +187,13 @@ class CommandCenter(QMainWindow):
         self.notes_button.setEnabled(False)
         self.notes_button.clicked.connect(self._on_notes)
 
+        self.notes_all_button = QPushButton("Notes for all...")
+        self.notes_all_button.setToolTip(
+            "Queue /cleanup for every promoted meeting that has a transcript and no "
+            "notes. One at a time, in date order."
+        )
+        self.notes_all_button.clicked.connect(self._on_notes_all)
+
         self.delete_button = QPushButton("Delete...")
         self.delete_button.setEnabled(False)
         self.delete_button.clicked.connect(self._on_delete)
@@ -230,6 +243,7 @@ class CommandCenter(QMainWindow):
         actions.addWidget(self.tag_button)
         actions.addWidget(self.label_button)
         actions.addWidget(self.notes_button)
+        actions.addWidget(self.notes_all_button)
         actions.addSpacing(18)
         actions.addWidget(self.delete_button)
 
@@ -276,9 +290,14 @@ class CommandCenter(QMainWindow):
         self.people = PeoplePage(self.app.config)
         self.people.meeting_requested.connect(self.open_meeting)
         self.people.project_requested.connect(self.open_project)
+        self.activity_page = ActivityPage()
         self.pages.addTab(self.meetings_page, "Meetings")
         self.pages.addTab(self.projects, "Projects")
         self.pages.addTab(self.people, "People")
+        # Last, because it is about the machine rather than about one of the
+        # three entities — the same reason the recorder's buttons sit above the
+        # tabs rather than inside one.
+        self.pages.addTab(self.activity_page, "Activity")
         self.pages.currentChanged.connect(self._on_page_changed)
 
         # The activity strip, permanent in the status bar so it is visible from
@@ -357,7 +376,7 @@ class CommandCenter(QMainWindow):
 
     def _refresh_page(self, page: QWidget | None) -> None:
         """Re-read one page, if it is one of the ones that reads anything."""
-        if page in (self.projects, self.people):
+        if page in (self.projects, self.people, self.activity_page):
             page.refresh()
 
     def _reload(self) -> None:
@@ -646,27 +665,113 @@ class CommandCenter(QMainWindow):
             )
             return
 
-        self.notes_button.setEnabled(False)
-        threading.Thread(
-            target=self._write_notes, args=(meeting_id,), name="notes", daemon=True
-        ).start()
+        self._enqueue_notes([meeting_id])
 
-    def _write_notes(self, meeting_id: str) -> None:
-        """The worker half of :meth:`_on_notes`. Touches no widget.
+    def _on_notes_all(self) -> None:
+        """Queue every promoted meeting that has a transcript and no notes.
 
-        Not one line of Qt in here, which is the whole discipline the heap
-        corruption taught: `App.notify` marshals through the shell's `Bridge`,
-        and the progress reports go through a registry that knows nothing about
-        toolkits.
+        The answer to *is there a way to launch them all* — and there is no
+        reason not to, since `/cleanup` reads a transcript and writes a file
+        beside it. Date order, oldest first, so the backlog is worked through the
+        way it accumulated.
+
+        Staged meetings are skipped without comment: `/cleanup` runs with cwd at
+        the meetings folder and cannot reach one. So are meetings that already
+        have notes — re-running one is a deliberate act and stays the single
+        button's job.
         """
-        try:
-            outcome = cli.write_notes(self.app.config, meeting_id)
-            self.app.notify(
-                outcome.message if outcome.ok else f"Notes for {meeting_id}: {outcome.message}"
+        wanted = [
+            m["id"]
+            for m in self._document["meetings"]
+            if m["transcript"] and not m["notes"] and not m["staged"]
+            and m["status"] not in ("recording", "transcribing")
+        ]
+        if not wanted:
+            QMessageBox.information(
+                self,
+                "Notes for all",
+                "Every promoted meeting with a transcript already has notes.",
             )
-        except Exception:
-            log.exception("could not generate notes for %s", meeting_id)
-            self.app.notify(f"Could not generate notes for {meeting_id} - see the log.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Notes for all",
+            f"Queue /cleanup for {len(wanted)} meeting(s)?\n\n"
+            f"They run one at a time, oldest first, and each one spawns claude "
+            f"under your own Claude Code login. The activity tab shows the queue.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._enqueue_notes(wanted)
+
+    def _enqueue_notes(self, meeting_ids: list[str]) -> None:
+        """Put meetings on the notes queue and make sure the worker is running.
+
+        **One worker and a FIFO**, rather than a thread per meeting. Each pass is
+        a `claude` subprocess doing real work, and ten at once would be ten
+        subprocesses competing for the same rate limit and writing into the same
+        folder. Sequential is also what makes the queue legible.
+
+        Each id is announced to :mod:`referat.progress` as *queued* the moment it
+        is accepted, so the activity tab shows the whole backlog rather than only
+        the one in flight. `generate_notes` re-announces the same key when it
+        actually starts, which replaces the queued entry in place.
+        """
+        from referat import notes as notes_module
+
+        fresh = [mid for mid in meeting_ids if mid not in self._queued]
+        if not fresh:
+            return
+        for meeting_id in fresh:
+            self._queued.add(meeting_id)
+            progress.begin(
+                notes_module.progress_key(meeting_id), progress.NOTES, meeting_id, "queued"
+            )
+            self._notes_queue.put(meeting_id)
+        if self._notes_worker is None or not self._notes_worker.is_alive():
+            self._notes_worker = threading.Thread(
+                target=self._notes_loop, name="notes", daemon=True
+            )
+            self._notes_worker.start()
+
+    def _notes_loop(self) -> None:
+        """Run queued cleanup passes one at a time. Touches no widget.
+
+        Not one line of Qt in here, which is the discipline the heap corruption
+        taught: `App.notify` marshals through the shell's `Bridge` and the
+        progress reports go through a registry that knows nothing about toolkits.
+
+        The thread ends when the queue empties rather than idling forever, and
+        :meth:`_enqueue_notes` starts a new one — a daemon thread blocked on a
+        `get()` for the life of the process is a thing that shows up in a stack
+        dump and puzzles somebody later.
+        """
+        from referat import notes as notes_module
+
+        while True:
+            try:
+                meeting_id = self._notes_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                outcome = cli.write_notes(self.app.config, meeting_id)
+                self.app.notify(
+                    outcome.message
+                    if outcome.ok
+                    else f"Notes for {meeting_id}: {outcome.message}"
+                )
+            except Exception:
+                log.exception("could not generate notes for %s", meeting_id)
+                self.app.notify(f"Could not generate notes for {meeting_id} - see the log.")
+            finally:
+                # Whatever happened, the key must go: `generate_notes` ends its
+                # own, but a failure before it began would leave the *queued*
+                # entry on the activity tab forever.
+                progress.end(notes_module.progress_key(meeting_id))
+                self._queued.discard(meeting_id)
+                self._notes_queue.task_done()
 
     def _on_delete(self) -> None:
         """Delete the selected meeting, behind the warning Python wrote.
@@ -719,13 +824,21 @@ class CommandCenter(QMainWindow):
         progress widget that is always there stops being read.
         """
         if not jobs:
+            self.activity_page.on_progress(jobs)
             # Cleared as well as hidden, or the next job flashes the last one's
             # phase for the frame between `show` and the first `setText`.
             self.activity.clear()
             self.activity.hide()
             self.activity_bar.hide()
             return
-        job = jobs[0]
+        # The page gets the whole list; the strip gets the headline. One
+        # listener feeds both, because a second would be a second thing to
+        # marshal off the reporting thread.
+        self.activity_page.on_progress(jobs)
+        # The headline is something that is actually *running*, falling back to
+        # the oldest. A strip that led with a queued job while a transcription
+        # was underway would report the one thing that is not happening.
+        job = next((j for j in jobs if j.phase != "queued"), jobs[0])
         extra = f"  (+{len(jobs) - 1} more)" if len(jobs) > 1 else ""
         self.activity.setText(f"{job.title}: {job.phase}{extra}")
         self.activity.show()

@@ -2652,6 +2652,46 @@ UI, which is what phases 1-5 had just made it.
       is a daemon thread, `Record` is enabled in `idle` *and* `transcribing`, and
       `transcribe._RUN_LOCK` serialises the jobs so two large-v3 models never
       share the card. Answered rather than built
+- [x] **`/cleanup` said "starting claude" for the whole two minutes.** Plain `-p`
+      prints one blob when the pass is over — measured in the log: the 10:53:30
+      run said nothing until 10:58:41 and then said everything at once. Now
+      `--output-format stream-json --verbose`, and `notes._phase` turns each
+      event into a sentence: *reading transcript.md*, *writing notes.md*. The
+      verdict comes from the final `result` event too, which carries `is_error`,
+      rather than from the exit code alone
+- [x] **Queue several notes runs, and a way to launch them all.** *Notes for
+      all…* queues every promoted meeting with a transcript and no notes, oldest
+      first. **One worker and a FIFO**, not a thread each: every pass is a real
+      subprocess against one rate limit writing into one folder, and sequential
+      is also what makes a queue legible. Each id is announced to `progress` as
+      *queued* the moment it is accepted, so the whole backlog shows rather than
+      only the one in flight
+- [x] **An Activity tab**, as suggested, and it is two kinds of truth: the queue
+      from `progress` on top, and the **real rotating log** beneath rather than a
+      parallel history kept in memory, which would be a worse copy of a file
+      Referat already writes everything worth knowing into. The one page with a
+      timer — a log grows with no event this process can see — and it runs only
+      while that page is in front
+- [x] **The Whisper model is not re-downloaded.** Measured: 2.9 GB cached on
+      disk, ~4 s to load. The `httpx` line is one metadata call asking Hugging
+      Face for the model's current revision, and it reads exactly like a download
+      starting. `logging_setup.CHATTY` raises httpx and five other libraries to
+      WARNING, and the Activity tab's *Referat only* filter hides them too
+- [x] **Chips wrapped instead of filling the width.** `referat/ui/flow.py` is the
+      classic Qt flow layout, which Qt does not ship: `QHBoxLayout` makes itself
+      as wide as its contents, so nine names pushed the detail pane past the
+      window and the gallery only grows. They are styled as chips as well —
+      rounded, palette-coloured, sized to their text — because a row of push
+      buttons reads as a row of commands and this is a gallery to pick from
+- [x] **The speaker list on the left is fixed at 150 px.** It holds `SPEAKER_NN`
+      and nothing else; every pixel past that was taken from the panel that has
+      something to say
+- [ ] **Mark a speaker as noise and delete their lines.** Deferred to **step
+      20b** above, because it removes entries from a transcript and inherits four
+      conditions from `debleed`
+- [ ] **Full names as well as short names.** Deferred to **step 20c** above,
+      because it is a schema change to the voices database and two people filed
+      under one name is the worst failure this system has
 - [ ] **"The interface just is not rich enough. I want to see tags and"** — the
       sentence was cut off and the rest has not been said yet. Do not guess at it;
       ask. Tags are on the meetings list and editable through the picker, so
@@ -2664,6 +2704,102 @@ UI, which is what phases 1-5 had just made it.
 - [ ] **The activity strip has never been watched through a real transcription.**
       Every phase was driven against a fake model. The fractions are right in a
       unit test; what they look like over 55 minutes of audio is not known
+
+### 20b. Noise clusters — marking a speaker as *not a person*
+
+**Raised on 2026-09-03: "some of the speakers ended up being noise from the
+nextdoor room. I would like to be able to mark it as noise and have the
+associated words eliminated."** Deferred out of the feedback batch because it
+deletes lines from a transcript, and that is the rule this project is most
+careful about.
+
+**The precedent exists and it is `debleed`.** `CLAUDE.md` already argues that an
+echo copy is not a second utterance but a second *recording* of one, and lets
+`referat debleed` remove whole entries — on four conditions, all of which this
+must inherit rather than re-argue:
+
+- [ ] **Every removed entry is recorded in `meta.json` before the transcript is
+      touched**, with the line kept verbatim, so an interruption leaves a record
+      of a removal that did not happen rather than a removal with no record. The
+      key is `transcription.noise` beside `transcription.debleed`, and it
+      **accumulates** across passes for the reason debleed's does
+- [ ] **Dry by default**, `--apply` to act, and the dry run prints what would go
+- [ ] The removal stays **checkable**: somebody can read the record and see
+      exactly what was deleted and why
+- [ ] It is a **repair**, like `reflow`, `relabel` and `debleed`, and belongs
+      beside them: `referat denoise <id> --speaker SPEAKER_NN`
+
+**Where it differs from debleed, and this is the part to get right.** Debleed
+decides by evidence — coverage in time and text against the other channel — and
+refuses when the evidence is thin. This has no evidence at all: *that cluster is
+the room next door* is a human judgement made by listening, and nothing in the
+data distinguishes a quiet neighbour from a quiet participant. So:
+
+- [ ] **A person marks it and the machine never infers it.** No heuristic, no
+      "clusters under N seconds are probably noise". That is the same rule as
+      *nothing is inferred from a transcript*, and the cost of getting it wrong
+      is deleting somebody's actual words
+- [ ] **The voiceprint question is separate and must be asked.** A noise cluster
+      must never be offered a name — the same defence `voices.is_echo` gives
+      echo clusters, so `Cluster` grows a second verdict rather than reusing
+      `echo`, which means something specific and true (*this is the loopback
+      coming back*). Two flags, because a later reader must be able to tell which
+      judgement was made
+- [ ] **What happens to a cluster already named?** Refuse, and say so: a named
+      cluster is somebody a person identified, and marking it noise would be
+      deleting the words of a person they recognised. `label --forget` first
+- [ ] Decide whether marking noise should also drop the snippets. Probably yes,
+      by the argument that keeps echo snippets from being offered
+
+**Open question worth answering before building it.** The `speakers/` snippets
+are how somebody *tells* it is noise, and they are deleted when a speaker is
+named — but a noise cluster is never named, so its snippets survive until the
+meeting is deleted. Good: that means the Speakers dialog can play them and offer
+*This is noise, not a person* right there, which is where the judgement is
+actually made. Build it as a third action in that dialog rather than as a CLI
+verb somebody has to remember.
+
+### 20c. Full names and short names
+
+**Raised on 2026-09-03: "we will need to be able to add full names as well as
+short names (or nicknames) so that we can support multiple people with the same
+name."** Deferred because it is a schema change to the voices database and it
+touches every surface that renders a name.
+
+**The problem is real and is already visible.** The database holds nine first
+names. The tenth person called Anna is indistinguishable from the first, and
+`voices.match`'s margin compares *names* — so two people filed under one name
+would silently merge into one voiceprint set, which is the single worst failure
+this system has. That is not a display problem; it is an identity problem.
+
+- [ ] **The identity is the full name and the short name is a label.** A person
+      is `{"name": "Anna Karlsson", "short": "Anna"}`; `voices.json` is keyed by
+      the full name and the transcript renders the short one. Two people called
+      Anna are two keys and two short names that happen to collide, which is
+      fine — a transcript saying `Anna:` twice in two meetings is no worse than
+      today, and `referat people` shows both in full
+- [ ] **Migration is one-way and must be automatic**, since the existing nine
+      names have no full name. Read a bare string as `{"name": x, "short": x}`
+      on load, exactly as `MeetingStatus` maps the legacy `stopped`/`done`
+      values purely on load. **Do not migrate the file**: the same argument step
+      14 made about the three legacy meetings, and it keeps the change
+      reversible
+- [ ] `speaker_names` in `meta.json` stores the **full name**, because it is the
+      identity and the file is a record. The transcript stores the short name,
+      because it is prose. `label.forget` already reverts by looking up
+      `speaker_names`, so it keeps working; `relabel_transcript` needs the short
+      name and gets it from the database
+- [ ] **The uniqueness rule has to be decided, not defaulted.** Two people may
+      share a short name; may two share a full name? Probably yes — the world
+      has two John Smiths — which means the key is not the full name either and
+      there has to be an id. Decide that before writing any of it, because
+      changing it afterwards is a second migration
+- [ ] Every surface that renders a name is affected: the transcript, `referat
+      people`, the chips, the People page, the hotword list (which should
+      probably carry **both** spellings, since Whisper may hear either)
+- [ ] Cross-reference the flag rule in step 10: the meetings folder's *Known
+      people and terms* table is where a full name and its ASR mangling already
+      belong, and the two should not become separate registries of the same fact
 
 ### Phase 6 — the dashboard
 

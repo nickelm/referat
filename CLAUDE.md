@@ -976,6 +976,39 @@ claim and zero percent is a claim**, so they are not interchangeable. The window
 renders it in the status bar, permanent so it shows from every tab, and hides it
 when nothing is running rather than parking an idle bar nobody will read.
 
+**A cleanup pass reports what it is doing, and getting that required changing
+how `claude` is invoked.** Plain `-p` prints one blob when the whole pass is
+over — measured: a run that started at 10:53:30 said nothing until 10:58:41 and
+then said everything — so the phase read *starting claude* for two minutes and a
+hang looked exactly like work. `--output-format stream-json --verbose` emits one
+JSON object per event instead, and `notes._phase` turns the useful ones into a
+sentence naming a file. The verdict comes from the final `result` event, which
+carries `is_error`, rather than from the exit code alone.
+
+**Notes runs are a queue with one worker**, not a thread each. Every pass is a
+real subprocess against one rate limit writing into one folder, and sequential
+is also what makes the queue legible. *Notes for all…* fills it with every
+promoted meeting that has a transcript and no notes, oldest first; a staged
+meeting is skipped, because `/cleanup` runs with cwd at the meetings folder and
+cannot reach one. Each id is announced to `progress` as *queued* the moment it
+is accepted, so the whole backlog is visible rather than only the job in flight.
+
+**The Activity tab is two kinds of truth and neither is a copy.** The queue is
+live state out of `progress`; the log pane is the **real rotating log file**,
+because Referat already writes every transition, model load, gate verdict and
+refusal there and a parallel in-memory history would be a worse version of it
+that disagrees the first time something is logged from a thread the window never
+hears about. It is **the one page with a timer** — a deliberate exception to
+*refresh on show, on F5, on a transition*, since a log grows with no event this
+process can see — and the timer runs only while that page is in front.
+
+**The Whisper model is cached and is not re-downloaded**, which needed saying
+because the log said otherwise. `faster_whisper` asks Hugging Face for the
+model's current revision on every load, and that one `httpx` line reads exactly
+like a 3 GB download starting; the model is 2.9 GB on disk and loads in about
+four seconds. `logging_setup.CHATTY` raises httpx and five other libraries to
+WARNING. **A log line that reliably misleads is a bug in the log line.**
+
 **The viewer opens on the notes, not the transcript.** That ordering is a claim
 about which document is the point: the transcript is evidence and a source, and
 leading with it opened every meeting on several hundred utterances. `Ctrl+±` and

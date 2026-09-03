@@ -49,7 +49,7 @@ from typing import Any
 
 import numpy as np
 
-from referat import bleed, diarize, gpu, hotwords, index, merge, paths, voices
+from referat import bleed, diarize, gpu, hotwords, index, merge, paths, progress, voices
 from referat.config import Config
 from referat.meeting import Meeting, MeetingStatus
 
@@ -697,6 +697,7 @@ def transcribe_channel(
     diarize_channel: bool = False,
     speaker_start: int = 1,
     device: str = "cpu",
+    job: str = "",
 ) -> ChannelTranscript:
     """Run one WAV file through the model and collect its segments.
 
@@ -710,6 +711,10 @@ def transcribe_channel(
     choosing for themselves. `meeting` is here for the same reason — the speaker
     snippets are written into its folder.
 
+    `job` is a :mod:`referat.progress` key, or `""` for a caller that is not
+    reporting — every `progress.step` on an unknown key is a silent no-op, which
+    is what keeps reporting optional everywhere it is optional.
+
     The hotword list is merged and handed over here rather than by any caller —
     see :func:`_hotword_kwargs`. It is the one correction that acts before the
     transcript exists; everything else is corrected downstream in `notes.md`,
@@ -717,6 +722,7 @@ def transcribe_channel(
     """
     language = config.transcription.language.strip() or None
     started = time.monotonic()
+    progress.step(job, f"reading {path.name}", None)
     # A decoded array, not a path: that is what keeps PyAV out of the picture.
     audio = decode_wav(path)
     # Two passes over the array rather than one over `np.abs(audio)`, which would
@@ -734,19 +740,26 @@ def transcribe_channel(
     voiced_seconds = float(voiced if voiced is not None else audio.size / SAMPLE_RATE)
 
     # The generator is where the work — and any CUDA failure — actually happens,
-    # so it is drained here, inside the caller's try.
-    collected = [
-        Segment(
-            start=float(s.start),
-            end=float(s.end),
-            text=text,
-            avg_logprob=float(s.avg_logprob),
-            compression_ratio=float(s.compression_ratio),
-            no_speech_prob=float(s.no_speech_prob),
-        )
-        for s in segments
-        if (text := " ".join(s.text.split()))
-    ]
+    # so it is drained here, inside the caller's try. A loop rather than the
+    # comprehension it used to be, because this is also the one place that knows
+    # how far through a channel the model has got: faster-whisper yields each
+    # segment as it finishes it, and `segment.end` against the decoded length is
+    # the only real progress figure in the whole pipeline.
+    total = max(audio.size / SAMPLE_RATE, 1e-6)
+    collected: list[Segment] = []
+    for s in segments:
+        progress.step(job, f"transcribing {path.name}", min(1.0, float(s.end) / total))
+        if text := " ".join(s.text.split()):
+            collected.append(
+                Segment(
+                    start=float(s.start),
+                    end=float(s.end),
+                    text=text,
+                    avg_logprob=float(s.avg_logprob),
+                    compression_ratio=float(s.compression_ratio),
+                    no_speech_prob=float(s.no_speech_prob),
+                )
+            )
     transcript = ChannelTranscript(
         channel=path.stem,
         label=label,
@@ -772,6 +785,7 @@ def transcribe_channel(
     )
     if diarize_channel:
         # On the array that is still in scope, so the WAV is decoded once.
+        progress.step(job, f"finding the speakers in {path.name}", None)
         _diarize_into(meeting, transcript, audio, config, device, speaker_start)
     return transcript
 
@@ -835,6 +849,16 @@ def _diarize_into(
         )
 
 
+def progress_key(meeting: Meeting) -> str:
+    """The :mod:`referat.progress` key for this meeting's transcription.
+
+    One function so the pipeline and the tray agree without passing a string
+    around: the tray begins the job and this reports into it, and a key derived
+    twice from the same meeting is the sort of thing that goes wrong silently.
+    """
+    return f"{progress.TRANSCRIBE}:{meeting.id}"
+
+
 def transcribe_channels(
     meeting: Meeting, config: Config, backend: Backend, *, tolerate_failures: bool = False
 ) -> tuple[list[ChannelTranscript], dict[str, str]]:
@@ -875,7 +899,9 @@ def transcribe_channels(
         (meeting.mic_path, ME_LABEL),
         (meeting.system_path, REMOTE_LABEL),
     )
+    key = progress_key(meeting)
     with _RUN_LOCK:
+        progress.step(key, f"loading {backend.model} on {backend.device}", None)
         model = load_model(backend)
         try:
             results: list[ChannelTranscript] = []
@@ -898,6 +924,7 @@ def transcribe_channels(
                         diarize_channel=True,
                         speaker_start=speakers_used + 1,
                         device=backend.device,
+                        job=key,
                     )
                     speakers_used += len(transcript.speakers or {})
                     results.append(transcript)
@@ -1164,6 +1191,28 @@ def release_audio(meeting: Meeting) -> int:
 
 
 def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
+    """Transcribe one meeting, announced to :mod:`referat.progress` throughout.
+
+    A wrapper around :func:`_transcribe_meeting` and nothing else. The bracket is
+    here rather than in the tray so that `referat rerun` reports identically, and
+    it is a `try`/`finally` around the *whole* of the work rather than around the
+    inner function's own `try`, which is only the transcription proper — the
+    identification, the bleed pass, the transcript write and the promotion all
+    come after that block and all take time somebody is waiting through.
+
+    `finally`, so an interrupt or a failure takes the job off the list. A
+    progress bar that never moves again is worse than no progress bar: it is a
+    claim that something is still running.
+    """
+    key = progress_key(meeting)
+    progress.begin(key, progress.TRANSCRIBE, meeting.id, "starting")
+    try:
+        return _transcribe_meeting(meeting, config)
+    finally:
+        progress.end(key)
+
+
+def _transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
     """Transcribe one meeting folder end to end and write everything back.
 
     The single entry point: the tray's background thread now, and `referat rerun`
@@ -1275,6 +1324,7 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
         raise
 
     elapsed = time.monotonic() - started
+    progress.step(progress_key(meeting), "writing the transcript", None)
     status = MeetingStatus.FAILED if errors else MeetingStatus.TRANSCRIBED
     meeting.status = status
     # Marked before the block is built, so `channels` carries `echo: true` and
@@ -1319,6 +1369,7 @@ def transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
         )
     log.info("transcribed %s in %.1fs with %s", meeting.id, elapsed, backend)
 
+    progress.step(progress_key(meeting), "filing voiceprints and tidying up", None)
     # Before the release, not after: this reads `mic.wav`, which the release
     # deletes. It writes only to the voices database, and it costs nothing when
     # it declines — which is every meeting held in person.

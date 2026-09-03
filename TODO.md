@@ -2583,6 +2583,88 @@ the join in `people.py`, and a second kind of link in the viewer.
       the gap is the thing the page exists to explain and a big one is where the
       sentence under the heading gets tested
 
+### Feedback from the first real week of using the window
+
+**Raised on 2026-09-03, after the command center had been lived in rather than
+demonstrated.** Everything here is a complaint about the window as a *primary*
+UI, which is what phases 1-5 had just made it.
+
+- [x] **The tray died after every transcription.** Reported as a crash and it
+      was: `0xc0000374`, STATUS_HEAP_CORRUPTION in `ntdll`, seconds after a
+      transcript finished — and it had already happened twice on 2026-09-02
+      without being noticed, because a dead tray looks like a tray somebody
+      closed. `App.notify` reached straight into Qt from the `transcribe` daemon
+      thread and `Shell.notify` ran `tray.showMessage` **and a full
+      `window.refresh()`** there, rebuilding every row of the meetings tree off
+      the GUI thread. `Bridge` existed for exactly this crossing and carried only
+      transitions. **No Python traceback, because there was no Python
+      exception** — the log shows a clean successful transcription and then
+      stops, and that is the signature to recognise next time
+- [x] **`gpu.release`'s `gc.collect()` was the same hazard**, from the other
+      side: a collect destroys what it reaps on the calling thread, PySide6
+      widgets included. Guarded to the main thread. It was not what was firing,
+      and it would have been eventually
+- [x] **`build_info` was sampling `referat/*.py` and missing `referat/ui/`
+      entirely** — a third of the package and the part that changes most. A tray
+      running an hour-old window reported itself current, and during the crash
+      hunt that stamp very nearly exonerated the code that was crashing. `rglob`
+- [x] **The meeting list needed horizontal scrolling.** Six columns never fitted
+      the three-sevenths of a window a horizontal splitter gave them, and no
+      resize policy fixes that. The meetings page is a **vertical** splitter now:
+      the list full width on top, the viewer beneath. Title takes the slack, the
+      rest size to their contents
+- [x] **Zoom without a mouse.** `Ctrl++`, `Ctrl+=`, `Ctrl+-` and `Ctrl+0`, on
+      **both** panes together, because they are two tabs of one document. Qt's
+      Ctrl+wheel already worked and needed a mouse and moved one pane
+- [x] **Notes is the first tab.** The transcript is a source; the notes are what
+      somebody reads. Leading with the transcript opened every meeting on several
+      hundred utterances
+- [x] **A clean copy out of a Markdown pane.** `Ctrl+Shift+C` puts the **source**
+      on the clipboard — the original `notes.md`, not the pane's rewritten
+      `referat:` links — as **plain text only**. Qt offers an HTML flavour
+      alongside and Word, Google Docs and Outlook all prefer it, which is exactly
+      the failure the meetings folder's `editor.copyWithSyntaxHighlighting:
+      false` answers for VS Code
+- [x] **No way to generate notes from the window**, which the sidebar had. Now a
+      button, on a thread, through the new `cli.write_notes` over
+      `referat/notes.py` and `cli.set_notes_written`. Finding `claude` from
+      Python is its own problem — the extension asks VS Code and Python cannot,
+      so it reads `~/.vscode/extensions` and honours the `.obsolete` file VS Code
+      writes there, which on this machine listed 2.1.252 as obsolete beside a
+      live 2.1.258
+- [x] **No way to delete a meeting from the window**, which the sidebar also had.
+      Now a button behind `cli.delete_warning`'s text, through the new
+      `cli.delete_meeting`. That makes seven and eight guarded functions split out
+      of a `run_*`, and the shape is settled: **a `run_*` that holds a rule is a
+      `run_*` a second surface cannot use**
+- [x] **Nothing showed what the slow things were doing.** `referat/progress.py`
+      is the seam — the same shape as `App.notify`, toolkit-free, never required,
+      never able to raise into the pipeline — and the window renders it as a
+      permanent activity strip in the status bar. The only true fraction is
+      faster-whisper's `segment.end`; everything else is a phase and `None`,
+      because `None` is the honest absence of a claim and zero percent is a claim
+- [x] **A transcribing meeting drew two empty panes.** It now says which of the
+      two waits it is in — a recording has not finished happening, a
+      transcription has finished happening and is being read — and why there is
+      nothing yet: `transcript.md` is written whole at the very end, so an
+      interrupted run leaves the previous one intact
+- [x] **Confirmed: recording back to back with a transcription running.** The job
+      is a daemon thread, `Record` is enabled in `idle` *and* `transcribing`, and
+      `transcribe._RUN_LOCK` serialises the jobs so two large-v3 models never
+      share the card. Answered rather than built
+- [ ] **"The interface just is not rich enough. I want to see tags and"** — the
+      sentence was cut off and the rest has not been said yet. Do not guess at it;
+      ask. Tags are on the meetings list and editable through the picker, so
+      whatever is missing is something else
+- [ ] **Still unexercised: the notes button against a real meeting.**
+      `referat/notes.py` resolves the binary correctly and the CLI verb parses,
+      but no `/cleanup` has been driven through this path — the test was stopped
+      because a meeting was recording, and then a 55-minute transcription had the
+      machine. Run it once before trusting the button
+- [ ] **The activity strip has never been watched through a real transcription.**
+      Every phase was driven against a fake model. The fractions are right in a
+      unit test; what they look like over 55 minutes of audio is not known
+
 ### Phase 6 — the dashboard
 
 - [ ] **The opening screen**: recent meetings, pending untagged meetings, pending

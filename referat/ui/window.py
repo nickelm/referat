@@ -28,6 +28,7 @@ column this step exists to escape.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
@@ -35,9 +36,12 @@ from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTabWidget,
@@ -86,6 +90,28 @@ def tags_text(tags: list[str], known: dict[str, str]) -> str:
     return ", ".join(known.get(tag, f"{tag}?") for tag in tags)
 
 
+def _working_lines(status: str) -> list[str]:
+    """What to say about a meeting that has no transcript yet, and why not.
+
+    Two different waits and they are not interchangeable: a recording has not
+    finished happening, and a transcription has finished happening and is being
+    read. Somebody looking at an empty pane wants to know which.
+    """
+    if status == "recording":
+        return [
+            "This meeting is being recorded right now.",
+            "Audio is streaming to disk. Transcription starts when you stop it, "
+            "and the transcript appears here when it finishes.",
+        ]
+    return [
+        "This meeting is being transcribed right now.",
+        "transcript.md is written once, whole, at the end of the pipeline - so an "
+        "interrupted run leaves the previous transcript intact rather than half a "
+        "new one. There is nothing to show until it lands.",
+        "The status bar says which stage it is on.",
+    ]
+
+
 class CommandCenter(QMainWindow):
     """One window over the whole meetings folder, owned by the tray app."""
 
@@ -110,6 +136,25 @@ class CommandCenter(QMainWindow):
         self.refresh_action.triggered.connect(self.refresh)
         self.addAction(self.refresh_action)
 
+        # Zoom and copy as window actions rather than buttons. Qt's own
+        # Ctrl+wheel already zoomed a pane and was not enough: it needs a mouse,
+        # and a keyboard shortcut is what somebody reaching for bigger text
+        # actually reaches for. Ctrl+= as well as Ctrl++, because + is a shifted
+        # key on most layouts and every browser accepts both.
+        for keys, steps in (("Ctrl++", 1), ("Ctrl+=", 1), ("Ctrl+-", -1), ("Ctrl+0", 0)):
+            action = QAction(f"Zoom {steps}", self)
+            action.setShortcut(keys)
+            action.triggered.connect(lambda _checked=False, n=steps: self.viewer.zoom(n))
+            self.addAction(action)
+
+        self.copy_action = QAction("Copy as plain text", self)
+        # Ctrl+Shift+C, leaving Ctrl+C to the pane's own selection copy. Both end
+        # up plain here, but the pane's is Qt's and this one is the whole
+        # document, so they are two operations and want two keys.
+        self.copy_action.setShortcut("Ctrl+Shift+C")
+        self.copy_action.triggered.connect(self._on_copy)
+        self.addAction(self.copy_action)
+
         self.record_button.clicked.connect(self.app.start_meeting)
         self.pause_button.clicked.connect(self.app.on_toggle_pause)
         self.stop_button.clicked.connect(self.app.stop_meeting)
@@ -127,12 +172,34 @@ class CommandCenter(QMainWindow):
         self.label_button.setEnabled(False)
         self.label_button.clicked.connect(self._on_label)
 
+        # Third and fourth, and the two the window simply did not have: the
+        # sidebar could write notes and delete a meeting and this could not, so
+        # anybody using the command center had to keep the extension open for
+        # them. Notes before Delete, and Delete last and on its own, because it
+        # is the destructive one — the same order the sidebar's row uses.
+        self.notes_button = QPushButton("Generate notes...")
+        self.notes_button.setEnabled(False)
+        self.notes_button.clicked.connect(self._on_notes)
+
+        self.delete_button = QPushButton("Delete...")
+        self.delete_button.setEnabled(False)
+        self.delete_button.clicked.connect(self._on_delete)
+
         self.meetings = QTreeWidget()
         self.meetings.setColumnCount(len(COLUMNS))
         self.meetings.setHeaderLabels(list(COLUMNS))
         self.meetings.setRootIsDecorated(False)
         self.meetings.setAlternatingRowColors(True)
         self.meetings.setUniformRowHeights(True)
+        # Title takes the slack and every other column asks for exactly what it
+        # needs, so the six of them span the window instead of overflowing it.
+        # `setStretchLastSection(False)` first, or Qt gives the spare width to
+        # Projects and the mode set below is ignored.
+        header = self.meetings.header()
+        header.setStretchLastSection(False)
+        for column in range(len(COLUMNS)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.meetings.currentItemChanged.connect(self._on_row_changed)
         self.meetings.itemActivated.connect(self._on_tag)
 
@@ -162,6 +229,9 @@ class CommandCenter(QMainWindow):
         actions.addStretch(1)
         actions.addWidget(self.tag_button)
         actions.addWidget(self.label_button)
+        actions.addWidget(self.notes_button)
+        actions.addSpacing(18)
+        actions.addWidget(self.delete_button)
 
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
@@ -175,11 +245,18 @@ class CommandCenter(QMainWindow):
         self.viewer.external_requested.connect(self._on_external_link)
         self.viewer.person_requested.connect(self.open_person)
 
-        self.meetings_page = QSplitter(Qt.Orientation.Horizontal)
+        # Vertical, and that is the fix for the complaint that the list needed
+        # horizontal scrolling. Six columns in the three-sevenths of a window a
+        # horizontal splitter left them never fitted, and no amount of resizing
+        # policy makes six columns fit in four hundred pixels. Full width they
+        # fit with room to spare, and a transcript is a better shape read wide
+        # anyway.
+        self.meetings_page = QSplitter(Qt.Orientation.Vertical)
         self.meetings_page.addWidget(left_pane)
         self.meetings_page.addWidget(self.viewer)
-        self.meetings_page.setStretchFactor(0, 3)
-        self.meetings_page.setStretchFactor(1, 4)
+        self.meetings_page.setStretchFactor(0, 2)
+        self.meetings_page.setStretchFactor(1, 3)
+        self.meetings_page.setSizes([260, 420])
 
         controls = QHBoxLayout()
         for button in (self.record_button, self.pause_button, self.stop_button):
@@ -203,6 +280,20 @@ class CommandCenter(QMainWindow):
         self.pages.addTab(self.projects, "Projects")
         self.pages.addTab(self.people, "People")
         self.pages.currentChanged.connect(self._on_page_changed)
+
+        # The activity strip, permanent in the status bar so it is visible from
+        # every tab. Transcription and `/cleanup` are the two things in Referat
+        # that take minutes, and until now both were invisible unless you tailed
+        # the log: the tray icon changed colour and that was the whole of it.
+        self.activity = QLabel()
+        self.activity.setTextFormat(Qt.TextFormat.PlainText)
+        self.activity.hide()
+        self.activity_bar = QProgressBar()
+        self.activity_bar.setMaximumWidth(180)
+        self.activity_bar.setTextVisible(False)
+        self.activity_bar.hide()
+        self.statusBar().addPermanentWidget(self.activity)
+        self.statusBar().addPermanentWidget(self.activity_bar)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 6)
@@ -389,7 +480,8 @@ class CommandCenter(QMainWindow):
     def _on_row_changed(self, item: QTreeWidgetItem | None, _previous: object) -> None:
         self.tag_button.setEnabled(item is not None)
         if item is None:
-            self.label_button.setEnabled(False)
+            for button in (self.label_button, self.notes_button, self.delete_button):
+                button.setEnabled(False)
             return
         self._selected = str(item.data(0, ID_ROLE))
         # Disabled rather than hidden when there is nobody left to name, for the
@@ -398,7 +490,23 @@ class CommandCenter(QMainWindow):
         # `voices.unknown_speakers` — so an echo cluster is not offered here
         # either, and this enables on exactly what the dialog would show.
         self.label_button.setEnabled(bool(self._unnamed(self._selected)))
+        meeting = self._meeting(self._selected)
+        live = meeting is not None and meeting["status"] in ("recording", "transcribing")
+        # Notes need a transcript to read; deleting refuses a live meeting in
+        # `cli.delete_meeting` anyway, and disabling here is that refusal said
+        # before it has to be. A staged meeting keeps its button and is answered
+        # with a sentence, because *why* is the useful part there.
+        self.notes_button.setEnabled(bool(meeting and meeting["transcript"]) and not live)
+        self.delete_button.setEnabled(not live)
         self._show(self._selected)
+
+    def _meeting(self, meeting_id: str | None) -> dict[str, Any] | None:
+        """One row out of the listing this window is holding. Reads no file."""
+        if meeting_id is None:
+            return None
+        return next(
+            (m for m in self._document["meetings"] if m["id"] == meeting_id), None
+        )
 
     def _unnamed(self, meeting_id: str) -> list[str]:
         """The speakers this meeting is still waiting on, out of the listing. Reads nothing."""
@@ -423,9 +531,8 @@ class CommandCenter(QMainWindow):
         meeting_id = self._selected
         if meeting_id is None:
             return
-        carried = next(
-            (m["tags"] for m in self._document["meetings"] if m["id"] == meeting_id), []
-        )
+        meeting = self._meeting(meeting_id)
+        carried = meeting["tags"] if meeting else []
         if tags.open_for(self, self.app.config, meeting_id, list(carried)):
             self.refresh()
 
@@ -449,8 +556,25 @@ class CommandCenter(QMainWindow):
             self.refresh()
 
     def _show(self, meeting_id: str) -> None:
-        """Fill the viewer from the CLI's own documents, plus `notes.md` itself."""
+        """Fill the viewer from the CLI's own documents, plus `notes.md` itself.
+
+        A meeting that is still being recorded or transcribed is answered with
+        :meth:`referat.ui.viewer.Viewer.show_working` rather than with the two
+        empty panes it used to draw. `transcript.md` is written whole at the very
+        end of the pipeline — deliberately, so an interrupted run leaves the
+        previous one intact — so there is genuinely nothing to show yet, and an
+        empty pane says that in the same voice as a broken window.
+        """
         from referat.meeting import resolve_meeting
+
+        row = self._meeting(meeting_id)
+        if row is not None and row["status"] in ("recording", "transcribing"):
+            self.viewer.show_working(
+                f"{meeting_id} - {str(row['status']).replace('_', ' ')}",
+                _working_lines(row["status"]),
+            )
+            self.setWindowTitle(f"Referat - {meeting_id}")
+            return
 
         meeting, why = resolve_meeting(self.app.config, meeting_id)
         if meeting is None:
@@ -477,6 +601,143 @@ class CommandCenter(QMainWindow):
         one thing this window hands outside itself.
         """
         QDesktopServices.openUrl(url)
+
+    # --- Notes and deletion -------------------------------------------------
+
+    def _on_notes(self) -> None:
+        """Run `/cleanup` over the selected meeting, on a thread.
+
+        The two things the sidebar could do and this window could not are this
+        and :meth:`_on_delete`; anybody living in the command center had to keep
+        the extension open for them.
+
+        On a thread, because a cleanup pass takes a minute or two and blocking
+        the GUI thread here would freeze the *recorder's* window — this process
+        owns both. What it reports goes through :mod:`referat.progress` to the
+        activity strip, and the result comes back through `App.notify`, which
+        since the 2026-09-03 crash is the one safe way to reach Qt from a thread.
+
+        `cli.write_notes` is the operation and this does not sequence its two
+        halves: spawning the pass and recording `notes_written` belong together
+        and belong to the CLI, exactly as tagging belongs to `cli.apply_tags`.
+        """
+        meeting_id = self._selected
+        if meeting_id is None:
+            return
+        meeting = self._meeting(meeting_id)
+        if meeting is not None and meeting["staged"]:
+            # `/cleanup` runs with cwd at the meetings folder and is handed a
+            # meeting id; a staged meeting is not in that folder, so the pass
+            # would look for a transcript that is not there.
+            QMessageBox.information(
+                self,
+                "Generate notes",
+                f"{meeting_id} is still in staging, so /cleanup cannot reach it.\n\n"
+                f"It gets there once its audio is released - either a rerun that "
+                f"comes out clean, or `referat promote {meeting_id} --release-audio`.",
+            )
+            return
+        if meeting is not None and not meeting["transcript"]:
+            QMessageBox.information(
+                self,
+                "Generate notes",
+                f"{meeting_id} has no transcript.md yet. Notes are written from the "
+                f"transcript, so there is nothing to read.",
+            )
+            return
+
+        self.notes_button.setEnabled(False)
+        threading.Thread(
+            target=self._write_notes, args=(meeting_id,), name="notes", daemon=True
+        ).start()
+
+    def _write_notes(self, meeting_id: str) -> None:
+        """The worker half of :meth:`_on_notes`. Touches no widget.
+
+        Not one line of Qt in here, which is the whole discipline the heap
+        corruption taught: `App.notify` marshals through the shell's `Bridge`,
+        and the progress reports go through a registry that knows nothing about
+        toolkits.
+        """
+        try:
+            outcome = cli.write_notes(self.app.config, meeting_id)
+            self.app.notify(
+                outcome.message if outcome.ok else f"Notes for {meeting_id}: {outcome.message}"
+            )
+        except Exception:
+            log.exception("could not generate notes for %s", meeting_id)
+            self.app.notify(f"Could not generate notes for {meeting_id} - see the log.")
+
+    def _on_delete(self) -> None:
+        """Delete the selected meeting, behind the warning Python wrote.
+
+        The modal is shown *before* the command runs, so there is no outcome to
+        quote — the same exception the projects and people pages are. What it
+        says is `cli.delete_warning`'s text and not this window's: whether the
+        deletion is real depends on whether the folder is synced, and the
+        voiceprints stay either way. Said in one place so the prompt and this
+        cannot come to describe an irreversible act differently.
+        """
+        meeting_id = self._selected
+        if meeting_id is None:
+            return
+        from referat.meeting import resolve_meeting
+
+        meeting, why = resolve_meeting(self.app.config, meeting_id)
+        if meeting is None:
+            QMessageBox.warning(self, "Delete meeting", why)
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete meeting",
+            f"Delete {meeting.id}?\n\n{cli.delete_warning(self.app.config, meeting)}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        outcome = cli.delete_meeting(self.app.config, meeting_id)
+        if not outcome.ok:
+            QMessageBox.warning(self, "Delete meeting", outcome.message)
+            return
+        log.info("%s", outcome.message)
+        self._selected = None
+        self.refresh()
+
+    def _on_copy(self) -> None:
+        """Put the visible document on the clipboard as plain text."""
+        what = self.viewer.copy_current()
+        if what:
+            self.statusBar().showMessage(f"Copied {what} as plain text.", 4000)
+
+    # --- What the slow things are doing --------------------------------------
+
+    def on_progress(self, jobs: list[Any]) -> None:
+        """Render the running jobs. **On the GUI thread only** — the shell marshals.
+
+        Nothing is shown when nothing is running, rather than an idle bar: a
+        progress widget that is always there stops being read.
+        """
+        if not jobs:
+            # Cleared as well as hidden, or the next job flashes the last one's
+            # phase for the frame between `show` and the first `setText`.
+            self.activity.clear()
+            self.activity.hide()
+            self.activity_bar.hide()
+            return
+        job = jobs[0]
+        extra = f"  (+{len(jobs) - 1} more)" if len(jobs) > 1 else ""
+        self.activity.setText(f"{job.title}: {job.phase}{extra}")
+        self.activity.show()
+        if job.fraction is None:
+            # A busy indicator, which is what a range of zero means to Qt, and
+            # the honest rendering of a phase with no measurable end. Zero
+            # percent would be a claim about progress.
+            self.activity_bar.setRange(0, 0)
+        else:
+            self.activity_bar.setRange(0, 100)
+            self.activity_bar.setValue(int(job.fraction * 100))
+        self.activity_bar.show()
 
     # --- Going somewhere ----------------------------------------------------
 

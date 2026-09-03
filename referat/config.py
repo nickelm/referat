@@ -178,6 +178,24 @@ class BleedConfig:
 
 
 @dataclass(frozen=True)
+class CleanupConfig:
+    """Running `/cleanup`, which is the only LLM work in this project."""
+
+    claude_binary: str = ""
+    """Where the `claude` binary is, when it cannot be found on its own.
+
+    Empty by default and normally left that way: :func:`referat.notes.resolve_claude`
+    reads the installed Claude Code VS Code extension and honours the `.obsolete`
+    file beside it, then falls back to `PATH`. This is the escape hatch for a
+    machine where neither works.
+
+    **Not a credential and never one.** `claude` owns all authentication; no
+    Anthropic API key belongs in this file, in the environment, or anywhere in
+    this project — see `CLAUDE.md`'s Conventions.
+    """
+
+
+@dataclass(frozen=True)
 class AppConfig:
     log_level: str = "INFO"
 
@@ -190,6 +208,7 @@ class Config:
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     speakers: SpeakersConfig = field(default_factory=SpeakersConfig)
     bleed: BleedConfig = field(default_factory=BleedConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     app: AppConfig = field(default_factory=AppConfig)
     source: Path | None = None
     """The file this config was read from, or None for pure defaults."""
@@ -259,6 +278,7 @@ _SECTIONS: dict[str, type] = {
     "transcription": TranscriptionConfig,
     "speakers": SpeakersConfig,
     "bleed": BleedConfig,
+    "cleanup": CleanupConfig,
     "app": AppConfig,
 }
 

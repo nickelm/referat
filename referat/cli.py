@@ -64,6 +64,7 @@ NEEDS_CONFIG = (
     "index",
     "label",
     "list",
+    "notes",
     "people",
     "project",
     "promote",
@@ -206,6 +207,22 @@ def build_parser() -> argparse.ArgumentParser:
         dest="as_json",
         help="emit the merged list, its sources and what the cap dropped as JSON",
     )
+
+    notes_parser = subcommands.add_parser(
+        "notes",
+        help="write notes.md for a meeting, by running /cleanup on it",
+        description=(
+            "Run the /cleanup slash command over one meeting's transcript and "
+            "write notes.md beside it, then record notes-written in meta.json. "
+            "Referat summarises nothing itself: this spawns the official claude "
+            "binary under your own Claude Code login, in the meetings folder, "
+            "where the prompt and the rule denying it every read of .voices/ "
+            "both live. No API key is involved, here or anywhere in Referat. "
+            "The prompt is a versioned Markdown file in that folder, so what a "
+            "note says is changed by editing it rather than by changing code."
+        ),
+    )
+    notes_parser.add_argument("meeting_id", help="e.g. 2026-08-27_1400")
 
     people_parser = subcommands.add_parser(
         "people",
@@ -1616,29 +1633,47 @@ def run_state(config: Config, meeting_id: str, transition: str) -> int:
     lifecycle field from a record into a comment.
     """
     assert transition == NOTES_WRITTEN_VERB  # argparse `choices` allows nothing else
-    meeting = _resolve_meeting(config, meeting_id, "state")
+    outcome = set_notes_written(config, meeting_id)
+    return _report(outcome, "state")
+
+
+def set_notes_written(config: Config, meeting_id: str) -> Outcome:
+    """Record that `notes.md` has been written. The only implementation.
+
+    Split out of :func:`run_state` when the command center grew a *Generate
+    notes* button: `/cleanup` is forbidden from touching `meta.json`, so whoever
+    spawned it says so afterwards, and there are now two whoevers. The same
+    correction as `apply_tags`, `name_speaker`, the five project functions and
+    `forget_person` — the primitive is `meeting.save()`, and what makes this
+    *correct* is the transition guard and the dashboard regeneration around it.
+
+    Already-`notes_written` is an `ok` outcome and not a refusal: re-running
+    `/cleanup` on a meeting that already has notes is an ordinary thing to do,
+    and the second run must not report a failure for a state that is exactly
+    what the caller wanted.
+    """
+    meeting, why = resolve_meeting(config, meeting_id)
     if meeting is None:
-        return 1
+        return Outcome(False, why)
 
     if meeting.status is MeetingStatus.NOTES_WRITTEN:
-        print(f"{meeting.id} is already {meeting.status}")
-        return 0
+        # The dashboard still wants rebuilding: a second `/cleanup` rewrites
+        # `notes.md`, which is where the title comes from.
+        index.write_index(config)
+        return Outcome(True, f"{meeting.id} is already {meeting.status}")
     if meeting.status is not MeetingStatus.TRANSCRIBED:
-        print(
-            f"referat state: {meeting.id} is {meeting.status}, and "
-            f"{NOTES_WRITTEN_VERB} is only reachable from "
-            f"{MeetingStatus.TRANSCRIBED}",
-            file=sys.stderr,
+        return Outcome(
+            False,
+            f"{meeting.id} is {meeting.status}, and {NOTES_WRITTEN_VERB} is only "
+            f"reachable from {MeetingStatus.TRANSCRIBED}",
         )
-        return 1
 
     meeting.status = MeetingStatus.NOTES_WRITTEN
     meeting.save()
     # The dashboard prints the status and takes its title from the H1 of the
     # notes that have just appeared, so both are stale until this runs.
     index.write_index(config)
-    print(f"{meeting.id}: {meeting.status}")
-    return 0
+    return Outcome(True, f"{meeting.id}: {meeting.status}")
 
 
 # --- referat promote --------------------------------------------------------
@@ -2199,27 +2234,12 @@ def run_delete(config: Config, meeting_id: str, *, assume_yes: bool) -> int:
         )
         return 1
 
-    staged = meeting.dir.parent != config.paths.meetings_dir
-    kept = [p for p in (meeting.mic_path, meeting.system_path) if p.exists()]
-    megabytes = _folder_bytes(meeting.dir) / 1e6
-
     print(f"{meeting.id} ({meeting.status}, {format_duration(meeting.duration_seconds)})")
-    print(f"  {meeting.dir}  -  {megabytes:.1f} MB")
-    if kept:
-        print(f"  audio still on disk: {', '.join(p.name for p in kept)}")
-    if staged:
-        print("  in staging, outside any synced folder, so this deletion is real")
-    else:
-        # The same argument `config.staging_dir` and `promote` already make.
-        print(
-            "  in the meetings folder. If that folder is synced, deleting a file\n"
-            "  does not delete it: Dropbox keeps deleted files and prior versions\n"
-            "  on its servers for weeks."
-        )
-    print(
-        "  voiceprints this meeting contributed stay in the known-voices\n"
-        "  database - `referat label --forget <name>` is how a person is removed"
-    )
+    # The same warning the command center's modal shows, said once in
+    # `delete_warning` so the two cannot drift into different accounts of an
+    # irreversible act.
+    for line in delete_warning(config, meeting).split("\n"):
+        print(f"  {line}")
 
     if not assume_yes:
         try:
@@ -2230,16 +2250,68 @@ def run_delete(config: Config, meeting_id: str, *, assume_yes: bool) -> int:
             print("Nothing was deleted.")
             return 0
 
-    if not paths.remove_meeting_dir(meeting.dir):
-        print(
-            f"referat delete: could not remove {meeting.dir}; see the log",
-            file=sys.stderr,
+    outcome = delete_meeting(config, meeting.id)
+    return _report(outcome, "delete")
+
+
+def delete_warning(config: Config, meeting: Meeting) -> str:
+    """What somebody has to be told *before* a deletion, as one block of prose.
+
+    Shown by the prompt above and by the command center's modal, which is the one
+    place a UI says something Python also says — there is no outcome to quote
+    yet, because the point is to speak before the command runs. Saying it here
+    rather than in each surface is what keeps the two from drifting into
+    different warnings about the same irreversible act.
+    """
+    staged = meeting.dir.parent != config.paths.meetings_dir
+    kept = [p for p in (meeting.mic_path, meeting.system_path) if p.exists()]
+    lines = [f"{meeting.dir}  -  {_folder_bytes(meeting.dir) / 1e6:.1f} MB"]
+    if kept:
+        lines.append(f"Audio still on disk: {', '.join(p.name for p in kept)}.")
+    if staged:
+        lines.append("In staging, outside any synced folder, so this deletion is real.")
+    else:
+        lines.append(
+            "In the meetings folder. If that folder is synced, deleting a file does "
+            "not delete it: Dropbox keeps deleted files and prior versions on its "
+            "servers for weeks."
         )
-        return 1
+    lines.append(
+        "The voiceprints this meeting contributed stay in the known-voices database "
+        "- `referat label --forget <name>` is how a person is removed."
+    )
+    return "\n".join(lines)
+
+
+def delete_meeting(config: Config, meeting_id: str) -> Outcome:
+    """Remove a meeting folder and everything in it. The only implementation.
+
+    The refusal while a meeting is live is the rule this carries, and it is the
+    reason a surface may not simply call :func:`referat.paths.remove_meeting_dir`:
+    deleting a folder underneath the tray would lose audio mid-write.
+
+    The **confirmation is not here**, exactly as it is not in
+    :func:`referat.label.forget_person`. It is a question, asked of a terminal by
+    `input()` and of a person by a modal, and :func:`delete_warning` is the one
+    text both of them ask it with.
+    """
+    meeting, why = resolve_meeting(config, meeting_id)
+    if meeting is None:
+        return Outcome(False, why)
+
+    if meeting.status in (MeetingStatus.RECORDING, MeetingStatus.TRANSCRIBING):
+        return Outcome(
+            False,
+            f"{meeting.id} is {meeting.status} right now. Deleting it underneath the "
+            f"tray would lose audio mid-write; wait for it to finish.",
+        )
+
+    megabytes = _folder_bytes(meeting.dir) / 1e6
+    if not paths.remove_meeting_dir(meeting.dir):
+        return Outcome(False, f"could not remove {meeting.dir}; see the log")
 
     index.write_index(config)
-    print(f"deleted {meeting.id} ({megabytes:.1f} MB)")
-    return 0
+    return Outcome(True, f"deleted {meeting.id} ({megabytes:.1f} MB)")
 
 
 # --- referat status ---------------------------------------------------------
@@ -2478,6 +2550,46 @@ def _loopback_section(recorder: ModuleType, wanted: str) -> str:
     lines.append("")
     lines.append(render_table(rows, LOOPBACK_HEADERS, (1, 2)))
     return "\n".join(lines)
+
+
+# --- referat notes ----------------------------------------------------------
+
+
+def write_notes(config: Config, meeting_id: str) -> Outcome:
+    """Run `/cleanup` and record the lifecycle. The only implementation.
+
+    Two steps that belong together and are separately owned: spawning the pass is
+    :func:`referat.notes.generate_notes`, and `notes_written` is
+    :func:`set_notes_written`, because `/cleanup` is forbidden from touching
+    `meta.json` and whoever spawned it says so afterwards. This is the *operation*
+    over both, which is what `referat notes` and the command center's button each
+    call once rather than sequencing for themselves.
+
+    A pass that wrote the notes but could not record the state is reported as a
+    partial success rather than a failure: `notes.md` is on disk and re-running
+    would rewrite it, so calling that a failure would send somebody to fix the
+    wrong thing. The lifecycle refusal is quoted as the reason.
+    """
+    from referat import notes
+
+    written, message = notes.generate_notes(config, meeting_id)
+    if not written:
+        return Outcome(False, message)
+
+    recorded = set_notes_written(config, meeting_id)
+    if not recorded.ok:
+        return Outcome(True, f"{message}, but the lifecycle was not updated: {recorded.message}")
+    return Outcome(True, message)
+
+
+def run_notes(config: Config, meeting_id: str) -> int:
+    """`referat notes <id>`. Blocking, and it prints nothing until claude answers.
+
+    The progress a window shows goes through :mod:`referat.progress`; at a prompt
+    the same information is the log, which is where `claude`'s own output already
+    goes line by line.
+    """
+    return _report(write_notes(config, meeting_id), "notes")
 
 
 # --- referat people ---------------------------------------------------------
@@ -2831,6 +2943,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "people":
         return run_people(config, as_json=args.as_json)
+
+    if args.command == "notes":
+        return run_notes(config, args.meeting_id)
 
     if args.command == "label":
         # Imported here rather than at module scope so `referat --version` and

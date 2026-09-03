@@ -45,6 +45,7 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 from PySide6.QtCore import QUrl, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QTabWidget, QTextBrowser, QWidget
 
 log = logging.getLogger(__name__)
@@ -241,10 +242,75 @@ class Viewer(QTabWidget):
         super().__init__(parent)
         self.transcript = self._browser()
         self.notes = self._browser()
-        self.addTab(self.transcript, "Transcript")
+        # Notes first, and that ordering is a claim about which document is the
+        # point. The transcript is evidence and a source; the notes are what
+        # somebody actually reads, and putting the transcript in front made every
+        # meeting open on several hundred utterances.
         self.addTab(self.notes, "Notes")
+        self.addTab(self.transcript, "Transcript")
         self._offsets: list[float] = []
+        self._raw: dict[QTextBrowser, str] = {}
+        """The exact bytes behind each pane, for a copy that is not a rendering."""
+        self._zoom = 0
         self.clear_meeting("Select a meeting.")
+
+    # --- Zoom ---------------------------------------------------------------
+
+    def zoom(self, steps: int) -> None:
+        """Grow or shrink both panes together, or reset them when `steps` is 0.
+
+        Both, deliberately: they are two tabs of one document and a reader who
+        made the notes bigger did not ask for the transcript to stay small.
+
+        Qt's own Ctrl+wheel already worked and is not enough — it needs a mouse,
+        and it moves one pane. Tracked as a running total so a reset is exact
+        rather than a guess at how many steps to undo.
+        """
+        if steps == 0:
+            for browser in (self.transcript, self.notes):
+                browser.zoomOut(self._zoom) if self._zoom > 0 else browser.zoomIn(-self._zoom)
+            self._zoom = 0
+            return
+        self._zoom += steps
+        for browser in (self.transcript, self.notes):
+            browser.zoomIn(steps) if steps > 0 else browser.zoomOut(-steps)
+
+    # --- Copying ------------------------------------------------------------
+
+    def copy_current(self) -> str:
+        """Put the visible pane on the clipboard as plain text, and say what went.
+
+        **The raw file, not the rendering.** The notes pane holds Markdown that
+        has been through `setMarkdown` and had its timestamps and wikilinks
+        rewritten into `referat:` links; copying *that* back out would paste
+        somebody a document full of link syntax pointing at a scheme only this
+        window answers. So the original text is kept when the pane is filled and
+        handed over verbatim.
+
+        Plain text only, which is the other half of the complaint this answers:
+        Qt puts an HTML flavour on the clipboard beside the text, and Word,
+        Google Docs and Outlook all prefer it — so a paste arrived as
+        theme-coloured monospace. `setText` writes one flavour and there is
+        nothing for them to prefer. Same rule the meetings folder's
+        `editor.copyWithSyntaxHighlighting: false` sets for VS Code.
+
+        A selection wins over the whole document when there is one, because
+        somebody who selected three lines meant three lines.
+        """
+        browser = self.currentWidget()
+        if not isinstance(browser, QTextBrowser):
+            return ""
+        cursor = browser.textCursor()
+        if cursor.hasSelection():
+            text = cursor.selection().toPlainText()
+            what = "the selection"
+        else:
+            text = self._raw.get(browser) or browser.toPlainText()
+            what = self.tabText(self.currentIndex()).lower()
+        text = text.strip()
+        if text:
+            QGuiApplication.clipboard().setText(text)
+        return what if text else ""
 
     def _browser(self) -> QTextBrowser:
         browser = QTextBrowser(self)
@@ -261,8 +327,28 @@ class Viewer(QTabWidget):
     def clear_meeting(self, message: str) -> None:
         """Both panes say the same thing: there is nothing selected, or nothing there."""
         self._offsets = []
+        self._raw = {}
         for browser in (self.transcript, self.notes):
             browser.setHtml(f'<p style="color: #909090">{html.escape(message)}</p>')
+
+    def show_working(self, title: str, lines: list[str]) -> None:
+        """A meeting that is being recorded or transcribed right now.
+
+        The complaint this answers is that such a meeting drew two empty panes,
+        which is what "no transcript.md yet" looks like and also what a broken
+        window looks like. A transcript genuinely does not exist until the
+        pipeline writes it at the very end — it is written whole and atomically,
+        not streamed — so there is nothing to show and the honest thing is to say
+        which of the two is true and what happens next.
+        """
+        self._offsets = []
+        self._raw = {}
+        body = "".join(f"<p>{html.escape(line)}</p>" for line in lines)
+        for browser in (self.transcript, self.notes):
+            browser.setHtml(
+                f'<p style="font-weight: bold">{html.escape(title)}</p>'
+                f'<div style="color: #909090">{body}</div>'
+            )
 
     def show_meeting(self, document: dict[str, Any], notes: str | None) -> None:
         """Render one meeting: the parsed transcript, and its notes if it has any.
@@ -274,6 +360,10 @@ class Viewer(QTabWidget):
         """
         self.transcript.setHtml(render_transcript_html(document))
         self._offsets = [float(entry["at"]) for entry in document["entries"]]
+        # Kept for `copy_current`, which hands over the source rather than the
+        # rendering. The transcript's plain text is its own rendering and is
+        # already clean -- `[HH:MM:SS] Name: text` -- so only the notes need it.
+        self._raw = {self.notes: notes} if notes is not None else {}
         if notes is None:
             self.notes.setHtml(
                 '<p style="color: #909090">No notes.md yet. Notes are written by '

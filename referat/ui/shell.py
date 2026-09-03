@@ -30,7 +30,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from referat import build_info, paths
+from referat import build_info, paths, progress
 from referat.state import State, Transition
 from referat.ui import icons
 
@@ -48,6 +48,7 @@ class Bridge(QObject):
 
     transitioned = Signal(object)
     notified = Signal(str)
+    progressed = Signal(object)
 
     def on_transition(self, transition: Transition) -> None:
         """The :class:`referat.state.Machine` listener. Called on any thread.
@@ -58,6 +59,17 @@ class Bridge(QObject):
         hold or the `status.json` write.
         """
         self.transitioned.emit(transition)
+
+    def on_progress(self, jobs: list[Any]) -> None:
+        """The :mod:`referat.progress` listener. Called on any thread.
+
+        Emitting is all it does, for the reason :meth:`on_transition` does no
+        more: this arrives on a transcription thread and on the reader thread of
+        a `claude` subprocess, several times a second while a channel is being
+        transcribed, and every one of those would otherwise be a widget touched
+        from the wrong place.
+        """
+        self.progressed.emit(jobs)
 
 
 class Shell:
@@ -90,7 +102,9 @@ class Shell:
         # very event loop turn that is failing. Auto is direct on this thread and
         # queued from any other, which is exactly the rule.
         self.bridge.notified.connect(self._on_notified, Qt.ConnectionType.AutoConnection)
+        self.bridge.progressed.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
         self.app.machine.add_listener(self.bridge.on_transition)
+        progress.add_listener(self.bridge.on_progress)
         self.app.notify = self.notify
 
     # --- The menu -----------------------------------------------------------
@@ -183,6 +197,16 @@ class Shell:
         self._paint(transition.to)
         if self.window is not None:
             self.window.on_state(transition.to)
+
+    def _on_progress(self, jobs: list[Any]) -> None:
+        """On the GUI thread, by the time this runs. See :class:`Bridge`.
+
+        The tray tooltip is left alone: it says what the *recorder* is doing, and
+        a transcription is not the recorder — the machine is `idle` throughout
+        one, which is exactly what lets a new meeting start while it runs.
+        """
+        if self.window is not None:
+            self.window.on_progress(jobs)
 
     def _paint(self, state: State) -> None:
         missing = self.app.missing_channels

@@ -2,6 +2,95 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-03 (later) — The crash, and the window becoming usable
+
+Two sessions in one day. The first was phase 5; this is the crash that followed
+it and the feedback from actually living in the window for a morning.
+
+### The tray died after every transcription
+
+`0xc0000374` — STATUS_HEAP_CORRUPTION — in `ntdll`, seconds after a transcript
+finished. Reported as happening "just now", and the log showed it had already
+happened twice on 2026-09-02, because a dead tray looks like a tray somebody
+closed.
+
+`App.notify` reached straight into Qt from whatever thread called it, and that
+thread is the `transcribe` daemon thread at the end of every job. `Shell.notify`
+then ran `tray.showMessage` **and a full `window.refresh()`** — a rebuild of
+every row of the meetings tree — from outside the GUI thread. `Bridge` had
+existed for exactly this crossing since phase 1 and carried only transitions.
+
+**No Python traceback, because there was no Python exception.** The log shows a
+clean successful transcription and then simply stops. That is the signature.
+
+The transcript was never at risk — it is written, released and promoted before
+`notify` runs — but the recorder was, and a dead tray records no meeting. The bug
+arrived with Qt at phase 1 and hid until the window had been opened, because with
+no window there is nothing but the balloon to get wrong.
+
+`gpu.release`'s `gc.collect()` was the same hazard from the other side: a collect
+destroys what it reaps on the calling thread, PySide6 widgets included. Guarded
+to the main thread. It was not what was firing and it would have been eventually.
+
+`build_info` turned out to be sampling `referat/*.py` and missing all of
+`referat/ui/` — so the crashing tray reported code an hour older than it was
+running, which nearly exonerated it. `rglob` now.
+
+### The window is usable as a primary UI
+
+Eleven pieces of feedback from the first real week, and most were about the
+window being a demonstration rather than a place to work.
+
+**Layout.** The meetings page is a vertical splitter: the list full width on top,
+the viewer beneath. Six columns never fitted the three-sevenths of a window a
+horizontal splitter gave them and no resize policy fixes that. Title takes the
+slack; the rest size to their contents.
+
+**Reading.** Notes is the first tab — the transcript is a source, and leading
+with it opened every meeting on several hundred utterances. `Ctrl+±` and `Ctrl+0`
+zoom both panes together. A meeting still recording or transcribing says which of
+the two waits it is in instead of drawing two empty panes that read like a broken
+window.
+
+**Copying.** `Ctrl+Shift+C` puts the **source** on the clipboard — the original
+`notes.md`, not the pane's rewritten `referat:` links — as plain text only. Qt
+offers an HTML flavour beside it and Word, Google Docs and Outlook all prefer
+that one, which is why a paste arrived as theme-coloured monospace. The same
+failure the meetings folder's `editor.copyWithSyntaxHighlighting: false` answers
+for VS Code.
+
+**Notes and deletion**, the two things the sidebar could do and the command
+center could not — so anybody living in the window kept the extension open, which
+is the opposite of what a primary UI is. `cli.write_notes` and
+`cli.delete_meeting` are the seventh and eighth guarded functions split out of a
+`run_*`, and the shape is now settled: **a `run_*` that holds a rule is a `run_*`
+a second surface cannot use.** Notes run on a thread, because this process owns
+the recorder and a blocked GUI thread is a window somebody cannot stop a meeting
+from.
+
+`referat/notes.py` and `referat notes <id>` are the implementation. Finding
+`claude` from Python is its own problem: the extension asks VS Code and Python
+has no VS Code to ask, so it reads `~/.vscode/extensions` and **honours the
+`.obsolete` file VS Code writes there** — which on this machine listed 2.1.252 as
+obsolete beside a live 2.1.258, so taking the highest version would have picked a
+directory about to be deleted. Resolved at spawn time, never persisted.
+`[cleanup].claude_binary` is the escape hatch and is not a credential.
+
+**Progress.** `referat/progress.py` is a registry of running jobs with listeners
+— the same shape as `App.notify`: the work reports, and something else decides
+whether anybody is looking. Toolkit-free, never required, never able to raise
+into the pipeline, and live state rather than history. The window renders it as a
+permanent activity strip in the status bar.
+
+The only true fraction in the pipeline is faster-whisper's, which is why the
+segment generator is drained in a loop rather than a comprehension:
+`segment.end` against the decoded length. Everything else reports a phase and
+`None`, drawn as a busy indicator — **`None` is the honest absence of a claim and
+zero percent is a claim.**
+
+And it goes through `Bridge` like everything else now, which is the lesson of the
+morning applied the same day it was learned.
+
 ## 2026-09-03 — People, and a name you can click
 
 Build step 20 phase 5. The third entity and the one that justified building a

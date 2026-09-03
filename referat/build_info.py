@@ -57,7 +57,13 @@ def source_mtime(package: Path | None = None) -> dt.datetime | None:
     folder = package or _PACKAGE
     newest = 0.0
     try:
-        modules = list(folder.glob("*.py"))
+        # `rglob`, not `glob`. This read `*.py` and so saw nothing inside
+        # `referat/ui/`, which since step 20 is the command center and the tray's
+        # own shell — a third of the package and the part that changes most.
+        # A tray running an hour-old window reported itself current, and during
+        # the 2026-09-03 crash hunt that stamp was the evidence that nearly
+        # exonerated the code that was actually crashing.
+        modules = list(folder.rglob("*.py"))
     except OSError:
         return None
     for module in modules:

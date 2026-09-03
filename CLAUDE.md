@@ -58,6 +58,33 @@ queued signal (`ui.shell.Bridge`) and registers its listener **last** — after 
 sleep hold's and the status write's, which `Machine._notify` therefore runs
 first and which no Qt failure can cost.
 
+**Everything that reaches Qt from another thread goes through `Bridge`, and
+that is the rule this project paid for.** Transitions did from the start;
+`App.notify` did not, and `Shell.notify` ran `tray.showMessage` *and a full
+`window.refresh()`* — a rebuild of every row in the meetings tree — on the
+`transcribe` daemon thread, at the end of every single job. It killed the tray
+three times before anybody caught it: `0xc0000374`, **STATUS_HEAP_CORRUPTION**,
+in `ntdll`, a couple of seconds after a transcript finished, on 2026-09-02 twice
+and on 2026-09-03 once. There was no Python traceback in the log because there
+was no Python exception — the log shows a clean, successful transcription and
+then simply stops, which is the signature to recognise. The transcript was never
+at risk, since it is written, released and promoted before `notify` runs; the
+*recorder* was, because a dead tray records no meeting. It arrived with Qt at
+step 20's phase 1 and hid until the window had been opened, because with no
+window there is nothing but the balloon to get wrong. So: **`Bridge` now carries
+transitions, notifications and progress**, and the general form is that a
+`0xc0000374` with no traceback means a C++ object was destroyed on the wrong
+thread.
+
+`gpu.release` is the same hazard from the other side and is guarded the same
+way. `gc.collect()` destroys whatever it reaps *on the thread that called it*,
+including the C++ half of an unreachable PySide6 widget, and the tray calls that
+function from the transcription thread — so it collects only on the main thread
+now. Skipping it costs the reference cycles and the frames of a propagating
+traceback and nothing else: `empty_cache` still returns everything the preceding
+`del` made unreachable, which is the overwhelming majority and the reason that
+module exists. A CLI `rerun` is on the main thread and still collects.
+
 **The tray tags meetings too, from step 16.** On stop it raises a toast asking
 which project(s), offering recent ones and defaulting to untagged if it times
 out; its menu grows a lazily built *Tag recent…* submenu of untagged meetings
@@ -416,7 +443,7 @@ VS Code extension, whose documents the command center reads by calling the same
 functions rather than by spawning: `config`, `list`, `show <id>`,
 `transcript <id>`, `rerun <id>`,
 `label <id>`, `status`,
-`devices`, `hotwords`, `people`, `index`, `project <verb>`, `tag`, `untag`, `state`,
+`devices`, `hotwords`, `people`, `notes`, `index`, `project <verb>`, `tag`, `untag`, `state`,
 `promote <id>`,
 `reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `delete <id>`. All of them are built except
 `project link-doc`, `project unlink-doc` and `project sync`, which wait for the
@@ -854,6 +881,45 @@ fourth time. The confirmation is deliberately *outside* the operation: `--forget
 reads `input()` and answers no on EOF, which is a question asked of a terminal,
 and a window asks the same question with a modal. Neither asks it twice.
 
+**The window writes notes and deletes meetings, from 2026-09-03.** Those were
+the two things the sidebar could do and the command center could not, so anybody
+living in the window had to keep the extension open for them — which is the
+opposite of what a primary UI is. *Generate notes…* drives `cli.write_notes` and
+*Delete…* drives `cli.delete_meeting`, both new guarded functions over machinery
+that already existed inside `run_notes`' and `run_delete`'s printing. The same
+correction as `apply_tags`, `name_speaker`, the five project functions and
+`forget_person`; that makes seven, and the shape is settled — **a `run_*` that
+holds a rule is a `run_*` a second surface cannot use.**
+
+Notes run **on a thread**, because a cleanup pass takes a minute or two and this
+process owns the recorder: blocking the GUI thread here would freeze the window
+somebody stops a meeting from. What comes back comes back through `App.notify`,
+which is now the safe crossing.
+
+**`referat notes <id>` is that verb at the prompt, and `referat/notes.py` is the
+only implementation.** It spawns the official `claude` binary with `-p "/cleanup
+<id>"`, `--allowedTools "Read,Write,Glob"` and cwd at the **meetings folder** —
+never the repository, because the prompt, that folder's `CLAUDE.md` and the
+`.voices/` deny rule all live in its `.claude/`, and a pass run anywhere else
+would have none of them, the deny rule included. `Bash` is still the line that
+does not move. Afterwards the caller records `notes-written` through
+`cli.set_notes_written`, because `/cleanup` is forbidden from touching
+`meta.json` — and `cli.write_notes` is the operation over both halves, so no
+surface sequences them itself. A pass that wrote the notes but could not record
+the state is reported as a partial success, not a failure: `notes.md` is on
+disk, and calling that a failure sends somebody to fix the wrong thing.
+
+**Finding `claude` from Python is not the same problem the extension solved.**
+The extension asks VS Code, which follows its own extensions; Python has no VS
+Code to ask, so `notes.resolve_claude` reads `~/.vscode/extensions` and **honours
+the `.obsolete` file VS Code writes there** — on 2026-09-03 that listed 2.1.252
+as obsolete beside a live 2.1.258, so taking the highest version number would
+have picked a directory about to be deleted. Then `PATH`. Resolved at spawn time
+and **never persisted**, for the reason the extension never persists it: a stored
+absolute path is still there a week later pointing at nothing.
+`[cleanup].claude_binary` is the escape hatch and is **not a credential** — no
+API key belongs in `config.toml`, and `claude` owns all authentication.
+
 **A speaker chip is the deliberate exception to the click-a-name rule.** A chip
 fills the name field rather than applying itself, that rule is load-bearing, and
 the dialog is modal over the very page a link would navigate to. So a chip
@@ -888,6 +954,55 @@ because an orphan is precisely the tag somebody needs to take off a meeting;
 guarding an untag on the file being readable would make a broken `projects.json`
 the one thing that pins an orphan to a meeting forever. So a pure removal never
 reads it, exactly as `referat untag` never has.
+
+**The slow things say what they are doing, through `referat/progress.py`.** A
+transcription is two minutes of a GPU and a cleanup pass is a subprocess that
+could be thinking or could be hung, and both used to be legible only by tailing
+the log. That module is a registry of running jobs — a key, a title, a phase and
+a fraction — with listeners, and it is the same shape as `App.notify`: **the work
+reports, and something else decides whether anybody is looking.** No toolkit is
+imported there, nothing is required (a job that never calls `begin` simply does
+not appear, which is what keeps `referat rerun` at a prompt exactly as it was),
+and a listener that raises is logged rather than allowed to reach the pipeline.
+It is **live state and not history** — a finished job is removed, because what
+happened is the log's business.
+
+The one real progress *figure* in the pipeline is faster-whisper's, and it is why
+the segment generator is drained in a loop rather than a comprehension:
+`segment.end` against the decoded length is a true fraction. Everything else —
+loading a model, diarizing, waiting on `claude` — reports a phase and `None`,
+which a surface draws as a busy indicator. **`None` is the honest absence of a
+claim and zero percent is a claim**, so they are not interchangeable. The window
+renders it in the status bar, permanent so it shows from every tab, and hides it
+when nothing is running rather than parking an idle bar nobody will read.
+
+**The viewer opens on the notes, not the transcript.** That ordering is a claim
+about which document is the point: the transcript is evidence and a source, and
+leading with it opened every meeting on several hundred utterances. `Ctrl+±` and
+`Ctrl+0` zoom **both** panes together — they are two tabs of one document, and
+Qt's own Ctrl+wheel was not enough because it needs a mouse and moves one pane.
+
+**A copy out of the viewer is the source, not the rendering, and it is plain
+text.** `Ctrl+Shift+C` puts the *original* `notes.md` on the clipboard rather
+than what the pane holds, because the pane's Markdown has had its timestamps and
+`[[Wikilinks]]` rewritten into `referat:` links that mean nothing outside this
+window. Plain text only — Qt offers an HTML flavour beside it and Word, Google
+Docs and Outlook all prefer that one, which is how a paste arrives as
+theme-coloured monospace. Exactly the reason the meetings folder sets
+`editor.copyWithSyntaxHighlighting: false` for VS Code, answered here for the
+window.
+
+**A meeting with no transcript yet says which of the two waits it is in.** A
+recording has not finished happening; a transcription has finished happening and
+is being read. `transcript.md` is written whole at the very end of the pipeline —
+deliberately, so an interrupted run leaves the previous one intact — so there is
+genuinely nothing to show, and two empty panes said that in the same voice as a
+broken window.
+
+**The meetings list is full width and the viewer is under it**, which is the one
+layout question the six columns settled: three-sevenths of a window never fitted
+them, and no resize policy makes six columns fit in four hundred pixels. Title
+takes the slack and the rest size to their contents.
 
 **The transcript pane is built from the parsed entries, and the notes pane is
 not.** The transcript is rendered as HTML from `cli.transcript_document`, which
@@ -969,7 +1084,8 @@ functions the CLI calls — `cli.list_document`, `cli.show_document`,
 `cli.project_document`, `cli.hotwords_document`, `cli.people_document`,
 `cli.apply_tags`,
 `cli.create_project`, `cli.rename_project`, `cli.set_description`,
-`cli.set_glossary`, `cli.remove_project`, `audio_state`,
+`cli.set_glossary`, `cli.remove_project`, `cli.write_notes`,
+`cli.delete_meeting`, `cli.delete_warning`, `audio_state`,
 `meeting.format_duration`, `index.meeting_title`, `voices.unknown_speakers`,
 `label.label_document`, `label.name_speaker`, `label.forget_person` — and spawning a subprocess of its
 own CLI would buy nothing

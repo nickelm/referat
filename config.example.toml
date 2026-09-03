@@ -205,6 +205,20 @@ min_tokens = 5
 cluster_time = 0.80
 cluster_text = 0.50
 
+[cleanup]
+# Where the `claude` binary is, for `referat notes <id>` and the command center's
+# Generate notes button. Leave empty and Referat finds it: it is not on PATH on
+# this machine, so it looks inside the installed Claude Code VS Code extension -
+# honouring the .obsolete file VS Code writes beside it, since the old version
+# sits on disk next to the new one for a while - and then falls back to PATH.
+# Resolved at every spawn and never remembered, because that path carries a
+# version number that changes every few days.
+#
+# This is NOT a credential and there is nowhere in Referat that one belongs. The
+# claude binary owns all authentication, under your own Claude Code login. No
+# Anthropic API key goes in this file, in the environment, or in any module here.
+claude_binary = ""
+
 [app]
 # DEBUG | INFO | WARNING | ERROR
 log_level = "INFO"

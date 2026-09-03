@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,22 @@ def release(where: str) -> None:
     ``gc.collect()`` first, because torch frees only what has no live
     references: the `del` this is called after leaves the tensors reachable from
     a traceback, a cycle, or the frame of the function still unwinding.
+
+    **But only on the main thread, and that restriction is not about torch.**
+    Since step 20 this process also holds Qt, and a `gc.collect()` destroys
+    whatever it reaps *on the thread that called it* — including the C++ half of
+    any unreachable PySide6 widget. Destroying a QWidget off the GUI thread is
+    undefined behaviour, and the tray calls this from its `transcribe` daemon
+    thread, right after a job that has been rebuilding the meetings tree for
+    minutes. That is the second wrong-thread hazard the 2026-09-03 heap
+    corruption turned up; :meth:`referat.ui.shell.Shell.notify` was the first and
+    the one that was actually firing.
+
+    Skipping it costs the cycles and the unwinding frames and nothing else:
+    `empty_cache` still hands back everything the `del` above already made
+    unreachable, which is the overwhelming majority and the reason this module
+    exists. A CLI `referat rerun` runs on the main thread with no Qt in the
+    process and still collects.
     """
     try:
         import torch
@@ -56,7 +73,8 @@ def release(where: str) -> None:
         if not torch.cuda.is_initialized():
             return
         reserved = torch.cuda.memory_reserved()
-        gc.collect()
+        if threading.current_thread() is threading.main_thread():
+            gc.collect()
         torch.cuda.empty_cache()
         freed = reserved - torch.cuda.memory_reserved()
         # What the driver can now hand somebody else, which is the number

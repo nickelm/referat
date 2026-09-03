@@ -38,9 +38,16 @@ log = logging.getLogger(__name__)
 
 
 class Bridge(QObject):
-    """Carries a state transition from whatever thread made it to the GUI thread."""
+    """Carries a state transition or a notification to the GUI thread.
+
+    **Both** cross, and the second one had to be added after the first: a
+    transition went through this from the beginning, while `App.notify` reached
+    straight into Qt from whatever thread called it — which is the transcription
+    thread, every time a job ends. See :meth:`Shell.notify`.
+    """
 
     transitioned = Signal(object)
+    notified = Signal(str)
 
     def on_transition(self, transition: Transition) -> None:
         """The :class:`referat.state.Machine` listener. Called on any thread.
@@ -77,6 +84,12 @@ class Shell:
 
         self.bridge = Bridge()
         self.bridge.transitioned.connect(self._on_transition, Qt.ConnectionType.QueuedConnection)
+        # Auto rather than Queued, unlike the transition above: `notify` is
+        # called from the GUI thread too — `open_window`'s own failure path does
+        # it — and a queued connection there would defer the message behind the
+        # very event loop turn that is failing. Auto is direct on this thread and
+        # queued from any other, which is exactly the rule.
+        self.bridge.notified.connect(self._on_notified, Qt.ConnectionType.AutoConnection)
         self.app.machine.add_listener(self.bridge.on_transition)
         self.app.notify = self.notify
 
@@ -178,7 +191,31 @@ class Shell:
         self.state_action.setText(f"Referat - {state}")
 
     def notify(self, message: str) -> None:
+        """`App.notify`, from any thread. Hands the message to the GUI thread.
+
+        **This crossing is the whole of this method and it was missing.** Every
+        transcription ends on the `transcribe` daemon thread and calls
+        `App.notify` from there, and the body below — a tray balloon and a full
+        rebuild of the meetings tree — ran on that thread, touching Qt from
+        outside the GUI thread on every single job. It cost three trays: the
+        process died with a `0xc0000374` heap corruption in `ntdll` seconds after
+        finishing a transcript on 2026-09-02 twice and again on 2026-09-03,
+        leaving no Python traceback because there was no Python exception.
+
+        The transcript was never at risk — it is written, released and promoted
+        before this runs — but the *recorder* was, since a dead tray records no
+        meeting. The bug arrived with Qt at phase 1 and hid until the window had
+        been opened, because with no window there was nothing but the balloon to
+        get wrong.
+
+        `Bridge` already existed for exactly this and carried only transitions.
+        """
+        self.bridge.notified.emit(message)
+
+    def _on_notified(self, message: str) -> None:
         """A balloon from the tray icon, and a nudge to the list behind it.
+
+        On the GUI thread, by the time this runs — see :meth:`notify`.
 
         Never raises: a notification is not the work. It is also the one place a
         finished transcription reaches the window, because ending a job while a

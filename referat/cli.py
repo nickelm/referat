@@ -729,6 +729,48 @@ def list_document(config: Config) -> dict[str, Any]:
     }
 
 
+LIVE = ("recording", "transcribing")
+"""The two lifecycle values that mean a meeting has not finished happening.
+
+Neither is *pending work*: there is nothing anybody can do about either but
+wait, so they are held out of every queue :func:`pending` builds. The same
+distinction `run_list`'s footer makes when it refuses to suggest a `rerun` for a
+meeting that is still being recorded — advice about a live meeting is the worst
+advice either surface could give.
+"""
+
+
+def pending(document: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """The three queues of work somebody still owes, over a `list_document`.
+
+    Pure, and deliberately over the *document* rather than over `Meeting`
+    objects: it opens no file, so a caller already holding the listing — the
+    command center holds one for its meetings tab, and its dashboard is built
+    from these three lists — pays nothing at all for them.
+
+    They are in the order the work is done in, which is the flow rule this UI
+    already follows: **tag, then label, then write notes**. Tagging first is what
+    narrows the gallery a person is offered at labeling time; notes last because
+    `/cleanup` reads a transcript whose speakers are worth having names by then.
+
+    `notes` is the one queue with a condition that is about *reach* rather than
+    about work: `/cleanup` runs with its working directory at the meetings folder
+    and is handed a meeting id, so a meeting still in staging is not somewhere it
+    can look. That is the same test :meth:`referat.ui.window.CommandCenter._on_notes_all`
+    used to make for itself, which is why it now asks here instead — a queue and
+    the button that drains it disagreeing about what is in it is exactly the
+    second implementation this codebase keeps deleting.
+    """
+    meetings = [m for m in document["meetings"] if m["status"] not in LIVE]
+    return {
+        "untagged": [m for m in meetings if not m["tags"]],
+        "unnamed": [m for m in meetings if m["unnamed"]],
+        "notes": [
+            m for m in meetings if m["transcript"] and not m["notes"] and not m["staged"]
+        ],
+    }
+
+
 def run_list(config: Config, as_json: bool = False) -> int:
     """`referat list`. Oldest first, so the newest meeting lands next to the prompt."""
     if as_json:
@@ -744,10 +786,13 @@ def run_list(config: Config, as_json: bool = False) -> int:
     rows = [list_row(m, known) for m in meetings]
     print(render_table(rows, HEADERS, RIGHT_ALIGNED))
 
-    pending = sum(1 for row in rows if row[4] != "-")
+    # Not `pending`, which is the module-level function two definitions above: a
+    # local of that name, inside the one command that prints these same counts,
+    # is exactly where somebody would later reach for the queues and get an int.
+    unnamed = sum(1 for row in rows if row[4] != "-")
     summary = f"\n{len(meetings)} meeting{'s' if len(meetings) != 1 else ''}"
-    if pending:
-        summary += f", {pending} with unnamed speakers - run: referat label"
+    if unnamed:
+        summary += f", {unnamed} with unnamed speakers - run: referat label"
     # Still in staging means the audio is still there, and there are two reasons
     # for that which want opposite advice. A meeting the gate refused wants a
     # `rerun`; one kept on request has a fine transcript already and wants

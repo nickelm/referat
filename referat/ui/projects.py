@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
 from referat import cli
 from referat.config import Config
 from referat.projects import clean_terms
+from referat.ui import icons
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +118,10 @@ class ProjectsPage(QWidget):
         self.projects = QListWidget()
         self.projects.currentItemChanged.connect(self._on_row_changed)
 
+        # Read once and kept, rather than per row: `icons.glyph` caches on the
+        # colour anyway, and this page rebuilds its whole list on every refresh.
+        self._tag = icons.glyph("tag", self.palette().windowText().color().name())
+
         self.new_field = QLineEdit()
         self.new_field.setPlaceholderText("New project")
         self.new_field.returnPressed.connect(self._on_create)
@@ -148,6 +153,10 @@ class ProjectsPage(QWidget):
         self.rename_button.setAutoDefault(False)
         self.rename_button.clicked.connect(self._on_rename)
         self.delete_button = QPushButton("Delete...")
+        # The same red trash the meetings page's Delete carries: two different
+        # destructive buttons on two tabs, one picture, so neither has to be
+        # recognised on its own.
+        self.delete_button.setIcon(icons.glyph("trash", icons.LIFECYCLE["failed"]))
         self.delete_button.setAutoDefault(False)
         self.delete_button.clicked.connect(self._on_delete)
 
@@ -295,6 +304,10 @@ class ProjectsPage(QWidget):
             for project in self._document["projects"]:
                 item = QListWidgetItem(f"{project['name']}\n{_meetings(project['meetings'])}")
                 item.setData(ID_ROLE, project["id"])
+                # The tag that is on this page's tab, on its button and on the
+                # dashboard's untagged queue. A project *is* a label, and the
+                # glyph saying so in four places is the cheapest way to say it.
+                item.setIcon(self._tag)
                 self.projects.addItem(item)
                 if project["id"] == wanted:
                     chosen = item

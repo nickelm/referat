@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 
 from referat import cli, label
 from referat.config import Config
+from referat.ui import icons
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +121,17 @@ class PeoplePage(QWidget):
         self.people = QListWidget()
         self.people.currentItemChanged.connect(self._on_row_changed)
 
+        # Read once and kept: this page rebuilds every list on every refresh, and
+        # `icons.glyph` caches on the colour anyway. The *meeting* and *project*
+        # glyphs are here for a reason worth stating — `Appears in` and
+        # `Projects` are two lists of bare ids, one under the other, and without
+        # them the only thing distinguishing a meeting id from a project name is
+        # knowing which heading you are under.
+        ink = self.palette().windowText().color().name()
+        self._person_icon = icons.glyph("person", ink)
+        self._meeting_icon = icons.glyph("list", ink)
+        self._project_icon = icons.glyph("tag", ink)
+
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search people")
         self.search.setClearButtonEnabled(True)
@@ -141,6 +153,11 @@ class PeoplePage(QWidget):
         self.subheading.setWordWrap(True)
 
         self.forget_button = QPushButton("Forget this person...")
+        # The same red trash as the other two destructive buttons, and this is
+        # the most destructive of the three: deleting a meeting leaves the person,
+        # and deleting a project leaves the tags, but this reverts labels in every
+        # transcript the name appears in.
+        self.forget_button.setIcon(icons.glyph("trash", icons.LIFECYCLE["failed"]))
         self.forget_button.setAutoDefault(False)
         self.forget_button.clicked.connect(self._on_forget)
 
@@ -284,6 +301,7 @@ class PeoplePage(QWidget):
             f"{under}{'s' if appears != 1 else ''}"
         )
         item.setData(NAME_ROLE, person["name"])
+        item.setIcon(self._person_icon)
         return item
 
     def _on_row_changed(self, item: QListWidgetItem | None, _previous: object) -> None:
@@ -328,12 +346,14 @@ class PeoplePage(QWidget):
         for meeting_id in person["appears_in"]:
             item = QListWidgetItem(meeting_id)
             item.setData(TARGET_ROLE, meeting_id)
+            item.setIcon(self._meeting_icon)
             self.appearances.addItem(item)
 
         known = self._document["projects"]
         for pid in person["tags"]:
             item = QListWidgetItem(known.get(pid, f"{pid}?"))
             item.setData(TARGET_ROLE, pid)
+            item.setIcon(self._project_icon)
             self.projects.addItem(item)
 
     def _summary(self, person: dict[str, Any]) -> str:

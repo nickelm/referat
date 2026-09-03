@@ -1953,8 +1953,8 @@ only* toggle had ever been planned.
 
 ## 20. The command center
 
-**Planned on 2026-09-02; phases 0 to 4 built the same day, phase 5 on
-2026-09-03.** The primary
+**Planned on 2026-09-02; phases 0 to 4 built the same day, phases 5 and 6 on
+2026-09-03.** Phase 7 is the only one left and is gated on step 13. The primary
 graphical surface becomes a **command center**: a desktop window owned by the
 tray app and opened from the tray icon. The VS Code extension drops to
 maintenance — bug fixes only, no new features — and is deleted once this reaches
@@ -2689,9 +2689,13 @@ UI, which is what phases 1-5 had just made it.
 - [ ] **Mark a speaker as noise and delete their lines.** Deferred to **step
       20b** above, because it removes entries from a transcript and inherits four
       conditions from `debleed`
-- [ ] **Full names as well as short names.** Deferred to **step 20c** above,
-      because it is a schema change to the voices database and two people filed
-      under one name is the worst failure this system has
+- [ ] **Full names as well as short names, renaming a person with the change
+      propagating into transcripts and notes, and an email on the record.**
+      All three deferred to **step 20c** above, which they turned into one step:
+      they are the same change, a person ceasing to be a string and becoming a
+      record. A schema change to the voices database, where two people filed
+      under one name is the worst failure this system has — and where renaming is
+      an edit if the identity is an id and a migration if it is not
 - [ ] **"The interface just is not rich enough. I want to see tags and"** — the
       sentence was cut off and the rest has not been said yet. Do not guess at it;
       ask. Tags are on the meetings list and editable through the picker, so
@@ -2704,6 +2708,63 @@ UI, which is what phases 1-5 had just made it.
 - [ ] **The activity strip has never been watched through a real transcription.**
       Every phase was driven against a fake model. The fractions are right in a
       unit test; what they look like over 55 minutes of audio is not known
+
+### The visual pass: icons everywhere
+
+**Raised on 2026-09-03, on the dashboard the same day it was built: "a dashboard
+should also be somewhat visual… are there ways we can add icons to different
+parts of the interface and dashboard? Many buttons like Record, Pause, and Stop
+have obvious icon candidates."** Built the same day.
+
+- [x] **Drawn in `QPainter`, never shipped as assets.** A dependency decision
+      before an aesthetic one: an icon font or an SVG set is a package in
+      `pyproject.toml`, the base install is on the recording path, and every file
+      on that path is something Smart App Control can one day refuse — the whole
+      argument the PySide6 audit made. Eleven glyphs are two hundred lines that
+      cannot be blocked, cannot be missing at runtime, and scale to any DPI
+- [x] **One style: solid, one colour, no outlines and no two-tone.** A set that
+      mixes filled and stroked glyphs reads as icons borrowed from two places,
+      which at sixteen pixels is the only thing anybody notices. `pulse` is the
+      one exception it has to be — a trace has no inside
+- [x] **Colour means a state or it means nothing.** Record, Pause and Stop carry
+      the *recorder's own* colours out of `icons.COLORS`, so red means recording
+      in the window and in the notification area without either being taught the
+      other's vocabulary; the three Delete buttons carry one red trash. Every
+      other glyph is drawn in the palette's `windowText`, which is what makes a
+      dark theme get light icons — **checked by rendering the whole window under
+      a synthetic dark palette** rather than by reasoning about it
+- [x] **A lifecycle dot on every meeting row**, on the meetings list and on both
+      of the dashboard's lists, in one colour per `status` — the two in-flight
+      states borrowing the recorder's colours, the two that want somebody warm,
+      and the three finished ones a green that *deepens* through `transcribed`,
+      `notes_written` and `synced`, which is the only colour in this UI carrying
+      an order
+- [x] **A run that lost a channel hollows the dot into a ring**, which is the
+      tray icon's existing rule applied one layer out rather than a second visual
+      language for the same fact. Somebody who has learned what a hollow icon
+      means has learned it for both places at once
+- [x] **A queue heading carries the glyph of the button that drains it** — a tag
+      for `Tags…`, a person for `Speakers…`, a page for `Generate notes…`. A row
+      on the dashboard goes to the Meetings tab, where the thing to press next
+      wears the picture you came from
+- [x] **A repeated identical icon down a list is the one thing carrying no
+      information**, so queue rows get the *meeting's* dot rather than the
+      queue's own glyph. The exception is the people page, where *Appears in* and
+      *Projects* are two lists of bare ids one under the other, and a meetings
+      glyph against a tag glyph is the only thing distinguishing them without
+      reading the heading above
+- [ ] **The tray's context menu was left alone**, deliberately and not from
+      neglect: on Windows 11 that menu is drawn dark while `QApplication.palette()`
+      can report light, so palette-tinted glyphs there could come out black on
+      black. It needs the menu's own palette, or fixed mid-grey icons. Worth
+      doing, worth measuring first
+- [ ] **Never seen on a high-DPI display or at a scale other than 100%.** They
+      are drawn at 64 px and asked for at 14-16, so this should be exactly the
+      case vector drawing handles — which is a prediction and not a measurement
+- [ ] **The lifecycle greens are three shades of one colour** and were checked on
+      a proof sheet rather than in use. `transcribed` against `notes_written` is
+      the pair most likely to be indistinguishable at a glance; both sit beside
+      the word for the status, so the cost is low, but watch it
 
 ### 20b. Noise clusters — marking a speaker as *not a person*
 
@@ -2759,12 +2820,20 @@ meeting is deleted. Good: that means the Speakers dialog can play them and offer
 actually made. Build it as a third action in that dialog rather than as a CLI
 verb somebody has to remember.
 
-### 20c. Full names and short names
+### 20c. A person is a record: full name, short name, email — and renaming
 
 **Raised on 2026-09-03: "we will need to be able to add full names as well as
 short names (or nicknames) so that we can support multiple people with the same
-name."** Deferred because it is a schema change to the voices database and it
-touches every surface that renders a name.
+name."** Extended the same day, after the icons went in: **"renaming should be
+possible, and any update should propagate out (transcripts and notes)"** and
+**"short name (default), and possibly long name and even email to be associated
+with a person"**.
+
+Deferred because all three are the *same* change — a person stops being a string
+and becomes a record — and because it is a schema change to the voices database
+that touches every surface rendering a name. Renaming in particular is cheap
+after that change and a migration before it, which is the whole reason it is not
+built yet: **build the identity first and the rename falls out of it.**
 
 **The problem is real and is already visible.** The database holds nine first
 names. The tenth person called Anna is indistinguishable from the first, and
@@ -2794,6 +2863,82 @@ this system has. That is not a display problem; it is an identity problem.
       has two John Smiths — which means the key is not the full name either and
       there has to be an id. Decide that before writing any of it, because
       changing it afterwards is a second migration
+
+#### The decision to confirm first, and the recommendation
+
+**A person becomes exactly what a project already is: a record with an id.** Not
+a new idea to invent — `projects.json` has held one since step 14, and the
+argument transfers line for line.
+
+- [ ] **`{"id": ..., "name": ..., "short": ..., "email": ...}`, keyed by `id`.**
+      The id is `projects.slugify(full name)` plus the same `-2` collision
+      suffix, which is a rule this codebase has exactly one implementation of.
+      Two John Smiths are `john-smith` and `john-smith-2`, which is the answer to
+      the uniqueness question and the reason the key cannot be either name
+- [ ] **The id never moves and a rename changes a display field.** That is the
+      sentence step 13 already wrote about projects — *a rename touches one file,
+      and no meeting record, no transcript and no doc anchor is disturbed by it*
+      — and it is what turns renaming from a migration into an edit
+- [ ] **`speaker_names` in `meta.json` stores the id**, because `meta.json` is a
+      record and records store ids; `transcript.md` stores the **short name**,
+      because it is prose. Exactly the split `tags` already makes between
+      `meta.json` and everything a person reads
+- [ ] **Migration is on load and the files are not rewritten**, the way
+      `MeetingStatus` maps `stopped`/`done` and for the reason step 14 gave about
+      the three legacy meetings. A bare string in `voices.json` reads as
+      `{id: slugify(x), name: x, short: x}`; a name in `speaker_names` resolves
+      through the same slug. Keeps the change reversible, and there is no
+      migration script to get wrong
+- [ ] **The nine existing names all slugify distinctly** — check that before
+      trusting the above, because two that collided would be silently merged on
+      load, which is the exact failure this step exists to prevent
+
+#### Renaming, once there is an id
+
+- [ ] `referat person rename <id> --name ... --short ... --email ...`, and a
+      **Rename…** button on the people page beside *Forget this person…* — the
+      same arrangement the projects page already has, driving one guarded
+      function in `label.py`, never a primitive. The ninth `run_*` split
+- [ ] **`transcript.md` is a relabel and is already solved.** `label.relabel_transcript`
+      rewrites the label field and nothing else, in both directions, and is the
+      one sanctioned edit to that file. A rename is a relabel across every
+      meeting whose `speaker_names` carries the id
+- [ ] **`notes.md` is the hard half and needs its own decision.** A note is
+      prose: a name appears in `[[Wikilinks]]` *and* in sentences, and a
+      find-and-replace across somebody's prose is the same move as spelling a
+      name onto a `SPEAKER_NN` — it reads as authoritative when it is wrong.
+      Three options and a recommendation:
+      **(a) rewrite `[[Wikilinks]]` only** — bounded, checkable, and the brackets
+      are the one place the note is *referring* rather than *saying*;
+      (b) rewrite every occurrence, which is the one nobody can check;
+      (c) rewrite nothing and let the drift show. **Recommend (a)**, with the
+      count of rewritten links reported, and the prose left alone
+- [ ] **(c) is already partly built and is the safety net either way.** The
+      people page's *No voiceprint on file* section is exactly a note or a
+      transcript using a name the database does not hold, so a rename that
+      misses a spelling **surfaces** rather than disappearing. Worth saying in
+      the rename's own confirmation
+- [ ] **A pushed digest goes stale on a rename** and step 13 has no story for it:
+      the Google Doc holds the old short name in text somebody may have written
+      around. Report it, do not reach into the doc — the same rule as an orphaned
+      anchor
+- [ ] **`referat people` and `--json` grow the record**, and the JSON must still
+      carry no embedding and no path into `.voices/`. An email is the first field
+      here that is contactable personal data rather than a label, so re-run
+      phase 5's check on the document with it in
+
+#### Email, and the one rule it is easy to break
+
+- [ ] **Stored and never sent.** *Nothing but notes leaves the machine* is a
+      Convention, and an address is the first thing in this database that looks
+      like an invitation to mail somebody. Referat has no mail path and must not
+      grow one; the field is for a person reading the page
+- [ ] **It must not reach the hotword list.** `hotwords.collect` takes every name
+      in the voices database, and an address is not a word Whisper should be told
+      to hear. Names only — check that explicitly when the record lands, because
+      the merge reads the database live
+- [ ] Optional, and blank for the nine people already filed. Nothing derives it,
+      nothing guesses it from a transcript
 - [ ] Every surface that renders a name is affected: the transcript, `referat
       people`, the chips, the People page, the hotword list (which should
       probably carry **both** spellings, since Whisper may hear either)
@@ -2803,16 +2948,83 @@ this system has. That is not a display problem; it is an identity problem.
 
 ### Phase 6 — the dashboard
 
-- [ ] **The opening screen**: recent meetings, pending untagged meetings, pending
+**Built on 2026-09-03.** One new page, one new pure function in `cli.py`, one new
+module holding two formatters that had a second reader, and the Dashboard as the
+window's first tab.
+
+- [x] **The opening screen**: recent meetings, pending untagged meetings, pending
       unlabeled speakers. Three queues and a list, all of them already computable
-      from `cli.list_document`
+      from `cli.list_document`.
+      **The third queue is *no notes yet*** — the spec named two and counted
+      three, and this is the one the window had already grown a button for
+      (*Notes for all…*), so it existed as a predicate before it existed as a
+      queue. Ordered tag, then label, then notes, which is the flow rule this UI
+      already follows
+- [x] **The page writes nothing and reads nothing.** Every row opens that meeting
+      on the Meetings tab, where `Tags…`, `Speakers…` and `Generate notes…`
+      already are; draining a queue from here would be a second path to each of
+      those three writes, and the picker and the labeling dialog are where the
+      rules about what a tag and a name may be are enforced
 - [ ] **Themes and action items extracted from notes are a later box inside this
-      phase and not its baseline.** The dashboard is worth having without them
+      phase and not its baseline.** The dashboard is worth having without them.
+      **The room under the recent list is where they go**, which is why that list
+      is capped at eight rather than allowed to grow into it
 - [ ] When they are built: they read `notes.md`, which is a *derived* artifact,
       so extraction does not breach *nothing is inferred from a transcript*. The
       line it may not cross is assignment — **it may never tag a meeting with a
       project**, propose one, or reorder the untagged queue by a guess. The
       human's tags stay an input everywhere they appear
+
+#### What building it settled
+
+- [x] **A fifth tab cost no fifth scan.** Every other page reads something when it
+      is switched to, and is refreshed only while in front because each read
+      costs a scan of both meeting roots. This one is *handed* the
+      `list_document` the window has already read for its meetings list, so it is
+      exempt from that rule rather than an exception to it — and it is kept
+      current unconditionally, because there is nothing to defer
+- [x] **`cli.pending` is where the three predicates live**, pure over the
+      document and never over a `Meeting`. `Notes for all…` had its own inline
+      copy of the notes predicate, which is the fifth time a rule has been found
+      living inside the one caller that needed it; a queue whose count came from
+      one predicate and whose button drained another would be wrong in the way
+      that is hardest to notice, because it would look right
+- [x] **`LIVE` is the pair held out of every queue.** A meeting still being
+      recorded or transcribed is not pending *work* — nothing to do about it but
+      wait — which is the same distinction `run_list`'s footer makes when it
+      refuses to suggest a `rerun` for a live meeting. Checked against a
+      synthetic listing carrying one of each
+- [x] **`referat/ui/rows.py`**: `status_text` and `tags_text` out of `window.py`,
+      which was their only reader until this page rendered the same meetings in a
+      different shape. A status cell reading `gate failed - no mic (staging)` on
+      one tab and something else on another is the drift `format_duration` and
+      `audio_state` keep being pulled back from, one layer up
+- [x] **Opening the window at a meeting had to learn which tab it meant.** The
+      window opens on the dashboard now, so `show_window` brings the Meetings tab
+      forward whenever it is given a meeting id or asked for the untagged inbox —
+      which is what step 16's on-stop toast does. A toast that opened a summary of
+      every *other* meeting is the same failure as a link landing behind a filter:
+      it looks exactly like a link that did nothing. With neither argument the tab
+      is left where it was
+- [x] **An empty queue says its own sentence and keeps its place**, disabled
+      rather than hidden — *Nothing waiting. Every voice has a name.* The three
+      sit in a splitter, because equal thirds is the right default and the wrong
+      steady state: a morning of untagged meetings against two cleared queues is
+      the normal shape of this page. Sizing each list to its contents instead was
+      rejected — the column would jump every time a meeting was tagged, which is
+      the thing that makes a queue hard to work
+- [ ] **Still unexercised: the page against a machine with work on it.** This one
+      has nine meetings, all tagged, all with notes, and one unnamed speaker — so
+      two of the three queues have only ever been drawn empty and none has ever
+      needed to scroll. Rendered against a synthetic listing carrying a staged
+      `gate_failed` meeting, a live recording and a live transcription, which is
+      what checked the exclusions; that is not the same as watching a real
+      backlog drain
+- [ ] **Nothing on this page reports the recorder.** The state label and the
+      activity strip are above the tabs and in the status bar, visible from every
+      page, so a dashboard saying it again would be a second thing to keep in
+      step. Watch whether the opening screen wants a *right now* line anyway once
+      it has been opened mid-meeting a few times
 
 ### Phase 7 — Google Docs export
 

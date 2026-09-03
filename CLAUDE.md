@@ -786,7 +786,8 @@ pixel column could never hold and the real argument for the window. The opening
 screen is a **dashboard**: recent meetings, pending untagged meetings, pending
 unlabeled speakers, and later the themes and action items extracted from notes.
 
-**Phases 1 to 5 are built.** Phase 1 was deliberately read-only — the
+**Phases 1 to 6 are built**, and only phase 7 is left, which is gated on step
+13's Google half. Phase 1 was deliberately read-only — the
 meetings list, the viewer, the cross-links, the recording buttons and the ambient
 state — so the toolkit was settled against real meetings rather than against a
 prototype, with nothing at risk. Phase 2 is the first thing this window writes,
@@ -807,6 +808,54 @@ other way, down into the meetings page, since on a screen about projects they
 would be two dead buttons. Only the page in front is refreshed — each costs a
 scan of both meeting roots — and a hidden one is brought up to date when it is
 switched to.
+
+**Phase 6 is the dashboard, and it is the fourth thing that writes nothing at
+all.** It is the *first* tab, so it is what the window opens on: the meetings
+list is an inventory, and the question somebody opens this window to ask is
+whether anything is waiting for them. Recent meetings on the left, capped so it
+stays a glance, and three queues on the right — untagged, speakers nobody has
+named, no notes yet — in the order the work is done in, which is the flow rule
+this UI already follows. Every row **navigates** and nothing acts in place: a
+queue row opens that meeting on the Meetings tab where *Tags…*, *Speakers…* and
+*Generate notes…* already are, because draining a queue from here would be a
+second path to each of those three writes, and the picker and the labeling dialog
+are exactly where the rules about what a tag and a name may be are enforced.
+Which meetings are in each queue is `cli.pending`, a pure function over a
+`list_document` — so *Notes for all…*, which had been carrying its own copy of
+the notes predicate, now asks the same question the queue answers; a count and a
+button that disagreed would look right while being wrong. And the page is
+**exempt from the refresh-the-front-page-only rule rather than an exception to
+it**: it reads nothing, is handed the document the window has already read for
+its meetings list, and so costs a redraw and no I/O whether it is in front or
+not. Because the window now opens on it, `show_window` brings the Meetings tab
+forward whenever it is given a meeting id or asked for the untagged inbox —
+which is what step 16's on-stop toast does, and a toast that opened a summary of
+every *other* meeting would be a link that visibly did nothing. Themes and action
+items extracted from notes are a later box inside this phase and not its
+baseline; when they arrive they may render what a note says and may never tag a
+meeting, propose a tag, or reorder the untagged queue by a guess.
+
+**Every icon is drawn, and colour means a state or it means nothing.**
+`referat/ui/icons.py` grew from the tray's one icon into all of them, and the
+reason they are `QPainter` rather than an icon font or an SVG set is the same
+argument the PySide6 audit made: an asset pack is a package in
+`pyproject.toml`, the base install is on the recording path, and every file on
+that path is something Smart App Control can one day refuse. Two rules carry
+across from the tray. **Colour carries the state** — Record, Pause and Stop wear
+the recorder's own colours, so red means recording in the window and in the
+notification area without either being taught the other's vocabulary, and every
+meeting row carries a dot in its lifecycle's colour. **Shape carries a run that
+lost a channel** — that dot is hollowed into a ring by exactly the condition that
+hollows the tray's, because a ring reads as wrong at sixteen pixels where a
+slightly different red does not. Everything that means no state — the tabs, the
+queue headings, `Tags…`, `Speakers…` — is drawn in the palette's `windowText`, so
+a dark theme gets light icons rather than black ones on a dark tab bar. Two
+things follow that are easy to get wrong in the other direction: a queue heading
+wears the glyph of the **button that drains it**, so a row followed to the
+Meetings tab finds the thing to press next wearing the picture it came from; and
+a list's rows do **not** repeat their heading's glyph, because the same icon
+down twelve rows is the one thing on a page carrying no information — they carry
+the meeting's dot instead.
 
 **The projects page is where a glossary is edited, and that is hotword
 management.** A glossary is read twice at two different times — merged into the
@@ -1113,7 +1162,7 @@ it does not.
 **The command center imports; it does not shell out.** It is already a Python
 process inside this package, exactly as the tray is, so it calls the same
 functions the CLI calls — `cli.list_document`, `cli.show_document`,
-`cli.transcript_document`, `cli.status_document`, `cli.project_names`,
+`cli.transcript_document`, `cli.status_document`, `cli.pending`, `cli.project_names`,
 `cli.project_document`, `cli.hotwords_document`, `cli.people_document`,
 `cli.apply_tags`,
 `cli.create_project`, `cli.rename_project`, `cli.set_description`,

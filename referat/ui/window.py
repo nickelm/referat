@@ -1,14 +1,20 @@
-"""The command center window: the meetings list, the viewer, and the controls.
+"""The command center window: the tabs, the meetings list, the viewer, the controls.
 
-Phases 1 to 3 of build step 20. Phase 1 was deliberately read-only — the list,
-the viewer, the cross-links, the recording buttons and the ambient state — so
-that the toolkit question was settled against real meetings with nothing at
-risk; phase 2 added tagging and phase 3 labeling, and **this file still writes
-nothing itself**. It opens two dialogs, and each of them makes its one kind of
-change through a function it does not implement: :mod:`referat.ui.tags` through
-`cli.apply_tags`, and :mod:`referat.ui.speakers` through `label.name_speaker`.
-The only other thing the window changes is the recorder, and that goes through
-the very methods the two hotkeys call.
+Build step 20, phases 1 to 6. Phase 1 was deliberately read-only — the list, the
+viewer, the cross-links, the recording buttons and the ambient state — so that
+the toolkit question was settled against real meetings with nothing at risk;
+phase 2 added tagging, phase 3 labeling, phase 4 the projects page, phase 5
+people, and phase 6 put a **dashboard in front of all of them**, because the
+meetings list is an inventory and the question somebody opens this window to ask
+is whether anything is waiting for them.
+
+**This file still implements no rule of its own.** It opens two dialogs, and each
+makes its one kind of change through a function it does not implement:
+:mod:`referat.ui.tags` through `cli.apply_tags`, and :mod:`referat.ui.speakers`
+through `label.name_speaker`. Its own two writes — notes and deletion — go the
+same way, through `cli.write_notes` and `cli.delete_meeting`. The only other
+thing it changes is the recorder, and that goes through the very methods the two
+hotkeys call.
 
 **It calls the CLI's functions, never its subprocess.** `list_document`,
 `show_document` and `transcript_document` are the same builders `referat list
@@ -33,7 +39,7 @@ import threading
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -54,10 +60,12 @@ from PySide6.QtWidgets import (
 
 from referat import cli, paths, progress
 from referat.state import State
-from referat.ui import speakers, tags
+from referat.ui import icons, speakers, tags
 from referat.ui.activity import ActivityPage
+from referat.ui.dashboard import DashboardPage
 from referat.ui.people import PeoplePage
 from referat.ui.projects import ProjectsPage
+from referat.ui.rows import status_text, tags_text
 from referat.ui.viewer import Viewer
 
 log = logging.getLogger(__name__)
@@ -71,25 +79,9 @@ TAG_NUDGE = "Tag this..."
 
 Text and not a button: `setItemWidget` fights `setUniformRowHeights(True)`, and
 the row is already double-clickable. It is also why this lives here rather than
-inside :func:`tags_text`, which stays a pure formatter — a call to action is not
-a rendering of a tag list.
+inside :func:`referat.ui.rows.tags_text`, which stays a pure formatter — a call
+to action is not a rendering of a tag list.
 """
-
-
-def tags_text(tags: list[str], known: dict[str, str]) -> str:
-    """A meeting's tags as a person reads them: display names, orphans marked.
-
-    The counterpart of :func:`referat.cli.tags_cell`, which prints *ids* because
-    the next thing typed after reading that table is `referat untag <meeting>
-    <id>`. Here there is nothing to type, so the names win — and an id no project
-    resolves still gets its trailing `?` rather than being dropped, for the
-    reason it does everywhere else: a tag disappearing quietly off three meetings
-    is how you lose track of what a meeting was about.
-
-    The map comes from the document, which got it from `ProjectsDB.name_map`.
-    Nothing here opens `projects.json`.
-    """
-    return ", ".join(known.get(tag, f"{tag}?") for tag in tags)
 
 
 def _working_lines(status: str) -> list[str]:
@@ -165,7 +157,17 @@ class CommandCenter(QMainWindow):
         self.pause_button.clicked.connect(self.app.on_toggle_pause)
         self.stop_button.clicked.connect(self.app.stop_meeting)
 
+        # The three transport buttons carry the recorder's own colours — the
+        # ones the notification-area icon uses — so red means recording in the
+        # window and in the taskbar without either being taught the other's
+        # vocabulary. Every other icon in this window is drawn in the palette's
+        # text colour instead: these three are the only ones that mean a state.
+        self.record_button.setIcon(icons.glyph("record", icons.COLORS[State.RECORDING]))
+        self.stop_button.setIcon(icons.glyph("stop", icons.COLORS[State.STOPPED]))
+        self._on_pause_icon(State.IDLE)
+
         self.tag_button = QPushButton("Tags...")
+        self.tag_button.setIcon(self._glyph("tag"))
         self.tag_button.setEnabled(False)
         self.tag_button.clicked.connect(self._on_tag)
 
@@ -175,6 +177,7 @@ class CommandCenter(QMainWindow):
         # never a gate — an untagged meeting labels perfectly well, with the full
         # gallery, because a missing tag must never cost a name.
         self.label_button = QPushButton("Speakers...")
+        self.label_button.setIcon(self._glyph("person"))
         self.label_button.setEnabled(False)
         self.label_button.clicked.connect(self._on_label)
 
@@ -184,10 +187,15 @@ class CommandCenter(QMainWindow):
         # them. Notes before Delete, and Delete last and on its own, because it
         # is the destructive one — the same order the sidebar's row uses.
         self.notes_button = QPushButton("Generate notes...")
+        self.notes_button.setIcon(self._glyph("page"))
         self.notes_button.setEnabled(False)
         self.notes_button.clicked.connect(self._on_notes)
 
         self.notes_all_button = QPushButton("Notes for all...")
+        # A list rather than a second page: the two buttons do the same thing to
+        # different numbers of meetings, and two identical icons side by side
+        # would make that the one distinction you cannot see.
+        self.notes_all_button.setIcon(self._glyph("list"))
         self.notes_all_button.setToolTip(
             "Queue /cleanup for every promoted meeting that has a transcript and no "
             "notes. One at a time, in date order."
@@ -195,6 +203,11 @@ class CommandCenter(QMainWindow):
         self.notes_all_button.clicked.connect(self._on_notes_all)
 
         self.delete_button = QPushButton("Delete...")
+        # The one icon here that is not the palette's text colour and does not
+        # mean a recorder state: the destructive button was already last and
+        # spaced away from the others, and this is that separation said again in
+        # the one place somebody looks before clicking.
+        self.delete_button.setIcon(icons.glyph("trash", icons.LIFECYCLE["failed"]))
         self.delete_button.setEnabled(False)
         self.delete_button.clicked.connect(self._on_delete)
 
@@ -281,23 +294,30 @@ class CommandCenter(QMainWindow):
         controls.addStretch(1)
 
         # One tab per entity, which is the window this step is building: all three
-        # are here from phase 5, and phase 6 puts a Dashboard in front. The
-        # recorder's three buttons stay *above* the tabs, because the recorder is
-        # not one of the three entities and a Stop button that hid behind a tab
+        # are here from phase 5, and phase 6 put the Dashboard in front of them.
+        # The recorder's three buttons stay *above* the tabs, because the recorder
+        # is not one of the three entities and a Stop button that hid behind a tab
         # would be a recording somebody could not stop from here.
         self.pages = QTabWidget()
+        self.dashboard = DashboardPage()
+        self.dashboard.meeting_requested.connect(self.open_meeting)
         self.projects = ProjectsPage(self.app.config)
         self.people = PeoplePage(self.app.config)
         self.people.meeting_requested.connect(self.open_meeting)
         self.people.project_requested.connect(self.open_project)
         self.activity_page = ActivityPage()
-        self.pages.addTab(self.meetings_page, "Meetings")
-        self.pages.addTab(self.projects, "Projects")
-        self.pages.addTab(self.people, "People")
+        # First, and therefore the tab the window opens on: the meetings list is
+        # an inventory of everything there has ever been, and the question
+        # somebody opens this window to ask is whether anything is waiting for
+        # them. Being first is the whole of phase 6's claim.
+        self.pages.addTab(self.dashboard, self._glyph("dashboard"), "Dashboard")
+        self.pages.addTab(self.meetings_page, self._glyph("list"), "Meetings")
+        self.pages.addTab(self.projects, self._glyph("tag"), "Projects")
+        self.pages.addTab(self.people, self._glyph("person"), "People")
         # Last, because it is about the machine rather than about one of the
         # three entities — the same reason the recorder's buttons sit above the
         # tabs rather than inside one.
-        self.pages.addTab(self.activity_page, "Activity")
+        self.pages.addTab(self.activity_page, self._glyph("pulse"), "Activity")
         self.pages.currentChanged.connect(self._on_page_changed)
 
         # The activity strip, permanent in the status bar so it is visible from
@@ -323,6 +343,35 @@ class CommandCenter(QMainWindow):
         self.setCentralWidget(central)
 
         self.on_state(self.app.machine.state)
+
+    # --- Icons --------------------------------------------------------------
+
+    def _glyph(self, name: str) -> QIcon:
+        """One glyph in this window's own text colour.
+
+        Taken from the palette rather than hard-coded, so a dark theme gets light
+        icons instead of black ones on a dark tab bar. Read once per icon at
+        construction: :func:`referat.ui.icons.glyph` caches on the colour, so a
+        theme changed while the window is open keeps the icons it has — which is
+        the price of not repainting eleven pixmaps on every refresh.
+        """
+        return icons.glyph(name, self.palette().windowText().color().name())
+
+    def _on_pause_icon(self, state: State) -> None:
+        """Pause bars, or a play triangle when the meeting is already paused.
+
+        One button meaning two things is exactly the situation the label already
+        handles by changing from *Pause* to *Resume*; an icon that stayed at two
+        bars while the word said Resume would be the one part of the button that
+        was wrong.
+        """
+        paused = state is State.PAUSED
+        self.pause_button.setIcon(
+            icons.glyph(
+                "play" if paused else "pause",
+                icons.COLORS[State.RECORDING if paused else State.PAUSED],
+            )
+        )
 
     # --- Closing ------------------------------------------------------------
 
@@ -356,9 +405,14 @@ class CommandCenter(QMainWindow):
         meeting roots, and this runs on every transition; a hidden page is
         brought up to date by :meth:`_on_page_changed` when it is switched to,
         which is the moment before anybody could read a stale figure off it.
+
+        The dashboard is exempt rather than an exception: it reads nothing, and is
+        handed the listing this method has just paid for, so keeping it current
+        even while it is behind another tab costs a redraw and no I/O at all.
         """
         self._reload()
         self._rebuild()
+        self.dashboard.set_document(self._document)
         self._refresh_page(self.pages.currentWidget())
 
     def _on_page_changed(self, index: int) -> None:
@@ -407,7 +461,7 @@ class CommandCenter(QMainWindow):
             (
                 meeting["id"],
                 meeting["title"],
-                self._status_text(meeting),
+                status_text(meeting),
                 tags_text(meeting["tags"], known),
             )
         )
@@ -434,11 +488,17 @@ class CommandCenter(QMainWindow):
                     meeting["id"],
                     "" if meeting["title"] == meeting["id"] else meeting["title"],
                     meeting["duration"],
-                    self._status_text(meeting),
+                    status_text(meeting),
                     str(len(meeting["unnamed"])) if meeting["unnamed"] else "",
                     carried or TAG_NUDGE,
                 ]
             )
+            # The lifecycle as a colour beside the word for it, and a *ring*
+            # rather than a disc for a run that lost a channel — the tray's own
+            # rule, applied to a row. It goes on the Status column and not on the
+            # first one, because it is a picture of that cell and not a picture
+            # of the meeting.
+            item.setIcon(3, icons.status_dot(meeting["status"], bool(meeting["missing_channels"])))
             if not carried:
                 # The nudge, and in phase 2 the whole of it: an untagged row asks
                 # to be tagged rather than showing a blank cell. Quiet, because it
@@ -469,23 +529,6 @@ class CommandCenter(QMainWindow):
                 "Nothing matches." if self._document["meetings"] else "No meetings yet."
             )
         self._update_summary()
-
-    @staticmethod
-    def _status_text(meeting: dict[str, Any]) -> str:
-        """The lifecycle, plus the one thing that is not it and earns its place.
-
-        A run that lost a channel says so here. `2026-09-02_1001` was twenty-four
-        minutes with no microphone in it and read `transcribed`, which is true of
-        the transcription and worthless as a description of the meeting. The same
-        sentence :func:`referat.cli.list_row` makes.
-        """
-        lost = meeting["missing_channels"]
-        text = str(meeting["status"]).replace("_", " ")
-        if lost:
-            text += f" - no {'/'.join(lost)}"
-        if meeting["staged"]:
-            text += " (staging)"
-        return text
 
     def _update_summary(self) -> None:
         meetings = self._document["meetings"]
@@ -679,13 +722,14 @@ class CommandCenter(QMainWindow):
         the meetings folder and cannot reach one. So are meetings that already
         have notes — re-running one is a deliberate act and stays the single
         button's job.
+
+        Which meetings those are is :func:`referat.cli.pending`'s answer since
+        phase 6, not this method's. The dashboard shows the same queue, and a
+        queue whose count came from one predicate and whose button drained
+        another would be wrong in the way that is hardest to notice: it would
+        look right.
         """
-        wanted = [
-            m["id"]
-            for m in self._document["meetings"]
-            if m["transcript"] and not m["notes"] and not m["staged"]
-            and m["status"] not in ("recording", "transcribing")
-        ]
+        wanted = [m["id"] for m in cli.pending(self._document)["notes"]]
         if not wanted:
             QMessageBox.information(
                 self,
@@ -907,6 +951,7 @@ class CommandCenter(QMainWindow):
         self.record_button.setEnabled(state in (State.IDLE, State.TRANSCRIBING))
         self.pause_button.setEnabled(state in (State.RECORDING, State.PAUSED))
         self.pause_button.setText("Resume" if state is State.PAUSED else "Pause")
+        self._on_pause_icon(state)
         self.stop_button.setEnabled(state in (State.RECORDING, State.PAUSED))
         if self.isVisible():
             # A transition means a meeting was created, stopped or transcribed,
@@ -925,7 +970,16 @@ class CommandCenter(QMainWindow):
         `untagged` only ever turns the filter **on**. Opening the window and
         silently hiding every tagged meeting because a previous caller asked for
         the inbox would be the window remembering a decision nobody made.
+
+        Either argument also brings the **Meetings** tab forward, which phase 6
+        made necessary: the window now opens on the dashboard, and a toast asking
+        which project a meeting belongs to that opened a summary of every other
+        meeting would be a link that did nothing. With neither argument the tab
+        is left alone, so the tray menu's plain *Open* still lands wherever the
+        window was last.
         """
+        if meeting_id is not None or untagged:
+            self.pages.setCurrentWidget(self.meetings_page)
         if untagged and not self.untagged_only.isChecked():
             # Signals blocked, or the toggle refreshes here and again below.
             self.untagged_only.blockSignals(True)

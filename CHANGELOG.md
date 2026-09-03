@@ -2,6 +2,139 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-03 (fifth) — Icons, and a person becomes a plan
+
+### The window is visual now
+
+Asked for on the dashboard the hour it was built — *a dashboard should also be
+somewhat visual, and Record, Pause and Stop have obvious icon candidates*.
+`referat/ui/icons.py` grew from the one tray icon into every icon Referat draws:
+eleven glyphs and a lifecycle dot, all `QPainter`.
+
+**Drawn rather than shipped**, and that is a dependency decision before an
+aesthetic one. An icon font or an SVG set is a package in `pyproject.toml`, the
+base install is on the recording path, and every file on that path is something
+Smart App Control can one day refuse — the same argument the PySide6 audit made.
+Two hundred lines of QPainter cannot be blocked, cannot be missing at runtime,
+and scale to any DPI.
+
+**Colour means a state or it means nothing.** Record, Pause and Stop carry the
+recorder's own colours out of `icons.COLORS`, so red means recording in the
+window and in the notification area without either being taught the other's
+vocabulary; Pause becomes a play triangle when the meeting is already paused,
+because the label already changes and an icon that did not would be the one part
+of the button that was wrong. The three Delete buttons — a meeting, a project, a
+person — carry one red trash. Everything else is drawn in the palette's
+`windowText`, which is what makes a dark theme get light icons rather than black
+ones on a dark tab bar; checked by rendering the whole window under a synthetic
+dark palette rather than by reasoning about it.
+
+**A lifecycle dot on every meeting row**, one colour per `status`: the in-flight
+states borrow the recorder's, the two that want somebody are warm, and the three
+finished ones are a green deepening through `transcribed`, `notes_written` and
+`synced`. **A run that lost a channel hollows the dot into a ring** — the tray
+icon's existing rule applied one layer out, rather than a second visual language
+for the same fact.
+
+Each dashboard queue heading carries the glyph of the button that drains it, so
+a row followed to the Meetings tab finds the thing to press next wearing the
+picture it came from. Queue rows get the *meeting's* dot instead: the same icon
+repeated down a list is the one thing on a page carrying no information. The
+exception is the people page, where *Appears in* and *Projects* are two lists of
+bare ids one under the other, and a meetings glyph against a tag glyph is what
+tells them apart without reading the heading.
+
+### A person becomes a record — planned, not built
+
+Also asked: renaming a person with the change propagating into transcripts and
+notes, plus a long name and an email beside the short one. All of it went into
+**step 20c**, which those three requests turn into one step: they are the same
+change, a person ceasing to be a string.
+
+The plan's recommendation is that **a person becomes exactly what a project
+already is — a record with a slugified id** — which answers the uniqueness
+question the step has been sitting on (two John Smiths are `john-smith` and
+`john-smith-2`), and which is what turns renaming from a migration into an edit,
+since the id never moves. `meta.json` would store the id and the transcript the
+short name, the same split `tags` already makes. Migration on load and no file
+rewritten, the way `MeetingStatus` maps its legacy values.
+
+Renaming `notes.md` is written up as its own decision with three options and a
+recommendation — rewrite `[[Wikilinks]]` only, never the prose, because a
+find-and-replace through somebody's sentences is the same move as spelling a
+name onto a `SPEAKER_NN`. The people page's *No voiceprint on file* section is
+already the safety net: a spelling a rename misses surfaces there rather than
+disappearing.
+
+## 2026-09-03 (fourth) — Phase 6: the dashboard
+
+The command center opened on the meetings list, which is an *inventory* — every
+meeting there has ever been, newest first, with nothing distinguishing the ones
+that are finished from the ones that still owe somebody twenty seconds of work.
+Phase 6 puts the other question in front of it: **is there anything for me to
+do**.
+
+### The page
+
+`referat/ui/dashboard.py`, and it is the **first tab**, so it is what the window
+opens on. Recent meetings on the left, capped at eight with the heading saying
+how many of how many — a glance and not an inventory, the Meetings tab being one
+click away. Three queues on the right, in a splitter so a morning of untagged
+meetings can be given the height it needs:
+
+- **Untagged**, the inbox.
+- **Speakers nobody has named**, the meetings still holding a `SPEAKER_NN`.
+- **No notes yet**, the meetings with a transcript and no `notes.md`.
+
+In the order the work is done in, which is the flow rule this UI already
+follows: tag, then label, then write notes. Every row opens that meeting on the
+Meetings tab, where `Tags…`, `Speakers…` and `Generate notes…` already are —
+**the dashboard writes nothing**, because draining a queue from here would mean
+a second path to each of those three writes, and the picker and the labeling
+dialog are exactly where the rules about what a tag and a name may be live.
+
+Themes and action items are deliberately not built: `TODO.md` had them as a
+later box inside this phase rather than its baseline, and the room under the
+recent list is where they will go.
+
+### It reads nothing, and that is what makes a fifth tab free
+
+The window already reads `cli.list_document` on every refresh for its meetings
+list, and the dashboard is handed that document rather than reading anything of
+its own. So it is exempt from *only the page in front is refreshed* rather than
+an exception to it: keeping it current while it is behind another tab costs a
+redraw and no I/O at all.
+
+### `cli.pending`, so the queue and the button that drains it cannot disagree
+
+The three predicates are one pure function over a `list_document` — no file, no
+`Meeting` object — beside the listing they are derived from. `Notes for all…`
+had been carrying its own copy of the notes predicate inline; it asks
+`cli.pending` now. A queue whose count came from one predicate and whose button
+drained another would be wrong in the way that is hardest to notice: it would
+look right.
+
+`LIVE` is the pair of statuses held out of all three. A meeting still being
+recorded or transcribed is not pending *work* — there is nothing to do about it
+but wait — which is the same distinction `referat list`'s footer makes when it
+refuses to suggest a `rerun` for a live meeting. The local named `pending` in
+`run_list` was renamed to `unnamed` for the obvious reason.
+
+### `referat/ui/rows.py`
+
+`status_text` and `tags_text` moved out of `window.py`, which was their only
+reader until the dashboard rendered the same meetings in a different shape. A
+status cell that said one thing on the Meetings tab and another on the opening
+screen would be the same drift `format_duration` and `audio_state` keep being
+pulled back from, one layer up.
+
+### Opening at a meeting now says which tab it means
+
+`show_window` brings the Meetings tab forward whenever it is given a meeting id
+or asked for the untagged inbox — which step 16's on-stop toast does. Without
+that, the toast would have opened a summary of every *other* meeting, which is a
+link that did nothing. With neither argument the tab is left where it was.
+
 ## 2026-09-03 (third) — A queue, real progress, and chips that wrap
 
 The second round of feedback, after the window had been used to name speakers

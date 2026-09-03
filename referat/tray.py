@@ -34,12 +34,12 @@ import threading
 from collections.abc import Callable
 from ctypes import wintypes
 
-from referat import gpu, status, voices
+from referat import gpu, progress, status, voices
 from referat.config import Config, ConfigError, load_config
 from referat.hotkeys import Hotkeys
 from referat.logging_setup import setup_logging
 from referat.meeting import Meeting
-from referat.power import SleepBlocker
+from referat.power import SleepBlocker, SuspendWatcher
 from referat.recorder import Recorder, RecorderError
 from referat.state import Machine, State, Transition
 from referat.transcribe import transcribe_meeting
@@ -100,6 +100,22 @@ class App:
         # its sleep hold.
         self.machine.add_listener(self._on_transition_power)
         self.machine.add_listener(self._on_transition_status)
+        # Started last and owning nothing: it only reads the progress registry
+        # and writes to the log, so it cannot cost the recorder anything.
+        self.watcher = SuspendWatcher(self._describe_work)
+
+    def _describe_work(self) -> str:
+        """What is in flight, for the log's heartbeat and for a resume line.
+
+        Read out of :mod:`referat.progress` rather than tracked here, because
+        that registry is already what the transcription pipeline and the notes
+        queue report into, and a second tally of the same jobs would be the first
+        thing to disagree with it.
+        """
+        return ", ".join(
+            f"{job.title} ({job.phase}, {job.elapsed / 60.0:.0f} min)"
+            for job in progress.active()
+        )
 
     @property
     def missing_channels(self) -> list[str]:
@@ -107,8 +123,20 @@ class App:
         return list(self.recorder.missing_channels) if self.recorder else []
 
     def _on_transition_power(self, transition: Transition) -> None:
-        """Hold sleep off while audio is being captured, and only then."""
-        self.power.set(transition.to in (State.RECORDING, State.PAUSED))
+        """Hold sleep off while this process is doing anything at all.
+
+        Every state but IDLE, which is wider than the *recording or paused* this
+        used to be and is meant to be: TRANSCRIBING is a CUDA job that a suspend
+        can wedge, and STOPPED is the moment between the two where dropping the
+        hold would open a window for exactly that. The cost is a laptop staying
+        awake for the few minutes a transcription takes; see
+        :mod:`referat.power` for the measurement that reversed the old decision.
+
+        A job outliving its meeting is still covered, because the machine is
+        RECORDING while the next one runs and returns to TRANSCRIBING after it,
+        and `notes` is a second reason held elsewhere.
+        """
+        self.power.want("machine", transition.to is not State.IDLE)
 
     def _on_transition_status(self, _transition: Transition) -> None:
         """Record the new state on disk, for `referat status` and the extension."""
@@ -270,14 +298,85 @@ class App:
     # --- Lifecycle ----------------------------------------------------------
 
     def start(self) -> None:
-        """Register the hotkeys and publish the initial state. The recorder is live after this."""
+        """Register the hotkeys and publish the initial state. The recorder is live after this.
+
+        The reconciliation runs **before** `write_status`, and the order is the
+        whole of its correctness: it asks whether a live tray is transcribing,
+        and writing our own idle status first would make this process the one
+        answering. Hotkeys go first regardless — the recorder comes up before
+        anything that merely tidies, the same rule that puts the window after it.
+        """
         self.hotkeys.start()
+        self._reconcile_meetings()
         status.write_status(self.machine)
         log.info(
             "recorder running; %s to record, %s to pause",
             self.config.hotkeys.toggle_record,
             self.config.hotkeys.toggle_pause,
         )
+
+    def _reconcile_meetings(self) -> None:
+        """Correct any meeting left `transcribing` by a process that is gone.
+
+        Guarded on :func:`referat.rerun.busy_tray`, which is the existing answer
+        to *is another process working on this* and is reused rather than
+        restated — a second copy of that rule is how two trays would come to
+        disagree about which of them is allowed to write. `rerun` is free of
+        torch at module scope, so importing it here costs nothing.
+
+        Never fatal. A tray that cannot tidy up is still a tray that records,
+        which is the rule every optional thing in this file is held to.
+        """
+        from referat import rerun
+        from referat.meeting import reconcile_interrupted
+
+        try:
+            if (busy := rerun.busy_tray()) is not None:
+                log.warning(
+                    "another tray is transcribing %s; not reconciling", busy or "a meeting"
+                )
+                return
+            if repaired := reconcile_interrupted(self.config):
+                self._resume(repaired)
+        except Exception:
+            log.exception("could not reconcile the meetings on disk")
+
+    def _resume(self, meetings: list[Meeting]) -> None:
+        """Re-queue meetings whose transcription did not survive the last process.
+
+        This is what makes closing the lid a delay rather than a chore: the
+        meeting comes back as `recorded` with both WAVs still in staging, and
+        finishing it is the same job that was interrupted. Doing it automatically
+        is consistent with transcription being automatic on stop — nobody asked
+        for the first attempt either.
+
+        **Only meetings that still have audio**, since the transcript is rebuilt
+        from the WAVs and a meeting whose audio was released has nothing to run.
+        That is also what keeps this from looping: a run that fails writes
+        `failed` and a run that succeeds writes `transcribed`, and neither is
+        `transcribing`, so nothing is picked up twice for the same reason.
+
+        Jobs are serialized by `transcribe._RUN_LOCK`, so queueing several is
+        safe — they run one at a time, and two large-v3 models never coexist.
+        """
+        pending = [m for m in meetings if m.mic_path.exists() or m.system_path.exists()]
+        if not pending:
+            return
+        names = ", ".join(m.id for m in pending)
+        log.info("resuming %d interrupted transcription(s): %s", len(pending), names)
+        self.notify(
+            f"Resuming {len(pending)} interrupted transcription"
+            f"{'s' if len(pending) > 1 else ''}: {names}"
+        )
+        for meeting in pending:
+            self.machine.begin_job()
+            # IDLE -> TRANSCRIBING, the edge added for exactly this; `try_to`
+            # rather than `to`, since a hotkey could in principle have started a
+            # recording between the reconcile and here.
+            self.machine.try_to(State.TRANSCRIBING)
+            threading.Thread(
+                target=self._transcribe, args=(meeting,), name="transcribe", daemon=True
+            ).start()
 
     def shutdown(self) -> None:
         """Stop the hotkeys, close out any recording, and release the sleep hold.
@@ -297,6 +396,7 @@ class App:
             self.machine.try_to(State.STOPPED)
             self._stop_recorder()
             self.machine.try_to(State.IDLE)
+        self.watcher.close()
         self.power.close()
         status.clear_status()
 

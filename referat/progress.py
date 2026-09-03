@@ -39,6 +39,15 @@ log = logging.getLogger(__name__)
 
 TRANSCRIBE = "transcribe"
 NOTES = "notes"
+DAY = "day"
+"""A `/standup` pass over one day's notes.
+
+A third kind rather than a second `notes` job, for two reasons. Keys are a
+namespace and :func:`begin` *replaces* what is under one, so `notes:<date>`
+beside `notes:<meeting-id>` would stay distinct only because meeting ids
+happen to carry `_HHMM`. And the Activity tab prints this value as a column,
+where two different jobs both saying `notes` is a column carrying nothing.
+"""
 """The two kinds of job. A surface may group by these; nothing here does."""
 
 

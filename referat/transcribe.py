@@ -655,6 +655,51 @@ def load_model(backend: Backend) -> Any:
     return model
 
 
+def unload_model(model: Any) -> None:
+    """Hand CTranslate2's weights back to the driver, without waiting for a collection.
+
+    `del model` frees the *Python reference*; the ~3.8 GB of large-v3 weights are
+    CTranslate2's, outside torch entirely, so :func:`referat.gpu.release` never
+    sees them and they come back only when the `WhisperModel` is really
+    destroyed. This asks CTranslate2 to free them directly, and so does not
+    depend on that happening.
+
+    **What is measured, on 2026-09-03.** A tray *idle* between jobs held 5205 MiB
+    of 12227, with `gpu.release` reporting *released 0 MiB* -- torch had nothing
+    cached, so the residue was not torch's. The next job reached 11424 MiB
+    dedicated with **468 MiB of non-local usage**: memory the WDDM driver had
+    migrated to system RAM, because Windows does not fail an oversubscribed
+    allocation, it pages the overflow across PCIe. `nvidia-smi` read 100% busy
+    while diarization ran **6527.8s against 58.5s** for the previous meeting of
+    the same length. Whisper measures 3788 MiB and pyannote peaks near 3866, and
+    the arithmetic of those against 5205 and 11424 says a finished job left its
+    model resident and the next one loaded a second on top of it.
+
+    **What is not established is why, and this will not pretend otherwise.** In a
+    standalone process the retention does not reproduce: `del` alone returns the
+    full 3788 MiB -- with the generator drained, and with cyclic GC disabled --
+    and the floor stays flat across three consecutive jobs, for pyannote on a
+    worker thread as well. So whatever holds that reference is specific to the
+    tray, where Qt is in the process and `gpu.release` skips `gc.collect()` off
+    the main thread. That skip is the obvious suspect. It is a suspect, not a
+    finding.
+
+    **Which is the argument for this function rather than against it.** It frees
+    the weights whatever still references the Python object, on whatever thread
+    asks, so it needs neither the collector nor a diagnosis. Never raises, for
+    the same reason :func:`referat.gpu.release` does not -- it runs in a
+    `finally` that may already be unwinding, and failing to reclaim memory may
+    not become the failure the caller sees.
+    """
+    try:
+        inner = getattr(model, "model", None)
+        if inner is None or not getattr(inner, "model_is_loaded", False):
+            return
+        inner.unload_model()
+    except Exception:
+        log.debug("could not unload the CTranslate2 model", exc_info=True)
+
+
 # --- Transcribing -----------------------------------------------------------
 
 
@@ -694,22 +739,21 @@ def transcribe_channel(
     config: Config,
     label: str,
     *,
-    diarize_channel: bool = False,
-    speaker_start: int = 1,
-    device: str = "cpu",
     job: str = "",
-) -> ChannelTranscript:
+) -> tuple[ChannelTranscript, np.ndarray]:
     """Run one WAV file through the model and collect its segments.
 
-    `diarize_channel` additionally asks :mod:`referat.diarize` who spoke and
-    :mod:`referat.voices` who they are, which **both** channels want: the
-    microphone hears the whole room in a meeting held in person, so it is no more
-    one speaker than the loopback is. `speaker_start` is the first `SPEAKER_NN`
-    number free for this channel, since the numbering runs across the meeting
-    rather than restarting per channel. `device` is the transcription
-    backend's, so both follow Whisper onto the GPU or the CPU rather than
-    choosing for themselves. `meeting` is here for the same reason — the speaker
-    snippets are written into its folder.
+    **Whisper only.** Diarization used to happen at the end of this function, on
+    the array still in scope, which read well and meant the transcription model
+    was resident for every second of it — 3788 MiB beside pyannote's 3866 on a
+    12 GB card. So the decoded audio is *returned* instead, and
+    :func:`transcribe_channels` diarizes with the model already unloaded. The WAV
+    is still decoded exactly once, which was the whole point of doing it here.
+
+    Returning the array rather than keeping both channels' arrays until the end
+    is also deliberate: the caller diarizes each channel before moving to the
+    next, so only one is ever held. Two channels of float32 at 16 kHz is about
+    460 MB an hour, which for a long meeting is real memory.
 
     `job` is a :mod:`referat.progress` key, or `""` for a caller that is not
     reporting — every `progress.step` on an unknown key is a silent no-op, which
@@ -783,11 +827,7 @@ def transcribe_channel(
         q.silent,
         q.clean,
     )
-    if diarize_channel:
-        # On the array that is still in scope, so the WAV is decoded once.
-        progress.step(job, f"finding the speakers in {path.name}", None)
-        _diarize_into(meeting, transcript, audio, config, device, speaker_start)
-    return transcript
+    return transcript, audio
 
 
 def _diarize_into(
@@ -862,21 +902,35 @@ def progress_key(meeting: Meeting) -> str:
 def transcribe_channels(
     meeting: Meeting, config: Config, backend: Backend, *, tolerate_failures: bool = False
 ) -> tuple[list[ChannelTranscript], dict[str, str]]:
-    """Load one model and run both channels through it.
+    """Transcribe every channel, then find its speakers, one channel at a time.
 
-    Serialized process-wide, and the model is dropped as soon as the meeting is
-    done rather than held warm: loading costs seconds against meetings measured
-    in tens of minutes, and a resident large-v3 would occupy the GPU for the rest
-    of the session.
+    Serialized process-wide. **A model per channel, loaded around the Whisper
+    pass and dropped before diarization**, which is a reversal of the "load one
+    model and run both channels through it" this function was built as, and the
+    reason is peak memory rather than tidiness. Held across diarization, Whisper
+    is 3788 MiB beside pyannote's 3866 -- most of a 12 GB card, before the CUDA
+    contexts and before the 1761 MiB the desktop compositor was measured holding
+    on 2026-09-03. That is the day the card ran out and the WDDM driver began
+    paging the overflow to host memory, turning a 58-second diarization into
+    6527.8s.
 
-    `del model` is not by itself what frees it, which is the correction this
-    paragraph carries: torch's caching allocator keeps everything it has taken
-    from the driver, so the tray sat on 8.4 GB of a 12 GB card while idle and the
-    next process to want a model stalled. :func:`referat.gpu.release` is what
-    actually gives it back, and it runs here rather than only at the end of
-    :func:`transcribe_meeting` because the CUDA -> CPU fallback calls this
-    function a second time -- an out-of-memory on the first attempt is precisely
-    when the arena is worth reclaiming.
+    The old shape priced this correctly and only counted one side: loading costs
+    seconds against meetings measured in tens of minutes. It still does -- the
+    change buys a 3.8 GB lower peak for one extra nine-second load per meeting,
+    which is the same trade read with the other number in hand.
+
+    Releasing is two calls that reach different allocators.
+    :func:`referat.gpu.release` hands back *torch's* arena, which is pyannote's;
+    the Whisper weights are CTranslate2's and it never sees them, which is
+    :func:`unload_model`. **Neither covers the other's.** Both run per channel
+    rather than once at the end, and that also keeps the property the old
+    placement had -- the CUDA -> CPU fallback calls this function a second time,
+    and an out-of-memory on the first attempt is precisely when the arena is
+    worth reclaiming.
+
+    The decoded audio comes back from :func:`transcribe_channel` rather than
+    being re-read, so the WAV is still decoded once, and it is dropped before the
+    next channel's model is loaded so only one channel's array is ever resident.
 
     A channel whose file is missing is skipped — either device may have failed to
     open, and half a meeting is worth far more than none.
@@ -901,44 +955,49 @@ def transcribe_channels(
     )
     key = progress_key(meeting)
     with _RUN_LOCK:
-        progress.step(key, f"loading {backend.model} on {backend.device}", None)
-        model = load_model(backend)
-        try:
-            results: list[ChannelTranscript] = []
-            errors: dict[str, str] = {}
-            # Numbering is per meeting, not per channel: two channels each
-            # starting at SPEAKER_01 would put two different people behind one
-            # label in the same transcript.
-            speakers_used = 0
-            for path, label in channels:
-                if not path.exists():
-                    log.warning("no %s in %s", path.name, meeting.dir)
-                    continue
+        results: list[ChannelTranscript] = []
+        errors: dict[str, str] = {}
+        # Numbering is per meeting, not per channel: two channels each
+        # starting at SPEAKER_01 would put two different people behind one
+        # label in the same transcript.
+        speakers_used = 0
+        for path, label in channels:
+            if not path.exists():
+                log.warning("no %s in %s", path.name, meeting.dir)
+                continue
+            try:
+                progress.step(key, f"loading {backend.model} on {backend.device}", None)
+                model = load_model(backend)
                 try:
-                    transcript = transcribe_channel(
-                        meeting,
-                        path,
-                        model,
-                        config,
-                        label,
-                        diarize_channel=True,
-                        speaker_start=speakers_used + 1,
-                        device=backend.device,
-                        job=key,
+                    transcript, audio = transcribe_channel(
+                        meeting, path, model, config, label, job=key
                     )
-                    speakers_used += len(transcript.speakers or {})
-                    results.append(transcript)
-                except Exception as exc:
-                    if not tolerate_failures:
-                        raise
-                    log.exception("could not transcribe %s", path.name)
-                    errors[path.stem] = str(exc)
-            if errors and not results:
-                raise TranscriptionError("; ".join(f"{k}: {v}" for k, v in errors.items()))
-            return results, errors
-        finally:
-            del model
-            gpu.release(f"transcribing {meeting.id}")
+                finally:
+                    # The model goes before pyannote arrives, which is the whole
+                    # of this restructuring. Held across the diarization it is
+                    # 3788 MiB beside pyannote's 3866, and that peak is what
+                    # tipped a 12 GB card into paging on 2026-09-03.
+                    unload_model(model)
+                    del model
+                    gpu.release(f"transcribing {path.stem} of {meeting.id}")
+                progress.step(key, f"finding the speakers in {path.name}", None)
+                _diarize_into(
+                    meeting, transcript, audio, config, backend.device, speakers_used + 1
+                )
+                # Before the next channel's model is loaded, not after: an hour
+                # of float32 at 16 kHz is 230 MB, and there is no reason for two
+                # channels' worth to overlap a model load.
+                del audio
+                speakers_used += len(transcript.speakers or {})
+                results.append(transcript)
+            except Exception as exc:
+                if not tolerate_failures:
+                    raise
+                log.exception("could not transcribe %s", path.name)
+                errors[path.stem] = str(exc)
+        if errors and not results:
+            raise TranscriptionError("; ".join(f"{k}: {v}" for k, v in errors.items()))
+        return results, errors
 
 
 # --- Writing transcript.md --------------------------------------------------

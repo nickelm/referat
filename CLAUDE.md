@@ -85,18 +85,23 @@ traceback and nothing else: `empty_cache` still returns everything the preceding
 `del` made unreachable, which is the overwhelming majority and the reason that
 module exists. A CLI `rerun` is on the main thread and still collects.
 
-**The tray tags meetings too, from step 16.** On stop it raises a toast asking
-which project(s), offering recent ones and defaulting to untagged if it times
-out; its menu grows a lazily built *Tag recent…* submenu of untagged meetings
-from the last seven days. That toast needs a real WinRT notification —
-`QSystemTrayIcon.showMessage` is as buttonless as `pystray`'s `icon.notify` was,
-and neither persists in Action Center — which is a new base dependency taken
-deliberately against the
-minimal-dependencies rule, and whose activation half may not prove workable here;
-if it does not, the toast degrades to a plain notification and the menu carries
-the feature. **A notification that fails is a log line and never touches the stop
-path.** Tray tagging is single-tag quick assignment; multi-tag editing lives in
-the extension.
+**The tray does not tag meetings, and step 16 is declined.** This file used to
+describe an on-stop toast asking which project(s) and a lazily built *Tag
+recent…* submenu, in the present tense, as though both existed. Neither was ever
+built: every box under step 16 in `TODO.md` is unchecked, there is no toast code,
+and the WinRT notification library it would have needed is not in
+`pyproject.toml`. Somebody reading this file would have gone looking for a
+feature that was never there — which is the same failure as a comment claiming a
+resource was released, one section further out.
+
+It is declined rather than merely unbuilt. Tagging happens when meetings are
+looked over at a spare moment, on the command center's Meetings tab, where the
+picker and the untagged inbox already are; a prompt at the end of every recording
+answers a question nobody was asking at that moment. **So the WinRT dependency is
+not taken**, and the deliberate exception to the minimal-dependencies rule that
+step 16 would have required is not spent — leaving PySide6 as the only one. What
+step 16 was really for is covered: the untagged queue on the dashboard is the
+thing that makes sure a meeting does not stay untagged.
 
 **Dual-stream capture** while recording, both streamed to disk continuously:
 
@@ -175,8 +180,29 @@ mitigating. SETUP.md section 4a is the habit, and `transcription.bleed` in
 `meta.json` is how you find out the habit lapsed.
 
 **Sleep prevention** — hold `SetThreadExecutionState(ES_CONTINUOUS |
-ES_SYSTEM_REQUIRED)` through `ctypes` only while recording or paused, released on
-stop. Transcription runs without the hold.
+ES_SYSTEM_REQUIRED)` through `ctypes` while the recorder is in any state but
+idle, and while a notes pass is running. This file used to say *transcription
+runs without the hold*, on the reasoning that a job outliving its meeting is no
+reason to keep the laptop awake; that priced the cost correctly and never priced
+the hazard. On 2026-09-03 a meeting stopped at 15:26, diarization began at 15:29,
+and the machine entered Modern Standby at 16:01 with the job still in flight.
+
+The hold is **keyed by reason** because it has two owners — the recorder while
+capturing and the notes queue while `claude` runs, a cleanup pass being exactly
+the idle timer's case: a subprocess thinking for minutes with nobody touching the
+keyboard. A single boolean let whichever finished first drop the hold out from
+under the other.
+
+**None of it survives the lid closing**, and nothing in this process can:
+`ES_SYSTEM_REQUIRED` suppresses the *idle* timer, and the lid is a power-plan
+action. So two things cover what happens anyway. `power.SuspendWatcher` detects a
+suspend from the wall clock — a tick that should have taken twenty seconds and
+took forty minutes — and records how much time was lost and what was in flight,
+plus a heartbeat every five minutes while a job runs, because *a log that simply
+stops* is this codebase's most expensive signature and a suspend drew the same
+picture as the heap corruption. And `meeting.reconcile_interrupted` clamps a
+meeting left `transcribing` by a process that is gone, which is the sticky-lie
+gap recorded below, closed from the next start rather than from a handler.
 
 **Transcription**, on stop, in a background thread: `faster-whisper` large-v3 on
 CUDA, degrading to CPU + medium when CUDA is unavailable. **Both channels** are
@@ -206,7 +232,38 @@ thread — outside its `except`, because a release running while an exception
 propagates is partial: the traceback holds the frames that hold the tensors, and
 only `gc.collect()` reaches that cycle. It reclaims **torch's** share and says so
 in its log line: CTranslate2 allocates outside torch entirely, and the CUDA
-context lives as long as the process does. The target is room for a second model,
+context lives as long as the process does.
+
+**And a second, larger measurement on 2026-09-03 says the accounting is still
+not complete.** The Whisper weights are CTranslate2's, so `gpu.release` never
+sees them; a tray *idle between jobs* was measured holding **5205 MiB of 12227**
+while this function reported *released 0 MiB*, and the next job reached **11424
+MiB dedicated with 468 MiB of non-local usage** — memory the WDDM driver had
+migrated to system RAM, because Windows does not fail an oversubscribed
+allocation, it pages the overflow across PCIe. `nvidia-smi` read 100% busy while
+diarization ran **6527.8s against 58.5s** for the previous meeting of the same
+length. Whisper measures 3788 MiB and pyannote peaks near 3866, so the
+arithmetic says a finished job left its model resident and the next loaded a
+second.
+
+**Why it was retained is not established, and the guess should not be written
+down as if it were.** In a standalone process it does not reproduce: `del` alone
+returns the full 3788 MiB with the generator drained and cyclic GC disabled, and
+the floor is flat across three consecutive jobs, pyannote on a worker thread
+included. So the difference is something about the tray — Qt in the process, the
+skipped `gc.collect()`, or neither. `transcribe.unload_model` is the fix
+precisely because it does not depend on the answer: CTranslate2's own API, called
+before the `del`, on whatever thread asks. **Between the two functions both
+allocators are covered, and neither covers the other's.**
+
+**The standing structural risk is peak, not residue.** `transcribe_channels`
+loads one model for both channels, so Whisper stays resident through each
+channel's diarization — 3788 MiB alongside pyannote's 3866, before the CUDA
+contexts and before whatever the desktop compositor is holding, which was
+measured at 1761 MiB. That is most of a 12 GB card by design, and it is why
+anything else on the card tips this into paging.
+
+The target is room for a second model,The target is room for a second model,
 not zero. This is the same shape of lesson as the Smart App Control paragraphs
 below — a documented intention that the code did not deliver — and the general
 form is that *a comment claiming a resource was released is worth measuring once*.
@@ -443,7 +500,8 @@ VS Code extension, whose documents the command center reads by calling the same
 functions rather than by spawning: `config`, `list`, `show <id>`,
 `transcript <id>`, `rerun <id>`,
 `label <id>`, `status`,
-`devices`, `hotwords`, `people`, `notes`, `index`, `project <verb>`, `tag`, `untag`, `state`,
+`devices`, `hotwords`, `people`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
+`project <verb>`, `tag`, `untag`, `state`,
 `promote <id>`,
 `reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `delete <id>`. All of them are built except
 `project link-doc`, `project unlink-doc` and `project sync`, which wait for the
@@ -546,7 +604,7 @@ interpreter start per refresh. The rule is one implementation, not one process
 boundary — worth saying in both directions, since a later reader could "fix" it
 either way.
 
-**Nine commands answer in JSON**, and the first five only because the extension
+**Ten commands answer in JSON**, and the first five only because the extension
 asked. Step 20 added `transcript <id> --json` and `show <id> --json`, phase
 3 added the `gallery` field on `label <id> --json`, phase 4 added `hotwords
 --json`, and phase 5 added `people
@@ -593,7 +651,10 @@ seconds and as the `HH:MM:SS` the file renders, because a cross-link is matched
 on the number and a reader sees the string — and its `people` names which of the
 labels are somebody's name, from `voices.name_complaint`, so a surface can link a
 name without a second copy of the rule that `ME`, `REMOTE` and `SPEAKER_NN` are
-not one. The ninth is `referat people --json`: every name there is, with the
+not one. It also carries `markdown`, the file itself, which costs nothing because
+that function has already read it and is what a **copy** out of the transcript
+pane hands over — the alternative being a window that opens `transcript.md` for
+itself, which is the one thing it may not do. The ninth is `referat people --json`: every name there is, with the
 voiceprints filed under it and where each came from, the meetings the name
 appears in and the projects those carry. **Names, counts and meeting ids and
 nothing else** — no embedding, and not even the path the database lives at. That
@@ -784,7 +845,8 @@ voiceprint identity with which projects and meetings that person appears in,
 opened by clicking a name in any document — which is the thing a three-hundred
 pixel column could never hold and the real argument for the window. The opening
 screen is a **dashboard**: recent meetings, pending untagged meetings, pending
-unlabeled speakers, and later the themes and action items extracted from notes.
+unlabeled speakers, the **action items** owed by whoever is looking, and a
+**day summary**. Themes are still later.
 
 **Phases 1 to 6 are built**, and only phase 7 is left, which is gated on step
 13's Google half. Phase 1 was deliberately read-only — the
@@ -1064,15 +1126,42 @@ leading with it opened every meeting on several hundred utterances. `Ctrl+±` an
 `Ctrl+0` zoom **both** panes together — they are two tabs of one document, and
 Qt's own Ctrl+wheel was not enough because it needs a mouse and moves one pane.
 
-**A copy out of the viewer is the source, not the rendering, and it is plain
-text.** `Ctrl+Shift+C` puts the *original* `notes.md` on the clipboard rather
-than what the pane holds, because the pane's Markdown has had its timestamps and
-`[[Wikilinks]]` rewritten into `referat:` links that mean nothing outside this
-window. Plain text only — Qt offers an HTML flavour beside it and Word, Google
-Docs and Outlook all prefer that one, which is how a paste arrives as
-theme-coloured monospace. Exactly the reason the meetings folder sets
-`editor.copyWithSyntaxHighlighting: false` for VS Code, answered here for the
-window.
+**A copy out of the viewer is the source, not the rendering, and it comes in two
+flavours because there are two places it goes.** A note leaves this window for
+Claude or for a Google Doc, so *Copy as Markdown* (`Ctrl+Shift+C`) writes the
+Markdown as plain text and nothing else, and *Copy as formatted text*
+(`Ctrl+Alt+C`) writes clean HTML with that same Markdown beside it. **Two
+commands rather than one clipboard carrying both**, because Word, Google Docs and
+Outlook all *prefer* an HTML flavour when one is there — which is how a paste
+used to arrive as theme-coloured monospace, and exactly the reason the meetings
+folder sets `editor.copyWithSyntaxHighlighting: false` for VS Code. Offering both
+at once would decide for the paste; offering them by name leaves the choice with
+the person. The HTML is `referat/ui/richtext.py`'s and never the pane's, and it
+carries no colour, font or size at all: a rendering of *this window* is the thing
+being escaped, not the thing to send.
+
+**Reaching them is the part that was wrong**, and the complaint was not that the
+commands did not exist. They were on `Ctrl+Shift+C` and nowhere else, so the
+gesture somebody actually uses — right-click, Copy, or `Ctrl+C` — went to Qt's
+own copy of the *rendering* and arrived without its `##`, its `-` or its `**`.
+Both now route to the same two commands, which also sit on each pane's context
+menu and on a copy button in the corner of the viewer's tab bar. The keys are
+bound in **one** place, the window, which dispatches them onto whichever page is
+in front — the Actions tab copies its own list with them — because two claims on
+one shortcut in one window is a shortcut Qt fires neither half of.
+
+**The source is what is copied, selection included, and that took a map.**
+`setMarkdown` keeps no way back from the document it built to the text it was
+given, so `richtext.blocks` splits a source exactly where Qt splits it into
+`QTextBlock`s — a heading, a paragraph however many lines it wrapped over, one
+per list item — and a selection is turned back into the Markdown it was written
+as. The counts are checked before the map is trusted; where they disagree, Qt
+reconstructs the fragment instead and `viewer.unlink` takes this window's
+`referat:` links back out of it. That order is measured rather than tidy:
+**Qt's Markdown writer drops `**bold**` and `*italic*` entirely**, and the notes
+put every action item's owner in bold, so the reconstruction is a last resort.
+A whole-document copy needs none of it, which is why the transcript pane now
+keeps its source too — `transcript_document`'s `markdown`.
 
 **A meeting with no transcript yet says which of the two waits it is in.** A
 recording has not finished happening; a transcription has finished happening and
@@ -1100,6 +1189,134 @@ target, because a note's timestamp is approximate and an exact hit would usually
 miss — leaving a click that visibly did nothing. Every node is escaped: the text
 is whatever Whisper heard and the label is whatever somebody typed into `referat
 label`, which is the same reason the sidebar builds its nodes with `textContent`.
+
+**A `[[Wikilink]]` renders as a bold link with the brackets taken off**, and the
+argument that used to keep them was about the wrong file. It was that `[[Anna]]`
+is how `/cleanup` spells a person, so a link quietly dropping the brackets would
+look like a different notation — true of `notes.md`, which is unchanged, and not
+true of a *rendering* somebody reads, where a note that is mostly people becomes
+a page of markup nobody rendered. Bold is what `richtext.py` and `digest.py` were
+already specified to do with one, so the window, a paste into Google Docs and a
+future digest now agree. A timestamp keeps its brackets for the opposite reason:
+they are the whole of its notation, and a bare `00:12:30` in prose is a duration.
+
+That is why **a person's link is put back from its URL and not from its text**
+when something is copied out. The rendering says `Anna` and the source said
+`[[Anna]]`, so the brackets have to come from somewhere, and the URL is the one
+place still holding the name as written. `unlink` therefore takes a `wiki` flag,
+because the identical `referat-person:` link means two different source
+notations: a wikilink in the notes, and a **speaker label** in the transcript,
+whose source is the bare `Anna:` it already renders as. The rendering cannot be
+read back to tell those apart, so the caller says which pane it is copying rather
+than the function guessing.
+
+**There are three `referat*` schemes and no more is intended.** `referat:` is a
+timestamp, `referat-person:` a name, `referat-meeting:` a meeting id — the third
+arriving with the day summary, whose bullets cite the meeting each came from.
+They are parsed in one module beside each other, so the two panes that answer
+them cannot come to spell one two ways.
+
+**Action items are parsed out of the notes, and never re-extracted.** Every
+`notes.md` carries a `## Action items` section that `/cleanup` wrote and nothing
+read; `referat/actions.py` is the parser and `referat actions` is the verb. It is
+a parse rather than a guess because it was audited before it was chosen: across
+the nine files then on disk, **64 items with no deviations** from
+`- **owner(s)** — text`, every one leading with a bold span and containing an em
+dash. Reading `notes.md` is allowed where reading a transcript would not be —
+the note is *derived*, so this does not breach *nothing is inferred from a
+transcript* — and the line it may not cross is the one the dashboard already
+records: **it may never tag a meeting, propose a tag, or reorder a queue.**
+
+**The due date comes from a cue clause and never from a bare date in the
+sentence**, and that distinction is measured rather than argued. Taking any
+literal `YYYY-MM-DD` gets five of sixty-four wrong, and every one of them wrong
+in the direction that matters — showing a deadline that is not one: *deferred
+until after 2026-09-04*, *at the 2026-09-09 meeting* twice, *this afternoon
+(2026-09-02)*, *starting Friday morning 2026-09-04*. So a date counts only as the
+item's own last clause, or after `by`, `before`, `due`, `deadline` or `on` with at
+most two alphabetic tokens and no comma in between — which real items need
+(`by midday 2026-09-03`) and which stops a match running through a clause
+boundary. Prose dates never become a `due`, because a guessed deadline is the
+same failure as a guessed name. **This is the sentence somebody will simplify
+back into a bug.**
+
+**Nothing about this writes `notes.md`.** Ticking, correcting and dropping are
+facts about the *reader*, and they live in `<meetings_dir>/actions.json`. Dropping
+an item removes it from a list and never from the note, which stays the record of
+what the meeting produced. **An item's identity is its wording** — a hash of the
+note's own sentence and never of a correction typed over it — so an edit is
+stable and revertible, and a re-cleanup that merely re-wraps a bullet keeps its
+key because the normalization collapses whitespace. One that genuinely re-words it
+orphans the tick, which is **kept and shown rather than pruned**: pruning on read
+would make a read into a write, and state that vanishes on its own is state
+nobody trusts. The same treatment a deleted project's orphaned tags get.
+`ActionsDB` mirrors `ProjectsDB` including its `unreadable` flag, and here the
+degradation cuts the dangerous way — with no state every item reads as *open*, so
+a broken file makes the dashboard's box **longer**, which is why every surface
+shows the complaint instead of quietly drawing the longer list.
+
+**They are tracked per person, and you choose whose list you are looking at.**
+`/cleanup` names an owner on every item, so the parse gets everybody's for free
+and discarding the rest would be throwing away something already paid for. The
+Actions tab has a picker over every owner actually found; the **dashboard box is
+always and only the owner's**, which is the split that keeps this from being two
+pages. `Unassigned` is its own entry rather than folded into anybody's list, and
+a collective like `All authors` is **not** resolved to include the owner even
+where it plainly does — working that out would be inferring an assignment. The
+tab is third, after Meetings, because an action item is a derivative of one
+meeting's notes rather than a fourth entity, and a row goes one tab left.
+
+**`referat/ui/actions.py` is fed rather than self-refreshing**, deliberately
+unlike the projects and people pages: `cli.actions_document` is pure over a
+`list_document` when handed one, exactly as `cli.pending` is, so the window reads
+once per refresh and hands the result to the tab, the dashboard box and the
+people page's count. It is therefore absent from `_refresh_page`, and putting it
+there would silently buy a sixth scan of both meeting roots.
+
+**The day summary is a glance, and `/standup` is its prompt.** `referat day
+[<date>]` spawns `claude` with `/standup <YYYY-MM-DD>` in the meetings folder,
+which reads that day's `notes.md` files and writes `<meetings_dir>/days/<date>.md`
+— about eight bullets, one short sentence each, what *changed* rather than what
+was discussed. Explicitly not a digest, because `notes.md` already is one; it is
+read in fifteen seconds before walking into the next thing, and pressing the
+button again rebuilds it once another meeting has been written up. It lists no
+action items and **counts none**: the first draft of the prompt asked for a count
+and produced *"about 45"* beside a parser that knew it was 83, and an estimate
+standing next to an exact number is the drift this codebase keeps deleting.
+
+`notes.py` runs both prompts through one `_spawn` — same cwd, same three allowed
+tools, `Bash` still the line that does not move, same streamed events — because
+all of that is a property of running Claude Code in that folder rather than of
+what is being written. The day version guards differently: the date is validated
+as exactly `%Y-%m-%d` **before** it reaches either the prompt or a path, zero
+padding included, since `strptime` accepts `2026-9-3` and would then name a second
+file for a day that already had one; and a day whose meetings have no notes is
+refused rather than spending a subprocess to write an empty file. There is still
+**no automatic LLM pass** — both are things somebody presses.
+
+**The summary is rendered rather than shown, and every bullet carries the id of
+the meeting it came from.** `/standup` ends each line with `[2026-09-03_1408]`,
+which is the one piece of provenance the file has, and
+`dashboard.day_markdown` spends it twice: the citation becomes a link that opens
+that meeting, and the **project the meeting is tagged with is put in front of the
+bullet**. The division is the point. A meeting's `tags` are in `meta.json`, which
+`/standup` is forbidden to read, and a project worked out from what a meeting
+sounded like is precisely *nothing is inferred from a transcript* being broken
+one layer downstream — so the prompt cites the meeting it certainly read and
+Python joins on the tag a human actually applied. Rendered through
+`rows.tags_text`, so an orphaned id gets the same trailing `?` it does in every
+other list, and an untagged meeting gets no prefix rather than a placeholder,
+because the untagged queue two boxes down is where that is said. A summary
+written before the prompt asked for citations still renders, with no prefix and
+no link, which is the honest picture of a line that does not say where it came
+from.
+
+`progress.DAY` is a third kind rather than a second `notes` job, because
+`progress.begin` *replaces* whatever is under a key and `notes:<date>` beside
+`notes:<meeting-id>` would stay distinct only because meeting ids carry `_HHMM`.
+The command center's notes queue carries `(kind, target)` pairs and the day
+summary joined it rather than growing a worker beside it: one rate limit, one
+folder, which is the argument that made it a queue at all.
 
 **Two flow rules.** *Project-scoped identification*: when a meeting carries a
 project, the names the labeling UI offers are the people associated with that
@@ -1167,6 +1384,9 @@ functions the CLI calls — `cli.list_document`, `cli.show_document`,
 `cli.apply_tags`,
 `cli.create_project`, `cli.rename_project`, `cli.set_description`,
 `cli.set_glossary`, `cli.remove_project`, `cli.write_notes`,
+`cli.write_day_summary`, `cli.actions_document`, `cli.actions_markdown`,
+`cli.select_actions`, `cli.owner_counts`, `cli.is_mine`, `cli.set_action_done`,
+`cli.dismiss_action`, `cli.edit_action`, `cli.prune_actions`,
 `cli.delete_meeting`, `cli.delete_warning`, `audio_state`,
 `meeting.format_duration`, `index.meeting_title`, `voices.unknown_speakers`,
 `label.label_document`, `label.name_speaker`, `label.forget_person` — and spawning a subprocess of its
@@ -1471,6 +1691,19 @@ the API ever gains one.
 | `speakers/`     | a few WAV snippets per unidentified speaker, for `referat label` |
 | `notes.md`      | step 10: written by `/cleanup`, never by Referat itself      |
 
+Two more live at the **folder** level rather than inside a meeting, beside
+`projects.json` and the generated `INDEX.md`:
+
+| File            | Contents                                                    |
+| --------------- | ----------------------------------------------------------- |
+| `actions.json`  | what has been done about the action items in the notes       |
+| `days/`         | `YYYY-MM-DD.md`, one glance per day, written by `/standup`   |
+
+Neither is ever inside a meeting folder, and both are excluded by name from
+`paths.list_meeting_dirs` even though neither holds a `meta.json` and so neither
+could pass its gate — `.voices/` is named there for the same reason, which is
+that a rule belongs where somebody would break it.
+
 `transcript.md`:
 
 ```
@@ -1562,7 +1795,20 @@ with an emptied `speaker_names`, which `referat delete` then refused to touch an
 every listing rendered as a lie. The one value never restored is `transcribing`
 itself — it is what a process killed outright leaves behind — and it clamps to
 `recorded`. **A hard kill can still leave it**, and no handler inside a process
-can promise otherwise; that residue is a known gap rather than a solved one.
+can promise otherwise — so since 2026-09-03 the promise is made from the other
+end instead. `meeting.reconcile_interrupted` runs at tray startup: jobs are
+threads inside this process, so a meeting still claiming `transcribing` when no
+live tray is transcribing was abandoned by a kill, a crash, a power loss, or a
+resume the CUDA context did not survive, and is clamped to `recorded` with
+`transcription.interrupted` recording why. Guarded on `rerun.busy_tray` — the
+existing answer to *is another process working on this*, reused rather than
+restated — and run **before** the tray writes its own `status.json`, or this
+process would be the one answering that question.
+
+The residue was worth closing because the lie is sticky: a meeting stuck at
+`transcribing` is refused by `referat delete`, drawn as in-flight by every
+surface that renders the lifecycle, and counted as busy by `busy_tray` itself, so
+the one command that would repair it is the one it blocks.
 
 **The meetings already on this machine are not migrated**, deliberately. The
 legacy values map on load, so every one of them reads correctly as `recorded` or
@@ -1646,11 +1892,11 @@ when the format changes — by hand, since nothing overwrites a seeded file.
 - **Type hints throughout**, `from __future__ import annotations` at the top of
   every module.
 - **Minimal dependencies.** Base install is tray + audio + UI; the ~3 GB
-  transcription stack lives behind the `transcribe` extra. There are two
-  deliberate exceptions in the base install, both recorded as exceptions rather
-  than left to look like inconsistencies. Step 16's WinRT toast library, taken
-  because a tray icon cannot raise an actionable notification on its own. And
-  step 20's **PySide6-Essentials**, which is the command center and, because Qt
+  transcription stack lives behind the `transcribe` extra. There is one
+  deliberate exception in the base install, recorded as an exception rather than
+  left to look like an inconsistency. (Step 16's WinRT toast library would have
+  been a second; step 16 is declined, so it is not taken — see Architecture.)
+  Step 20's **PySide6-Essentials**, which is the command center and, because Qt
   owns the tray icon, is now on the recording path — see the Smart App Control
   paragraphs in Architecture for the audit that gated it and cleared it.
   *Essentials* and not the full `PySide6`: QtWebEngine lives in `PySide6-Addons`

@@ -34,7 +34,12 @@ class State(StrEnum):
 
 
 LEGAL: dict[State, frozenset[State]] = {
-    State.IDLE: frozenset({State.RECORDING}),
+    # IDLE -> TRANSCRIBING is the resumed-job edge, and the only way into
+    # TRANSCRIBING that did not just come off a recording. A meeting interrupted
+    # by a kill or a lid close is re-queued when the tray next starts, and the
+    # tray is idle at that moment; without this edge the machine would have to
+    # either lie about its state or pretend to record something first.
+    State.IDLE: frozenset({State.RECORDING, State.TRANSCRIBING}),
     State.RECORDING: frozenset({State.PAUSED, State.STOPPED}),
     State.PAUSED: frozenset({State.RECORDING, State.STOPPED}),
     # STOPPED -> IDLE covers a meeting with nothing worth transcribing.

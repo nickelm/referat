@@ -33,6 +33,7 @@ column this step exists to escape.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import queue
 import threading
@@ -61,6 +62,7 @@ from PySide6.QtWidgets import (
 from referat import cli, paths, progress
 from referat.state import State
 from referat.ui import icons, speakers, tags
+from referat.ui.actions import ActionsPage
 from referat.ui.activity import ActivityPage
 from referat.ui.dashboard import DashboardPage
 from referat.ui.people import PeoplePage
@@ -119,11 +121,30 @@ class CommandCenter(QMainWindow):
         self.resize(1180, 760)
 
         self._document: dict[str, Any] = {"meetings": [], "projects": {}}
+        self._actions: dict[str, Any] = {
+            "owner": "",
+            "complaint": "",
+            "items": [],
+            "orphans": [],
+            "counts": {},
+        }
+        """The action items, read once per refresh and handed to two surfaces.
+
+        Beside `_document` rather than inside it because the two are built by
+        different functions and `list_document` is a published shape the
+        extension still reads. Both are *handed* to the dashboard and to the
+        actions page, which is what keeps a sixth tab from costing a sixth scan
+        of both meeting roots.
+        """
         self._selected: str | None = None
-        self._notes_queue: queue.Queue[str] = queue.Queue()
+        self._notes_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._notes_worker: threading.Thread | None = None
-        self._queued: set[str] = set()
-        """What is already on the notes queue, so a double click queues once."""
+        self._queued: set[tuple[str, str]] = set()
+        """What is already on the claude queue, so a double click queues once.
+
+        `(kind, target)` pairs, matching the queue: a day summary and a
+        meeting's notes are different jobs even where the strings collide.
+        """
 
         self.record_button = QPushButton("Record")
         self.pause_button = QPushButton("Pause")
@@ -145,13 +166,20 @@ class CommandCenter(QMainWindow):
             action.triggered.connect(lambda _checked=False, n=steps: self.viewer.zoom(n))
             self.addAction(action)
 
-        self.copy_action = QAction("Copy as plain text", self)
-        # Ctrl+Shift+C, leaving Ctrl+C to the pane's own selection copy. Both end
-        # up plain here, but the pane's is Qt's and this one is the whole
-        # document, so they are two operations and want two keys.
+        # Two flavours and two keys, because the paste target decides which is
+        # wanted: Markdown source pastes into Claude, formatted text pastes into
+        # Google Docs with real headings and bullets. One clipboard carrying both
+        # would decide for the paste — Word, Docs and Outlook all prefer an HTML
+        # flavour when one is there. Ctrl+Alt+C rather than anything on Ctrl+F,
+        # which a transcript viewer wants for a find one day.
+        self.copy_action = QAction("Copy as Markdown", self)
         self.copy_action.setShortcut("Ctrl+Shift+C")
-        self.copy_action.triggered.connect(self._on_copy)
+        self.copy_action.triggered.connect(lambda _checked=False: self._on_copy(False))
         self.addAction(self.copy_action)
+        self.copy_formatted_action = QAction("Copy as formatted text", self)
+        self.copy_formatted_action.setShortcut("Ctrl+Alt+C")
+        self.copy_formatted_action.triggered.connect(lambda _checked=False: self._on_copy(True))
+        self.addAction(self.copy_formatted_action)
 
         self.record_button.clicked.connect(self.app.start_meeting)
         self.pause_button.clicked.connect(self.app.on_toggle_pause)
@@ -271,6 +299,10 @@ class CommandCenter(QMainWindow):
         self.viewer = Viewer()
         self.viewer.external_requested.connect(self._on_external_link)
         self.viewer.person_requested.connect(self.open_person)
+        # The viewer writes the sentence, this shows it: it is the half that
+        # knows whether a selection or the whole document went, and the status
+        # bar is the window's.
+        self.viewer.copied.connect(lambda message: self.statusBar().showMessage(message, 4000))
 
         # Vertical, and that is the fix for the complaint that the list needed
         # horizontal scrolling. Six columns in the three-sevenths of a window a
@@ -301,10 +333,20 @@ class CommandCenter(QMainWindow):
         self.pages = QTabWidget()
         self.dashboard = DashboardPage()
         self.dashboard.meeting_requested.connect(self.open_meeting)
+        # The day summary's own links, onto the same two slots the viewer's go to:
+        # a name means one thing wherever it is rendered, and so does a URL.
+        self.dashboard.person_requested.connect(self.open_person)
+        self.dashboard.external_requested.connect(self._on_external_link)
+        self.dashboard.action_requested.connect(self.open_action)
+        self.dashboard.summary_requested.connect(self._on_summarize)
+        self.actions_page = ActionsPage()
+        self.actions_page.meeting_requested.connect(self.open_meeting)
+        self.actions_page.person_requested.connect(self.open_person)
         self.projects = ProjectsPage(self.app.config)
         self.people = PeoplePage(self.app.config)
         self.people.meeting_requested.connect(self.open_meeting)
         self.people.project_requested.connect(self.open_project)
+        self.people.actions_requested.connect(self.open_person_actions)
         self.activity_page = ActivityPage()
         # First, and therefore the tab the window opens on: the meetings list is
         # an inventory of everything there has ever been, and the question
@@ -312,6 +354,11 @@ class CommandCenter(QMainWindow):
         # them. Being first is the whole of phase 6's claim.
         self.pages.addTab(self.dashboard, self._glyph("dashboard"), "Dashboard")
         self.pages.addTab(self.meetings_page, self._glyph("list"), "Meetings")
+        # Third, and not a fourth entity: an action item is a derivative of one
+        # meeting's notes, and activating a row sends you one tab to the left.
+        # Projects and People are joins *across* meetings and belong together on
+        # the far side of it.
+        self.pages.addTab(self.actions_page, self._glyph("check"), "Actions")
         self.pages.addTab(self.projects, self._glyph("tag"), "Projects")
         self.pages.addTab(self.people, self._glyph("person"), "People")
         # Last, because it is about the machine rather than about one of the
@@ -413,6 +460,10 @@ class CommandCenter(QMainWindow):
         self._reload()
         self._rebuild()
         self.dashboard.set_document(self._document)
+        self.dashboard.set_actions(self._actions)
+        self.dashboard.set_days(self._read_days())
+        self.actions_page.set_document(self._actions)
+        self.people.set_actions(self._actions)
         self._refresh_page(self.pages.currentWidget())
 
     def _on_page_changed(self, index: int) -> None:
@@ -434,13 +485,29 @@ class CommandCenter(QMainWindow):
             page.refresh()
 
     def _reload(self) -> None:
-        """Re-read `list_document`, keeping the previous list if it will not read."""
+        """Re-read `list_document` and the action items, keeping the old ones on failure.
+
+        The action items are built **from the listing just read** rather than
+        from a second scan: :func:`referat.cli.actions_document` is pure over a
+        `list_document` when it is handed one, exactly as `cli.pending` is. So
+        the Actions tab and the dashboard's box together cost one `notes.md` per
+        meeting and no extra walk of either meeting root.
+
+        Two reads and two `except`s, because they fail independently: an
+        unreadable `notes.md` must not cost the meetings list, and a meetings
+        folder that has gone away must not leave a stale action list looking
+        current.
+        """
         try:
             self._document = cli.list_document(self.app.config)
         except Exception:
             # A meetings folder that has gone away, a meta.json mid-write. The
             # window keeps the list it had rather than emptying itself.
             log.exception("could not read the meetings")
+        try:
+            self._actions = cli.actions_document(self.app.config, self._document)
+        except Exception:
+            log.exception("could not read the action items")
 
     def _matches(self, meeting: dict[str, Any], needle: str, known: dict[str, str]) -> bool:
         """The filter: the untagged toggle, then the search box.
@@ -708,7 +775,7 @@ class CommandCenter(QMainWindow):
             )
             return
 
-        self._enqueue_notes([meeting_id])
+        self._enqueue_notes([(progress.NOTES, meeting_id)])
 
     def _on_notes_all(self) -> None:
         """Queue every promoted meeting that has a transcript and no notes.
@@ -748,32 +815,73 @@ class CommandCenter(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self._enqueue_notes(wanted)
+        self._enqueue_notes([(progress.NOTES, mid) for mid in wanted])
 
-    def _enqueue_notes(self, meeting_ids: list[str]) -> None:
-        """Put meetings on the notes queue and make sure the worker is running.
+    def _read_days(self) -> dict[str, str]:
+        """Today's and yesterday's summaries, as text, for the dashboard's box.
 
-        **One worker and a FIFO**, rather than a thread per meeting. Each pass is
-        a `claude` subprocess doing real work, and ten at once would be ten
+        Read here rather than in the page, which keeps the dashboard's promise
+        that it opens no file — the same arrangement as the two documents it is
+        handed. Two days because those are the two the box is for: what has
+        happened so far, and what happened before it. A day with no summary maps
+        to the empty string rather than being left out, so the picker can still
+        offer it and the button still has something to write.
+        """
+        today = dt.date.today()
+        days: dict[str, str] = {}
+        for offset in (0, 1):
+            day = (today - dt.timedelta(days=offset)).isoformat()
+            path = cli.day_summary_path(self.app.config, day)
+            try:
+                days[day] = path.read_text(encoding="utf-8")
+            except OSError:
+                days[day] = ""
+        return days
+
+    def _on_summarize(self, day: str) -> None:
+        """Queue a `/standup` for one day, on the same worker the notes use.
+
+        One rate limit and one folder, which is the argument that made notes a
+        queue in the first place; a day summary racing a cleanup pass would be
+        two `claude` processes writing into the same directory.
+        """
+        self._enqueue_notes([(progress.DAY, day)])
+
+    def _job_key(self, kind: str, target: str) -> str:
+        """The :mod:`referat.progress` key for one queued job, whichever kind it is."""
+        from referat import notes as notes_module
+
+        if kind == progress.DAY:
+            return notes_module.day_progress_key(target)
+        return notes_module.progress_key(target)
+
+    def _enqueue_notes(self, jobs: list[tuple[str, str]]) -> None:
+        """Put `(kind, target)` jobs on the claude queue and start the worker.
+
+        **One worker and a FIFO**, rather than a thread per job. Each pass is a
+        `claude` subprocess doing real work, and ten at once would be ten
         subprocesses competing for the same rate limit and writing into the same
         folder. Sequential is also what makes the queue legible.
 
-        Each id is announced to :mod:`referat.progress` as *queued* the moment it
+        The queue carries a *pair* rather than a bare meeting id, which is what
+        let the day summary join it rather than grow a second worker beside it:
+        the two write into the same folder against the same rate limit, so they
+        are the same queue by the argument that made it a queue at all. `kind` is
+        :data:`referat.progress.NOTES` or :data:`referat.progress.DAY`, and the
+        loop dispatches on it.
+
+        Each job is announced to :mod:`referat.progress` as *queued* the moment it
         is accepted, so the activity tab shows the whole backlog rather than only
-        the one in flight. `generate_notes` re-announces the same key when it
+        the one in flight. The generator re-announces the same key when it
         actually starts, which replaces the queued entry in place.
         """
-        from referat import notes as notes_module
-
-        fresh = [mid for mid in meeting_ids if mid not in self._queued]
+        fresh = [job for job in jobs if job not in self._queued]
         if not fresh:
             return
-        for meeting_id in fresh:
-            self._queued.add(meeting_id)
-            progress.begin(
-                notes_module.progress_key(meeting_id), progress.NOTES, meeting_id, "queued"
-            )
-            self._notes_queue.put(meeting_id)
+        for kind, target in fresh:
+            self._queued.add((kind, target))
+            progress.begin(self._job_key(kind, target), kind, target, "queued")
+            self._notes_queue.put((kind, target))
         if self._notes_worker is None or not self._notes_worker.is_alive():
             self._notes_worker = threading.Thread(
                 target=self._notes_loop, name="notes", daemon=True
@@ -794,27 +902,47 @@ class CommandCenter(QMainWindow):
         """
         from referat import notes as notes_module
 
+        # Held for the whole queue rather than per pass, and dropped in a
+        # `finally` so an exception on the way out cannot leave the machine
+        # awake forever. `claude` is a subprocess that can think for minutes with
+        # nobody touching the keyboard, which is precisely the idle timer's case;
+        # the reason is separate from the recorder's so neither can drop the
+        # other's hold. See :mod:`referat.power`.
+        self.app.power.want("notes", True)
+        try:
+            self._drain_notes(notes_module)
+        finally:
+            self.app.power.want("notes", False)
+
+    def _drain_notes(self, notes_module: Any) -> None:
+        """The queue loop itself, with the sleep hold already taken.
+
+        Dispatches on the job's kind. Both branches go through a guarded `cli`
+        function and neither knows anything about how the pass is run.
+        """
         while True:
             try:
-                meeting_id = self._notes_queue.get_nowait()
+                kind, target = self._notes_queue.get_nowait()
             except queue.Empty:
                 return
+            what = "Day summary" if kind == progress.DAY else "Notes"
             try:
-                outcome = cli.write_notes(self.app.config, meeting_id)
+                if kind == progress.DAY:
+                    outcome = cli.write_day_summary(self.app.config, target)
+                else:
+                    outcome = cli.write_notes(self.app.config, target)
                 self.app.notify(
-                    outcome.message
-                    if outcome.ok
-                    else f"Notes for {meeting_id}: {outcome.message}"
+                    outcome.message if outcome.ok else f"{what} for {target}: {outcome.message}"
                 )
             except Exception:
-                log.exception("could not generate notes for %s", meeting_id)
-                self.app.notify(f"Could not generate notes for {meeting_id} - see the log.")
+                log.exception("could not run %s for %s", kind, target)
+                self.app.notify(f"Could not write {what.lower()} for {target} - see the log.")
             finally:
-                # Whatever happened, the key must go: `generate_notes` ends its
-                # own, but a failure before it began would leave the *queued*
-                # entry on the activity tab forever.
-                progress.end(notes_module.progress_key(meeting_id))
-                self._queued.discard(meeting_id)
+                # Whatever happened, the key must go: the generator ends its own,
+                # but a failure before it began would leave the *queued* entry on
+                # the activity tab forever.
+                progress.end(self._job_key(kind, target))
+                self._queued.discard((kind, target))
                 self._notes_queue.task_done()
 
     def _on_delete(self) -> None:
@@ -853,11 +981,28 @@ class CommandCenter(QMainWindow):
         self._selected = None
         self.refresh()
 
-    def _on_copy(self) -> None:
-        """Put the visible document on the clipboard as plain text."""
-        what = self.viewer.copy_current()
-        if what:
-            self.statusBar().showMessage(f"Copied {what} as plain text.", 4000)
+    def _on_copy(self, formatted: bool) -> None:
+        """Put whatever the page in front is showing on the clipboard.
+
+        Dispatched on the current page rather than sent straight to the viewer.
+        It used to go there unconditionally, which was right while every tab but
+        one held no copyable document; with an Actions tab, Ctrl+Shift+C on it
+        would have copied a transcript somebody was not looking at.
+
+        **This window is the one place either key is bound.** The viewer's own
+        two actions — on its context menu and its corner button — carry the key
+        as a label and not as a shortcut, because two claims on one shortcut in
+        one window is a shortcut Qt fires neither half of.
+
+        The viewer says its own sentence through `copied`; this only speaks for
+        the Actions page, which has no signal and one document.
+        """
+        if self.pages.currentWidget() is self.actions_page:
+            if self.actions_page.copy_shown(formatted=formatted):
+                flavour = "formatted text" if formatted else "Markdown"
+                self.statusBar().showMessage(f"Copied the action items as {flavour}.", 4000)
+            return
+        self.viewer.copy_formatted() if formatted else self.viewer.copy_markdown()
 
     # --- What the slow things are doing --------------------------------------
 
@@ -908,12 +1053,20 @@ class CommandCenter(QMainWindow):
         self.pages.setCurrentWidget(self.people)
         self.people.select(name)
 
-    def open_meeting(self, meeting_id: str) -> None:
+    def open_meeting(self, meeting_id: str, at: float = -1.0) -> None:
         """Show one meeting on the Meetings tab, from wherever it was clicked.
 
         The filters are cleared first: a meeting reached by following a link from
         somewhere else must not be hidden by a search somebody typed ten minutes
         ago, which would look exactly like a link that did nothing.
+
+        `at` is the second to scroll the transcript to, for an action item that
+        cited one. **Negative means do not scroll**, and that distinction earns
+        its place: :meth:`referat.ui.viewer.Viewer.goto` brings the *transcript*
+        tab forward, so calling it unconditionally would drag every link into the
+        evidence when the viewer deliberately opens on the notes. It has to run
+        after `refresh()`, which is what fills the viewer, and after `_show`'s own
+        `moveCursor` to the top.
         """
         for widget, clear in (
             (self.untagged_only, lambda: self.untagged_only.setChecked(False)),
@@ -925,6 +1078,30 @@ class CommandCenter(QMainWindow):
         self._selected = meeting_id
         self.pages.setCurrentWidget(self.meetings_page)
         self.refresh()
+        if at >= 0:
+            self.viewer.goto(at)
+
+    def open_action(self, key: str) -> None:
+        """Show one action item on the Actions tab, from the dashboard's box.
+
+        The filters are cleared for the reason :meth:`open_meeting` clears its
+        own: a row followed from somewhere else landing behind a stale search box
+        looks exactly like a link that did nothing. The person picker is moved to
+        whoever owns the item rather than left alone, since the box shows the
+        owner's items and the picker may be sitting on somebody else.
+        """
+        item = next((i for i in self._actions["items"] if i["key"] == key), None)
+        self.pages.setCurrentWidget(self.actions_page)
+        self.actions_page.clear_filters()
+        if item is not None and item["owners"]:
+            self.actions_page.select_person(item["owners"][0])
+        self.actions_page.set_document(self._actions)
+
+    def open_person_actions(self, name: str) -> None:
+        """Show one person's action items, from their page."""
+        self.pages.setCurrentWidget(self.actions_page)
+        self.actions_page.clear_filters()
+        self.actions_page.select_person(name)
 
     def open_project(self, pid: str) -> None:
         """Show one project on the Projects tab."""

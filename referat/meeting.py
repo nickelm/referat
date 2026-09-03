@@ -374,3 +374,60 @@ def load_meetings(config: Config) -> list[Meeting]:
     dirs = [d for root in config.meeting_roots() for d in paths.list_meeting_dirs(root)]
     found = [Meeting.load(d) for d in sorted(dirs, key=lambda p: p.name)]
     return [m for m in found if m is not None]
+
+
+def reconcile_interrupted(config: Config) -> list[Meeting]:
+    """Clamp meetings left mid-transcription by a process that is gone.
+
+    `transcribing` is the one lifecycle value no restart can inherit. Jobs run in
+    daemon threads inside the tray, so a process that is not running has no job
+    running either: any meeting still claiming that status was abandoned by a
+    kill, a crash, a power loss, or a resume the CUDA context did not survive.
+    `transcribe_meeting`'s own handler covers the interrupts it *can* see, and
+    `CLAUDE.md` records the rest as a known gap — "a hard kill can still leave
+    it, and no handler inside a process can promise otherwise". This is that gap
+    closed from the other end: not by a handler promising more than it can, but
+    by the next start reading the residue and correcting it.
+
+    It matters beyond tidiness because the lie is sticky. A meeting stuck at
+    `transcribing` is refused by `referat delete`, rendered as in-flight by every
+    surface that draws the lifecycle, and counted as busy by
+    :func:`referat.rerun.busy_tray` — so the one command that would repair it is
+    the one it blocks.
+
+    The clamp is :attr:`MeetingStatus.RECORDED` and the reasoning is
+    `transcribe_meeting`'s, deliberately: nothing on disk was changed by the run
+    that died, so what describes the folder is what described it before —  audio
+    and no transcript this process is willing to vouch for. `interrupted` is
+    written the same way and for the same reason, so an abandoned run is recorded
+    rather than hidden; `why` names this path so it is distinguishable from a
+    Ctrl+C, which is a different story about the same field.
+
+    **The caller must have established that no live tray is transcribing** —
+    :func:`referat.rerun.busy_tray` is that question — because this cannot tell a
+    dead process's residue from another process's work in progress.
+    """
+    repaired: list[Meeting] = []
+    for meeting in load_meetings(config):
+        if meeting.status is not MeetingStatus.TRANSCRIBING:
+            continue
+        meeting.status = MeetingStatus.RECORDED
+        meeting.transcription = {
+            **meeting.transcription,
+            "interrupted": {
+                "at": dt.datetime.now().isoformat(timespec="seconds"),
+                "why": "the transcribing process did not survive",
+            },
+        }
+        try:
+            meeting.save()
+        except Exception:
+            # A meeting that cannot be written back is worth a line, never a tray
+            # that refuses to start: the recorder comes up regardless.
+            log.exception("could not reconcile %s", meeting.id)
+            continue
+        log.warning(
+            "%s was left transcribing by a process that is gone; back to recorded", meeting.id
+        )
+        repaired.append(meeting)
+    return repaired

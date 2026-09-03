@@ -13,6 +13,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -108,6 +109,28 @@ PROJECTS_JSON = "projects.json"
 
 Owned by :mod:`referat.projects` and machine-written; resolve it through
 :func:`referat.projects.projects_path` rather than joining this on by hand."""
+
+ACTIONS_JSON = "actions.json"
+"""What has been done about the action items `/cleanup` wrote into the notes.
+
+Beside `projects.json`, machine-written and rewritten whole, and resolved through
+:func:`referat.actions.actions_path` rather than joined on by hand — the same
+arrangement, for the same reason.
+
+**It holds state about items and never the items themselves.** An action item
+lives in its meeting's `notes.md`, which this file may not edit and Referat may
+not write; what is kept here is the tick, the dismissal and any correction to the
+wording, keyed on the wording the note gave. So deleting this file loses what has
+been done and loses no action item.
+"""
+
+DAYS_DIR = "days"
+"""`/standup`'s output: one `YYYY-MM-DD.md` glancing over that day's meetings.
+
+Generated and never hand-edited, like `INDEX.md`. It sits at the meetings folder
+root rather than inside any meeting because a day spans several of them, and it
+is excluded by name in :func:`list_meeting_dirs` — see the note there.
+"""
 
 SPEAKERS_DIR = "speakers"
 """Per-meeting folder of WAV snippets, a few per speaker `referat label` has yet
@@ -229,13 +252,22 @@ def voices_dir(meetings_dir: Path, override: Path | None = None) -> Path:
 
 
 def list_meeting_dirs(meetings_dir: Path) -> list[Path]:
-    """All meeting folders, oldest first. A folder counts if it has a meta.json."""
+    """All meeting folders, oldest first. A folder counts if it has a meta.json.
+
+    :data:`VOICES_DIR` and :data:`DAYS_DIR` are named here even though neither
+    holds a `meta.json` and so neither could pass the gate anyway. That is
+    deliberate: a rule belongs where somebody would break it, and the thing that
+    would break it is somebody one day relaxing the `meta.json` test — at which
+    point the voiceprints and the day summaries would both start being listed as
+    meetings, and only one of those two mistakes is easy to notice.
+    """
     if not meetings_dir.is_dir():
         return []
+    skip = {VOICES_DIR, DAYS_DIR}
     dirs = [
         p
         for p in meetings_dir.iterdir()
-        if p.is_dir() and p.name != VOICES_DIR and (p / META_JSON).exists()
+        if p.is_dir() and p.name not in skip and (p / META_JSON).exists()
     ]
     return sorted(dirs, key=lambda p: p.name)
 
@@ -293,10 +325,46 @@ def write_text_atomic(path: Path, text: str) -> None:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+REPLACE_ATTEMPTS = 5
+REPLACE_BACKOFF = 0.05
+"""How hard :func:`write_text_atomic` tries to win a race with a sync client.
+
+The meetings folder is normally inside Dropbox - that is the whole reason
+recording happens in staging - and a sync client opens a file it is uploading
+without sharing delete access, which makes `os.replace` onto that name fail with
+`PermissionError` (`WinError 5`) for as long as it holds it. Measured on
+2026-09-03: writing `actions.json` twice in quick succession failed the second
+time and succeeded on the next attempt a moment later.
+
+It is a **transient** conflict and so it is retried rather than reported. Without
+this, the failure lands at random on whatever was being written - a tick, a tag,
+the `meta.json` at the end of a transcription - which is the worst possible shape
+for a bug in the files this project rewrites on every mutation. Five attempts
+over about a third of a second; a lock still held after that is not a sync client
+finishing an upload, and the error is then the honest answer.
+
+Nothing about the atomicity changes: a retry re-attempts the *rename*, so a
+reader still sees either the old file or the new one and never a partial write.
+"""
+
+
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    """`os.replace`, retried briefly against a sync client. See :data:`REPLACE_ATTEMPTS`."""
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            log.debug("replace of %s blocked, retrying (%d)", path, attempt + 1)
+            time.sleep(REPLACE_BACKOFF * (attempt + 1))
 
 
 def write_json_atomic(path: Path, payload: dict[str, object]) -> None:

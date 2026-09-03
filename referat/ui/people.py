@@ -110,11 +110,29 @@ class PeoplePage(QWidget):
     project_requested = Signal(str)
     """A project on this page was clicked. The window shows it on the Projects tab."""
 
+    actions_requested = Signal(str)
+    """This person's action items were asked for. The window opens the Actions tab.
+
+    A page rather than a fourth list here, and deliberately: an action item
+    belongs to a *meeting*, which this page already lists, and copying them in
+    would be a second surface for something the Actions tab exists to be. What
+    this adds is the count and the way there.
+    """
+
     def __init__(self, config: Config, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self._document: dict[str, Any] = {"owner": "", "projects": {}, "people": []}
         self._selected: str | None = None
+        self._open_actions: dict[str, int] = {}
+        """`{name: open action items}`, handed over by the window.
+
+        Fed rather than read, because this page is one of the two that *do*
+        read for themselves and the action items are already built once per
+        refresh for the dashboard and the Actions tab. A third read of every
+        `notes.md` to put a number on a button would be the thing this
+        codebase keeps deleting.
+        """
         self._loading = False
         """Set while the list is being rebuilt, so reselecting is not a click."""
 
@@ -161,8 +179,17 @@ class PeoplePage(QWidget):
         self.forget_button.setAutoDefault(False)
         self.forget_button.clicked.connect(self._on_forget)
 
+        # Beside the heading and before the destructive one: this is the thing
+        # somebody most often wants from a person's page, and Forget is the thing
+        # they most rarely want.
+        self.actions_button = QPushButton("Action items")
+        self.actions_button.setIcon(icons.glyph("check", self.palette().windowText().color().name()))
+        self.actions_button.setAutoDefault(False)
+        self.actions_button.clicked.connect(self._on_actions)
+
         title_row = QHBoxLayout()
         title_row.addWidget(self.heading, 1)
+        title_row.addWidget(self.actions_button)
         title_row.addWidget(self.forget_button)
 
         self.prints = QTreeWidget()
@@ -311,12 +338,40 @@ class PeoplePage(QWidget):
         self._selected = name
         self._fill_detail(name)
 
+    def set_actions(self, document: dict[str, Any]) -> None:
+        """Take the open-item counts per person from the window's action document.
+
+        Counted here rather than read: the window already built this document for
+        the dashboard and the Actions tab, so the number costs a walk of a list
+        that is already in memory.
+        """
+        counts: dict[str, int] = {}
+        for item in document.get("items", []):
+            if item["done"] or item["dismissed"]:
+                continue
+            for owner in item["owners"]:
+                counts[owner] = counts.get(owner, 0) + 1
+        self._open_actions = counts
+        self._fill_detail(self._selected)
+
+    def _on_actions(self) -> None:
+        if self._selected:
+            self.actions_requested.emit(self._selected)
+
     def _fill_detail(self, name: str | None) -> None:
         """Fill the right-hand pane from the document. Never from the widgets."""
         self._clear_message()
         self.prints.clear()
         self.appearances.clear()
         self.projects.clear()
+
+        open_items = self._open_actions.get(name or "", 0)
+        self.actions_button.setText(
+            f"Action items ({open_items})" if open_items else "Action items"
+        )
+        # Disabled with nothing open, rather than hidden: the button keeps its
+        # place, which is the same rule Forget and the recorder's three follow.
+        self.actions_button.setEnabled(bool(open_items))
 
         person = self._person(name)
         if person is None:

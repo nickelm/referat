@@ -19,7 +19,7 @@ their own palette so a dark theme does not get black icons on a dark tab bar.
 **Drawn rather than shipped**, and that is a dependency decision rather than an
 aesthetic one. An icon font or an SVG set is a package in `pyproject.toml`, and
 the base install is on the recording path — every file in it is something Smart
-App Control can one day refuse. Eleven glyphs of `QPainter` are two hundred lines
+App Control can one day refuse. Fourteen glyphs of `QPainter` are three hundred lines
 that cannot be blocked, cannot be missing at runtime, and scale to whatever DPI
 the window is opened on. It is also the last place a raster asset would still be
 readable: these are drawn at 64 px and asked for at 16.
@@ -236,12 +236,36 @@ def _page(painter: QPainter, size: int) -> None:
     painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
 
+def _copy(painter: QPainter, size: int) -> None:
+    """Two sheets, one behind the other: the icon everything else uses for a copy.
+
+    Deliberately the conventional shape rather than an invention. This is the one
+    glyph in the set somebody has to recognise *without* reading anything beside
+    it — it sits alone in the corner of the tab bar — and the whole point of a
+    convention is that it is already known.
+
+    The back sheet is separated from the front one by a cleared halo rather than
+    by an outline, which is how `_page` punches its lines: the set is filled
+    shapes throughout, and a stroked gap would read as an icon borrowed from
+    somewhere else.
+    """
+    radius = size / 16
+    back = QRectF(size * 0.12, size * 0.08, size * 0.54, size * 0.62)
+    front = QRectF(size * 0.34, size * 0.30, size * 0.54, size * 0.62)
+    painter.drawRoundedRect(back, radius, radius)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    halo = size * 0.06
+    painter.drawRoundedRect(front.adjusted(-halo, -halo, halo, halo), radius, radius)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+    painter.drawRoundedRect(front, radius, radius)
+
+
 def _pulse(painter: QPainter, size: int) -> None:
     """A trace, for the page that is about what the machine is doing."""
     pen = painter.pen()
     pen.setColor(QColor(painter.brush().color()))
     # The style as well as the colour: `_fill` hands every glyph a `NoPen`, since
-    # the other nine are filled shapes, and setting a colour on a pen that is not
+    # every other glyph is a filled shape, and setting a colour on a pen that is not
     # going to be stroked draws exactly nothing.
     pen.setStyle(Qt.PenStyle.SolidLine)
     pen.setWidthF(size / 9)
@@ -253,6 +277,48 @@ def _pulse(painter: QPainter, size: int) -> None:
     for x, y in ((0.30, 0.52), (0.40, 0.24), (0.55, 0.78), (0.68, 0.44), (0.88, 0.44)):
         path.lineTo(QPointF(size * x, size * y))
     painter.drawPath(path)
+
+
+def _check(painter: QPainter, size: int) -> None:
+    """A tick, for the tab about work that gets finished.
+
+    Stroked rather than filled, which makes it the second exception to the rule
+    :data:`GLYPHS` states — for the same reason `_pulse` is the first. A tick has
+    no inside; filling its outline gives a lozenge nobody reads as a tick at
+    sixteen pixels. The pen setup is `_pulse`'s and is deliberately identical, so
+    the two stroked glyphs have the same weight as each other rather than each
+    having been tuned alone.
+    """
+    pen = painter.pen()
+    pen.setColor(QColor(painter.brush().color()))
+    pen.setStyle(Qt.PenStyle.SolidLine)
+    pen.setWidthF(size / 8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath(QPointF(size * 0.18, size * 0.54))
+    path.lineTo(QPointF(size * 0.40, size * 0.76))
+    path.lineTo(QPointF(size * 0.82, size * 0.26))
+    painter.drawPath(path)
+
+
+def _calendar(painter: QPainter, size: int) -> None:
+    """A day, for the summary box and for anything that is about a date.
+
+    Filled, like every glyph but `_pulse`: a page with two tabs on top reads as a calendar
+    at this size, and the holes are punched out rather than drawn, so it stays a
+    single filled shape.
+    """
+    body = QPainterPath()
+    body.addRoundedRect(
+        QRectF(size * 0.14, size * 0.22, size * 0.72, size * 0.64), size * 0.10, size * 0.10
+    )
+    for x in (0.30, 0.62):
+        body.addRect(QRectF(size * x, size * 0.10, size * 0.08, size * 0.20))
+    window = QPainterPath()
+    window.addRect(QRectF(size * 0.22, size * 0.44, size * 0.56, size * 0.34))
+    painter.drawPath(body.subtracted(window))
 
 
 def _trash(painter: QPainter, size: int) -> None:
@@ -288,8 +354,11 @@ GLYPHS: dict[str, Callable[[QPainter, int], None]] = {
     "page": _page,
     "pulse": _pulse,
     "trash": _trash,
+    "check": _check,
+    "calendar": _calendar,
+    "copy": _copy,
 }
-"""Eleven shapes, each drawn filled in one colour.
+"""Fourteen shapes, each drawn filled in one colour.
 
 One style throughout — solid, no outlines, no two-tone — because a set that mixes
 filled and stroked glyphs reads as icons borrowed from two places, which at this

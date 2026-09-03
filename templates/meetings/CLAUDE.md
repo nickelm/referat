@@ -13,6 +13,8 @@ One subfolder per meeting, named `YYYY-MM-DD_HHMM` (local start time, with a
 ```
 INDEX.md           the dashboard: one row per meeting. Generated — see below
 projects.json      the projects a meeting can be tagged with. Machine-written
+actions.json       what has been done about the action items. Machine-written
+days/              one YYYY-MM-DD.md per day, from `/standup`. Generated
 2026-08-27_1400/
   mic.wav          my microphone — and the room — mono 16 kHz
   system.wav       system audio output (WASAPI loopback) — everyone on the call
@@ -20,7 +22,7 @@ projects.json      the projects a meeting can be tagged with. Machine-written
   meta.json        duration, pause intervals, model and device used
   speakers/        WAV snippets of speakers nobody has named yet
   notes.md         written by `/cleanup`. The only file here you write
-.claude/           the `/cleanup` command, and the rule denying `.voices/`
+.claude/           the `/cleanup` and `/standup` commands, and the `.voices/` deny rule
 .vscode/           opens Markdown rendered in this workspace
 ```
 
@@ -244,6 +246,65 @@ notes by hand:
 `[[Wikilinks]]` mark people and projects: `[[Anna]]`, `[[Intake pipeline]]`. They
 have no target on disk — they are what connects notes to each other, and what a
 project digest is assembled around.
+
+### The action items are parsed, so their shape matters
+
+Referat reads the `## Action items` section of every `notes.md` and shows the
+items on its own page, with an owner, a due date and the meeting each came from.
+So that section is **not free prose** — keep the shape `/cleanup` writes:
+
+```
+- **[[Anna]]** — do the thing, by 2026-09-04 [00:12:40]
+- **[[Anna]]** and **[[Bo]]** — do the other thing, no date
+- **Unassigned** — nobody agreed to this one
+```
+
+One item per `- ` bullet at the left margin; wrapped lines are indented and are
+joined back together, so never use a nested bullet. Owners are **bold**, one or
+several, wikilinked or not, separated by commas or `and`; `Unassigned` where the
+meeting named nobody. Then a space, an **em dash**, a space. Anything after the
+bold owners that is not a separator — `*(absent)*`, a parenthetical saying who
+somebody reports to — is kept and shown, so it is worth writing.
+
+A date is read as a **deadline** only where a cue word makes it one: as the last
+clause (`..., 2026-09-07`), or after `by`, `before`, `due`, `deadline` or `on`.
+Write `at the 2026-09-09 meeting` or `starting 2026-09-04` for a date that is not
+a deadline and it will correctly not become one. `no date` is right where the
+meeting gave none — do not invent one to fill the column.
+
+**The wording of an item is its identity.** Referat keys what has been done —
+ticked, corrected, dropped — on the sentence itself, in `actions.json`. Re-running
+`/cleanup` and producing the same item with the same words keeps its state; a
+genuine re-wording orphans it, and Referat says so and offers to forget it. That
+is a normal consequence of re-running, not a bug, but it is a reason not to
+rephrase an action item gratuitously when regenerating notes.
+
+**Never edit `actions.json`.** It is Referat's, written by `referat actions` and
+by the command center. It is not a to-do list you add to; the notes are.
+
+## days/, and `/standup`
+
+`/standup <YYYY-MM-DD>` reads that day's `*/notes.md` and writes
+`days/<YYYY-MM-DD>.md`: a **glance**, about eight bullets of one short sentence
+each, saying what changed rather than what was discussed. It is read in fifteen
+seconds before walking into the next thing, so it is deliberately not a digest —
+`notes.md` already is one, and a paragraph here defeats the point.
+
+It lists no action items and **counts none**: Referat parses those itself and
+knows the exact number, and an estimate beside an exact number is worse than
+neither.
+
+**Every bullet ends with the id of the meeting it came from**, in single
+brackets: `[2026-09-03_1408]`, or two of them where a bullet really draws on two
+meetings. That citation is the only provenance the file carries, and Referat uses
+it twice when it renders the summary — the id becomes a link back to that
+meeting, and the **project** the meeting is tagged with is put in front of the
+bullet. Which is why the prompt never asks for a project by name: `tags` live in
+`meta.json`, which nothing here may read, and a project worked out from what a
+meeting sounded like would be a guess wearing the face of a fact.
+
+**Generated — do not hand-edit one.** Re-running `/standup` for that day
+overwrites it, which is how you fold in a meeting that has since been written up.
 
 ## Working here
 

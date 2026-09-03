@@ -58,8 +58,14 @@ or under "Surfaced later".
 
 - [x] `power.py`: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`
       via `ctypes`
-- [x] Held only while recording or paused; released on stop
-- [x] Transcription runs without the hold
+- [x] Held only while recording or paused; released on stop —
+      **superseded 2026-09-03**, see below
+- [x] Transcription runs without the hold — **superseded 2026-09-03.** Left here
+      because it was a deliberate decision and the reversal is worth reading
+      against it: right about the cost, silent about a machine idling to sleep in
+      the middle of a CUDA job. The hold now covers every state but idle, and a
+      notes pass holds its own reason. See *A leaked large-v3, and jobs that
+      outlive a lid* under "Surfaced later"
 - [x] Own the hold on a dedicated keeper thread — the flags are per-thread, and
       transitions arrive on the `keyboard` hook thread, the pystray thread and
       transcription threads, so setting on one and clearing from another would
@@ -1797,7 +1803,22 @@ verified; it is the button that is no longer worth pressing.
 - [x] *Generate notes* streams into the toast, flips the row to `notes_written`
       and opens the notes rendered. Driven twice on 2026-09-01
 
-## 16. Tagging from the tray
+## 16. Tagging from the tray — DECLINED (2026-09-03)
+
+**Not being built, by decision rather than by neglect.** Tagging happens when
+meetings are looked over at a spare moment, on the command center's Meetings tab,
+where the picker and the untagged inbox already are — a prompt at the end of
+every recording asks a question nobody has at that moment. The untagged queue on
+the dashboard is what makes sure a meeting does not stay untagged, which is what
+this step was really for.
+
+Two consequences worth stating. **The WinRT toast dependency is not taken**, so
+the base install keeps exactly one deliberate exception to the
+minimal-dependencies rule (PySide6) rather than two. And `CLAUDE.md` described
+this step in the *present tense* for some time, as though the toast and the *Tag
+recent…* submenu existed; they never did, and that has been corrected. The boxes
+below are left unchecked and unedited as the record of what was designed.
+
 
 **Amended on 2026-09-02 by step 20, which moves the ground under it.** Two things
 changed and neither cancels this step. The tray is a `QSystemTrayIcon` in a Qt
@@ -2145,6 +2166,20 @@ clipboard, and none of it touches `meta.json`, a tag or a name.
       `vscode.setState` for exactly this reason, and step 19 wrote down why.
       `QSettings` is Qt's own abstraction, so it holds `referat/ui/`'s
       portability rule; no `winreg` and no `ctypes`
+- [ ] **A scale for the *whole window*, not only the two panes.** Asked for on
+      2026-09-03, and it is a different feature from the two boxes above rather
+      than a bigger version of them: `zoomIn` is a `QTextEdit` method, so it
+      reaches the transcript and the notes and nothing else — the tabs, the
+      meetings table, the queues, the day summary and every dialog keep the
+      system font, which is the half that is too small on a laptop screen. The
+      mechanism is the application font — `QApplication.setFont` with the point
+      size scaled — or `QApplication.setStyleSheet` with a base `font-size`;
+      **measure which one the tables and the tree headers actually follow**
+      before writing either, since Qt's item views are the widgets most likely to
+      keep a cached row height. If it lands, the pane zoom becomes a *relative*
+      offset on top of it rather than a second absolute scale, or the two will
+      fight. The same `QSettings` argument above applies to persisting it, and it
+      is one store rather than two
 - [ ] **Keyboard selection, set explicitly rather than left to a default.**
       `_browser()` sets only `setOpenLinks(False)` and
       `setOpenExternalLinks(False)`, so both panes keep Qt's default
@@ -2153,27 +2188,58 @@ clipboard, and none of it touches `meta.json`, a tag or a name.
       `TextSelectableByKeyboard` is not in that flag set. Add it. A behaviour
       this UI depends on should be a line in this file, not a property of
       whatever Qt happens to default to
-- [ ] **Copying the notes must yield Markdown source, and this repo already made
+- [x] **Copying the notes must yield Markdown source, and this repo already made
       that rule once.** The notes pane goes through `setMarkdown`, so `Ctrl+C`
       puts an HTML flavour on the clipboard and a paste into Word, Docs or
       Outlook arrives as styled rich text. That is **precisely** what
       `editor.copyWithSyntaxHighlighting: false` was set in the meetings folder's
       `.vscode/settings.json` to prevent — see *Getting text out of the meetings
       folder* below — so the window reintroduces the problem that setting exists
-      to kill, on the surface that is now the primary one
-- [ ] **And the honest difficulty, so it is not discovered as a surprise:**
+      to kill, on the surface that is now the primary one.
+      **Done, and the complaint when it arrived was not the one predicted here.**
+      `Ctrl+Shift+C` had copied the source as plain text since phase 1; what was
+      wrong is that nothing said so, so right-click → Copy and `Ctrl+C` — the
+      gestures people actually use — still went to Qt's. Both are routed at the
+      real command now, which also sits on each pane's context menu and on a copy
+      button in the corner of the tab bar
+- [x] **And the honest difficulty, so it is not discovered as a surprise:**
       mapping a rendered selection back to source offsets is not free, because
       `setMarkdown` keeps no map from the document it built to the text it was
       given. So this is **two things and the cheap one is not the whole
       answer** — a *Copy notes source* action copying the whole raw `notes.md`
       as plain text, and plain-only `Ctrl+C` on a selection, which yields the
-      rendered words without the styling but not the `##` and the `-`
-- [ ] **The transcript pane is a different problem and does not get the same
+      rendered words without the styling but not the `##` and the `-`.
+      **The second half of that answer is superseded**: a selection *is* the
+      source now. `richtext.blocks` splits a source exactly where Qt splits it
+      into `QTextBlock`s — a heading, a paragraph however many lines it wrapped
+      over, one per list item — so the selected blocks are handed back as the
+      Markdown they were written as, and the counts are checked before the map is
+      trusted. Qt's own reconstruction is the fallback, and it is a *last* resort
+      because **its Markdown writer drops `**bold**` and `*italic*` entirely**,
+      measured on a round trip, and every action item's owner is bold
+- [x] **The transcript pane is a different problem and does not get the same
       answer.** It is hand-built HTML from the parsed entries in
       `render_transcript_html`, not `setMarkdown`, so its rendered text is
       already close to its source. It needs plain-text copy and nothing else,
       and giving it a *copy source* action would mean handing somebody
-      `transcript.md` — a file they can already open
+      `transcript.md` — a file they can already open.
+      **Wrong, and it was wrong about *close to*.** The pane's plain text loses
+      the `## Meeting ...` header to bold text and turns the blank line between
+      entries — the one thing keeping a Markdown reader from running the whole
+      meeting into one paragraph — into a single newline. It keeps its source
+      too, through a new `markdown` field on `transcript_document`, which is the
+      file that function had already read and was throwing away. *A file they can
+      already open* is also not an argument against copying it: opening it is not
+      what somebody pasting a passage into Claude is doing
+- [x] **The second flavour, which this box never imagined: formatted text.**
+      Markdown source pastes into Claude; it pastes into a Google Doc as literal
+      `##` and `-`. So *Copy as formatted text* (`Ctrl+Alt+C`) writes clean HTML
+      from `referat/ui/richtext.py` with the Markdown beside it — **two commands
+      rather than one clipboard carrying both**, since a rich target prefers HTML
+      whenever it is offered and one copy with both flavours would decide for the
+      paste. That module is also the manual half of step 13: it answers the same
+      questions `digest.py` is specified to answer, so a note pasted into a doc
+      and a note pushed into one read the same
 
 ### Phase 2 — tagging
 
@@ -2625,6 +2691,18 @@ UI, which is what phases 1-5 had just made it.
       alongside and Word, Google Docs and Outlook all prefer it, which is exactly
       the failure the meetings folder's `editor.copyWithSyntaxHighlighting:
       false` answers for VS Code
+- [x] **Nobody could find that copy, and it only had one flavour.** Reported the
+      day after it shipped: right-click → Copy gives raw text, and there was no
+      way to get *formatted* text into a Google Doc at all. Two named commands
+      now — **Copy as Markdown** (`Ctrl+Shift+C`, plain text, for Claude) and
+      **Copy as formatted text** (`Ctrl+Alt+C`, clean HTML from the new
+      `referat/ui/richtext.py`, for Docs) — on each pane's context menu, on a copy
+      button in the corner of the viewer's tab bar, and with `Ctrl+C` in a pane
+      routed at the first. Bound in **one** place, the window, which dispatches
+      onto the page in front: two claims on one shortcut is a shortcut Qt fires
+      neither half of. A selection is sliced out of the source through
+      `richtext.blocks`; Qt's reconstruction is the fallback, and a last resort,
+      because its Markdown writer drops bold and italic outright
 - [x] **No way to generate notes from the window**, which the sidebar had. Now a
       button, on a thread, through the new `cli.write_notes` over
       `referat/notes.py` and `cli.set_notes_written`. Finding `claude` from
@@ -2965,15 +3043,73 @@ window's first tab.
       already are; draining a queue from here would be a second path to each of
       those three writes, and the picker and the labeling dialog are where the
       rules about what a tag and a name may be are enforced
-- [ ] **Themes and action items extracted from notes are a later box inside this
+- [x] **Themes and action items extracted from notes are a later box inside this
       phase and not its baseline.** The dashboard is worth having without them.
       **The room under the recent list is where they go**, which is why that list
-      is capped at eight rather than allowed to grow into it
-- [ ] When they are built: they read `notes.md`, which is a *derived* artifact,
+      is capped at eight rather than allowed to grow into it.
+      **The action items half is built (2026-09-03); themes are not.** The box
+      went exactly where this said, and the cap is what made room for it
+- [x] When they are built: they read `notes.md`, which is a *derived* artifact,
       so extraction does not breach *nothing is inferred from a transcript*. The
       line it may not cross is assignment — **it may never tag a meeting with a
       project**, propose one, or reorder the untagged queue by a guess. The
-      human's tags stay an input everywhere they appear
+      human's tags stay an input everywhere they appear.
+      **Held.** The one place it was tempting is a collective owner: `All
+      authors` plainly includes the owner and `is_mine` still refuses to resolve
+      it, because working that out is inferring an assignment
+- [ ] **Themes are still unbuilt**, and are now the only thing left in this box.
+      They are the harder half: an action item is a line somebody already wrote
+      down, while a theme is a claim about several meetings that nothing in the
+      notes states outright. Whatever does it may render what the notes say and
+      may not tag, propose or reorder — the same line, which action items did not
+      have to test because they never came close to it
+
+#### What building the action items settled
+
+- [x] **The grammar is stable enough to parse, and that was measured before it
+      was relied on.** 64 items across nine files, zero deviations from
+      `- **owner(s)** — text`. Re-measured at 83 across eleven once two more
+      meetings landed, still zero. `scripts/actions_report.py` is how that is
+      re-checked, and it reports a bullet it could not read rather than passing
+      over it
+- [x] **The due-date rule is the part that needed measuring twice.** Any literal
+      `YYYY-MM-DD` gets five of sixty-four wrong and always in the direction that
+      matters — a meeting date, a start date, or something deferred *past* the
+      date, each shown as a deadline. The cue rule that replaced it: 13 dates, all
+      correct, no false positives. The five counter-examples are named in
+      `actions.CUE_DUE_RE` because that is the docstring somebody will simplify
+- [x] **An item's identity is its wording, and the cost is named rather than
+      hidden.** A re-cleanup that re-wraps a bullet keeps its key; one that
+      re-words it orphans the tick. Orphans are kept, counted in the footer and
+      pruned only on request — pruning on read would turn a read into a write
+- [x] **Per person, because the parse gets everybody's anyway.** The picker was
+      the user's correction to a *Mine only* checkbox, and it is better: the tab
+      answers *what does anybody owe* and the dashboard box answers *what do I
+      owe*, from one document and one predicate
+- [x] **`write_text_atomic` needed a retry.** Ticking is the first operation here
+      frequent enough to lose a race with Dropbox holding the file it is
+      uploading; `os.replace` fails with `WinError 5` and succeeds a moment
+      later. Shared machinery, so `meta.json` and `projects.json` got it too
+- [ ] **The orphan-review modal is unexercised against a real re-cleanup.** It
+      was driven by planting an orphan in `actions.json` by hand. Watch what it
+      says the first time `/cleanup` genuinely re-words an item somebody had
+      ticked
+- [ ] **`SPEAKER_08` is an owner in `2026-09-03_1316`.** `/cleanup` is allowed to
+      assign to an unnamed speaker and did, so the picker offers a cluster number
+      as a person. That is honest — it is what the note says — but it is also a
+      standing argument for labeling that meeting
+- [ ] **A collective owner has no answer.** `All authors` and `All TAs` are real
+      entries in the picker and belong to nobody. Leaving them literal is right;
+      whether the owner's list should offer them *somewhere* is not decided
+- [ ] **A wikilink in an item body is not always a person.**
+      `[[design fiction]]` is a project-shaped link inside an action item, which
+      is the viewer's *linked whatever it says* caveat arriving somewhere new.
+      The Actions tab does not linkify bodies yet, and this is the reason to be
+      careful when it does
+- [ ] **The day summary has met one day.** `2026-09-03`, five meetings, and it
+      came out the right length and shape. It has never been run on a day with
+      one meeting, or with a meeting whose notes are missing, and the "name it
+      rather than skip it" instruction is therefore untested
 
 #### What building it settled
 
@@ -3025,6 +3161,80 @@ window's first tab.
       page, so a dashboard saying it again would be a second thing to keep in
       step. Watch whether the opening screen wants a *right now* line anyway once
       it has been opened mid-meeting a few times
+
+#### From reading the first day summary (2026-09-03)
+
+Ten pieces of feedback after the day summary had been looked at once. Six were
+built the same evening; the other four are below, unchecked.
+
+- [x] **The names in it were dead.** The day pane ran `setMarkdown` over the raw
+      file, so a `[[Wikilink]]` rendered as brackets and clicked as nothing,
+      while the identical link in the notes pane opened the People tab. Now
+      through `viewer.link_people` and a three-way `anchorClicked` of its own —
+      *a name means one thing wherever it is rendered*
+- [x] **The brackets came off every wikilink, everywhere.** `link_people` used to
+      keep `[[…]]` on the reasoning that a link quietly dropping them would look
+      like a different notation. That argued about the *file*; this is the
+      rendering, and a note is mostly people, so a page of `[[…]]` reads as
+      markup somebody forgot to render. Bold instead, which is what
+      `richtext.py` and `digest.py` were already specified to do with one
+- [x] **So `unlink` rebuilds a name from its URL rather than from its text**, and
+      grew a `wiki` flag to do it. The same `referat-person:` link is a wikilink
+      in the notes and a *speaker label* in the transcript, whose source notation
+      is the bare `Anna:` it already renders as; the rendering cannot be read
+      back to tell them apart, so the caller says which pane it is copying
+- [x] **The date is written out** — `Today - Thursday, September 3, 2026`. The
+      ISO form stays the file's name, the picker's `currentData` and what
+      `/standup` is handed, and stops being the thing on screen. Assembled rather
+      than `strftime`d: `%d` pads to `03` and `%-d` is glibc's spelling of what
+      the Windows runtime calls `%#d`
+- [x] **Every bullet cites its meeting, and the citation is a link.** `/standup`
+      now ends each line with `[2026-09-03_1408]` and `viewer.link_meetings`
+      turns it into a `referat-meeting:` link reading `14:08` — the date is
+      dropped because the page is one date. A third scheme beside `referat:` and
+      `referat-person:`, and the last one
+- [x] **The project goes in front of the bullet, and Referat says it — not the
+      prompt.** A meeting's `tags` are in `meta.json`, which `/standup` may not
+      read, and a project worked out from what a meeting sounded like is exactly
+      the guess this repo refuses. So the prompt cites the meeting it certainly
+      read and `dashboard.day_markdown` joins on the human's tag, through
+      `rows.tags_text` so an orphan gets the same trailing `?` it does elsewhere.
+      **This is the citation earning its place twice**, and the reason to resist
+      asking the prompt for a project directly the next time it looks simpler
+- [x] **`LINKED_RE` was running through an unescaped `[`.** A transcript
+      selection reconstructing as `[00:00:09] [Niklas](referat-person:Niklas): …`
+      matched from the timestamp's bracket to the name's closing one and came out
+      as `00:00:09] [Niklas:`. Refused now, which costs nothing since nothing
+      here puts a bare `[` in a link text. Found by exercising the copy paths
+      after `unlink` changed, which is the argument for exercising them
+- [ ] **Every summary already on disk predates the citations**, so it renders
+      with no prefix and no link — correctly, since there is nothing on the line
+      saying where it came from. *Rebuild…* is what gives one provenance. Watch
+      the first genuinely cited summary: whether one bullet per meeting is the
+      shape it settles into, and whether a cross-cutting bullet really does cite
+      both
+- [ ] **A bullet's project is the meeting's, so an untagged meeting gets none.**
+      No placeholder, because the untagged queue two boxes down is where that is
+      said. Watch whether a page of unprefixed bullets reads as *untagged* or as
+      *broken* — if it is the second, the prefix is the wrong place to be silent
+- [ ] **The day summary is never rebuilt on its own**, and nothing yet says so on
+      the page. It is written only when somebody presses *Summarize…* /
+      *Rebuild…*, which is the no-automatic-LLM-pass rule holding, and the button
+      changing its label is the whole of the hint. Watch whether *today*'s
+      summary going stale as the day fills up wants something more than that —
+      a *written at 14:12, two meetings since* line would be honest and is
+      **not** an argument for a timer
+- [ ] **A speaker nobody will ever name has no way out of the queue.**
+      `2026-09-03`'s unnamed cluster is noise — a door, a corridor, a cough — and
+      the only way to stop the *Speakers nobody has named* queue prodding about
+      it is to give it a name, which files a voiceprint for a noise. It wants a
+      third answer beside *name* and *leave*: a per-meeting **dismissal** of one
+      cluster, written into `meta.json` beside `speaker_names` and read by
+      `voices.unknown_speakers` so both the queue and the dialog skip it. Two
+      rules it must not break — it is **not** a name, so nothing goes into
+      `.voices/`; and it is per meeting, because `SPEAKER_NN` numbering is per
+      meeting and dismissing *a number* globally would silence a different person
+      next week. `bleed`'s spared-cluster flag is the shape to copy
 
 ### Phase 7 — Google Docs export
 
@@ -3119,6 +3329,89 @@ window's first tab.
       come from, is not designed
 
 ## Surfaced later
+### A leaked large-v3, and jobs that outlive a lid (2026-09-03)
+
+Diagnosed from `2026-09-03_1459`, whose mic diarization took **6527.8s against
+58.5s** for the previous meeting of the same length.
+
+- [x] **`transcribe.unload_model`**: hand CTranslate2's weights back before the
+      `del`, through CTranslate2's own API. `gpu.release` returns *torch's* arena
+      and never sees them; an idle tray was measured on **5205 MiB of 12227**
+      with the log saying `released 0 MiB` all along
+- [x] **Both docstrings corrected.** `gpu.py` claimed the weights "come back when
+      the `WhisperModel` is destroyed, which `del model` already does", and that
+      the skipped collection cost "the cycles and nothing else". Both withdrawn
+- [ ] **Why the model was retained is still unknown, and the first answer was
+      wrong.** The reference-cycle story — `del` not destroying it because
+      `gpu.release` skips `gc.collect()` off the main thread — was written up
+      confidently and then falsified: in a standalone process `del` alone returns
+      the full 3788 MiB with the generator drained and cyclic GC disabled, the
+      floor is flat over three jobs, and flat for pyannote on a worker thread.
+      So the difference is something about the tray — Qt in the process, that
+      skip, or neither. `unload_model` makes it stop mattering, which is why this
+      is an open question rather than an open bug. **The way to settle it is a
+      measurement inside the tray**, not more reasoning: log
+      `torch.cuda.mem_get_info()` at the end of each job and watch the floor over
+      three or four real meetings
+- [x] **The hold covers every state but idle**, transcription included. This
+      section's own `- [x] Transcription runs without the hold` above is
+      **superseded** and left in place: it was right about the cost and never
+      priced the hazard
+- [x] **`SleepBlocker.want(reason, hold)`**, because the hold has two owners now
+      — the recorder and the notes queue. A single boolean let whichever finished
+      first drop it out from under the other
+- [x] **`power.SuspendWatcher`**: detect a suspend from the wall clock, log how
+      much time was lost and what was in flight, and heartbeat every five minutes
+      while a job runs. It cannot prevent a suspend and says so
+- [x] **`meeting.reconcile_interrupted`**: clamp a meeting left `transcribing` by
+      a process that is gone. Closes the gap `CLAUDE.md` recorded as unsolvable
+      from inside a process, from the other end — the next start, not a handler
+- [ ] **`busy_tray` sees a tray and not a CLI `rerun`.** A rerun in a terminal
+      writes no `status.json`, so a tray starting during one would read that
+      meeting's `transcribing` as residue and clamp it. Self-healing — the rerun
+      writes the real status when it finishes — and narrow, since the
+      single-instance mutex already means the only other writer is a CLI. Worth
+      knowing before somebody widens the guard and assumes it is airtight
+- [x] **Cut the peak, not just the residue.** One model served both channels, so
+      Whisper was resident through each channel's diarization — 3788 MiB beside
+      pyannote's 3866, before the CUDA contexts and before the 1761 MiB the
+      desktop compositor was measured holding. `transcribe_channel` is now the
+      Whisper pass alone and returns its decoded audio; `transcribe_channels`
+      loads a model per channel and diarizes with the card clear. **Measured end
+      to end on real speech: peak 4210 MiB against 7654**, both channels still
+      diarized, numbering still running across the meeting (mic `SPEAKER_01`,
+      system `SPEAKER_02`). Costs one extra nine-second load per meeting, and
+      reverses the function's stated "load one model and run both channels
+      through it"
+- [x] **Interrupted transcriptions are re-queued at startup**, not just
+      reconciled — only those that still have their audio, which is also what
+      keeps it from looping. `State.IDLE -> State.TRANSCRIBING` is the new edge
+      and the only way into TRANSCRIBING that did not just come off a recording
+- [ ] **No way to abandon a running transcription.** The 2026-09-03 job ran 109
+      minutes and the only way to stop it was killing the tray. Offered and not
+      taken for now; the reconcile-and-resume pair makes a kill survivable, which
+      was the sharp end of it. A Stop control on the activity tab is the shape if
+      it is wanted
+- [ ] **The idle floor is still ~5 GB and that is the CUDA context plus whatever
+      pyannote's allocator keeps.** `unload_model` returns the Whisper weights;
+      nothing returns the context short of ending the process. Worth measuring
+      once after a few jobs to confirm the floor is now flat rather than climbing
+      — the failure this fixes is *accumulation*, and only a second measurement
+      proves it stopped
+- [ ] **Nothing yet fails a job that has obviously wedged.** 109 minutes for a
+      58-second task ran to completion; a `rerun` on a fresh process would have
+      taken ten. A ceiling — diarization taking more than N times the audio
+      length — would turn that into a failure somebody can retry, but N is a
+      guess until there are more measurements, and a wrong ceiling costs a
+      transcript on a genuinely slow machine. Recorded, not built
+- [ ] **`ES_SYSTEM_REQUIRED` does not stop a lid close**, so a job can still be
+      suspended mid-CUDA. `SuspendWatcher` makes that visible and
+      `reconcile_interrupted` makes it recoverable, but neither makes it survive.
+      Whether a CUDA context here actually survives Modern Standby is unmeasured
+      — this run suggests it does, having finished after one
+- [ ] **`powercfg /requests` still unverified** for the new reasons, for the same
+      reason as the original entry in this section: it needs an elevated shell
+
 
 ### Building the command center (2026-09-02)
 

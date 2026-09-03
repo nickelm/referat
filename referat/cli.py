@@ -37,13 +37,13 @@ import logging
 import signal
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from referat import __version__, build_info, index, paths, projects, status, voices
+from referat import __version__, actions, build_info, index, paths, projects, status, voices
 from referat.config import Config, ConfigError, load_config
 from referat.meeting import (
     Meeting,
@@ -56,7 +56,9 @@ from referat.meeting import (
 log = logging.getLogger(__name__)
 
 NEEDS_CONFIG = (
+    "actions",
     "config",
+    "day",
     "debleed",
     "delete",
     "devices",
@@ -445,6 +447,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the confirmation --forget and --drop-voiceprint ask for",
     )
 
+    day = subcommands.add_parser(
+        "day",
+        help="write a short summary of one day's meetings, from their notes",
+        description=(
+            "Spawns the official claude binary with /standup in the meetings "
+            "folder, which reads that day's notes.md files and writes "
+            "days/<date>.md - a glance at what happened, not a digest. Re-run it "
+            "whenever another meeting that day gets notes; it overwrites."
+        ),
+    )
+    day.add_argument(
+        "day", nargs="?", default="", help="the date, YYYY-MM-DD (default: today)"
+    )
+
+    _add_actions_parser(subcommands)
     _add_project_parser(subcommands)
 
     tagging = subcommands.add_parser(
@@ -495,6 +512,64 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser
 
+
+
+def _add_actions_parser(subcommands: argparse._SubParsersAction) -> None:
+    """`referat actions [<verb>]` — the list, and the five things you can do to one.
+
+    Nested subparsers in the one argparse block, exactly as
+    :func:`_add_project_parser` builds them. The one difference is that **the
+    verb is optional and defaults to the listing**, because `referat project` is
+    a namespace of operations while `referat actions` is a question somebody is
+    asking; see :func:`run_actions`.
+    """
+    parent = subcommands.add_parser(
+        "actions",
+        help="the action items in your meeting notes, and what you have done about them",
+        description=(
+            "Action items are parsed out of each meeting's notes.md - the "
+            "`## Action items` section /cleanup writes - and never re-extracted. "
+            "Ticking, correcting and dropping one is recorded in actions.json "
+            "beside the notes; none of it edits notes.md, so a meeting's record "
+            "of what it produced stays exactly as /cleanup wrote it."
+        ),
+    )
+    parent.add_argument("--person", default="", help="whose items to show (default: you)")
+    parent.add_argument(
+        "--everyone", action="store_true", help="every owner, not just one person"
+    )
+    parent.add_argument("--meeting", default="", help="only this meeting's items")
+    parent.add_argument("--done", action="store_true", help="include what is already ticked")
+    parent.add_argument("--json", action="store_true", dest="as_json", help="the whole document")
+    parent.add_argument(
+        "--markdown",
+        action="store_true",
+        dest="as_markdown",
+        help="a `- [ ]` task list, the same text the command center's Copy button gives",
+    )
+    verbs = parent.add_subparsers(dest="actions_command")
+
+    for verb, help_text in (
+        ("done", "tick an item off"),
+        ("undone", "put a ticked item back"),
+        ("drop", "hide an item that was never really one - notes.md is not touched"),
+        ("restore", "bring a dropped item back"),
+    ):
+        one = verbs.add_parser(verb, help=help_text)
+        one.add_argument("key", help="the item's key, or a unique prefix of it")
+
+    edit = verbs.add_parser(
+        "edit", help="correct an item's wording; no text reverts to what the notes say"
+    )
+    edit.add_argument("key", help="the item's key, or a unique prefix of it")
+    edit.add_argument("text", nargs="*", help="the corrected wording")
+
+    prune = verbs.add_parser(
+        "prune", help="forget stored state whose item no longer appears in any notes.md"
+    )
+    prune.add_argument(
+        "key", nargs="*", help="which orphans to forget (default: all of them)"
+    )
 
 
 def _add_project_parser(subcommands: argparse._SubParsersAction) -> None:
@@ -1026,6 +1101,13 @@ def transcript_document(config: Config, meeting: Meeting) -> dict[str, Any]:
     `labels` is the distinct speaker labels in order of first appearance, which
     is the order :func:`referat.diarize.assign` numbers them in.
 
+    `markdown` is the file itself, unparsed. It costs nothing — this function has
+    already read it — and it is what a **copy** out of the command center's
+    transcript pane hands over, so that a copy is the source rather than a
+    rendering of it. Carrying it here is what keeps the window from opening
+    `transcript.md` for itself: it reads exactly one file, `notes.md`, and the
+    shape of everything else it shows is Python's to describe.
+
     `people` is the subset of those labels that are somebody's *name*, decided by
     :func:`referat.voices.name_complaint` — the one function that knows `ME` and
     `REMOTE` are channel labels and `SPEAKER_NN` is a number. Phase 5 needs it so
@@ -1055,6 +1137,7 @@ def transcript_document(config: Config, meeting: Meeting) -> dict[str, Any]:
         "duration": format_duration(meeting.duration_seconds),
         "labels": labels,
         "people": [label for label in labels if voices.name_complaint(label) is None],
+        "markdown": text,
         "unparsed": unparsed,
         "entries": [
             {"at": at, "time": _hms(at), "label": label, "text": text}
@@ -1143,7 +1226,7 @@ def project_document(config: Config) -> dict[str, Any]:
     counts = projects.tag_counts(load_meetings(config))
     return {
         "projects_file": str(projects.projects_path(config)),
-        "complaint": _unreadable_complaint(db, CANNOT_LOOK_UP) if db.unreadable else "",
+        "complaint": _unreadable_complaint(db.path, CANNOT_LOOK_UP) if db.unreadable else "",
         "names": db.name_map(),
         "projects": [
             {
@@ -1214,7 +1297,7 @@ def project_names(config: Config) -> tuple[dict[str, str], str]:
     """
     db = projects.ProjectsDB.load(config)
     if db.unreadable:
-        return {}, _unreadable_complaint(db, CANNOT_TAG)
+        return {}, _unreadable_complaint(db.path, CANNOT_TAG)
     return db.name_map(), ""
 
 
@@ -1239,7 +1322,7 @@ def create_project(config: Config, name: str) -> tuple[projects.Project | None, 
     """
     db = projects.ProjectsDB.load(config)
     if db.unreadable:
-        return None, _unreadable_complaint(db, WOULD_OVERWRITE)
+        return None, _unreadable_complaint(db.path, WOULD_OVERWRITE)
     complaint = projects.name_complaint(name)
     if complaint:
         return None, f"a project name {complaint}"
@@ -1377,7 +1460,7 @@ def _read_project(config: Config, pid: str) -> tuple[projects.Project | None, st
     """
     db = projects.ProjectsDB.load(config)
     if db.unreadable:
-        return None, _unreadable_complaint(db, CANNOT_LOOK_UP)
+        return None, _unreadable_complaint(db.path, CANNOT_LOOK_UP)
     project = db.projects.get(pid)
     if project is None:
         return None, _unknown_complaint(db, [pid])
@@ -1412,7 +1495,8 @@ class Outcome:
 WOULD_OVERWRITE = "so writing now would replace everything in it"
 CANNOT_TAG = "so nothing can be tagged until it is"
 CANNOT_LOOK_UP = "so no project can be looked up until it is"
-"""The three consequences of a `projects.json` that will not parse.
+CANNOT_TICK = "so no action item's state can be changed until it is"
+"""The consequences of a state file that will not parse: three for `projects.json`, one for `actions.json`.
 
 One sentence template, three endings, and the ending is the caller's to choose
 because it is the only part that differs by what was being attempted. Phase 4 is
@@ -1422,8 +1506,8 @@ a question they did not ask.
 """
 
 
-def _unreadable_complaint(db: projects.ProjectsDB, consequence: str) -> str:
-    """Why a command stops when it cannot tell an empty projects file from a broken one.
+def _unreadable_complaint(path: Path, consequence: str) -> str:
+    """Why a command stops when it cannot tell an empty state file from a broken one.
 
     An unreadable file loads as *no projects*. That is right for reading — the
     meetings table still renders, with every tag shown as an orphan — and
@@ -1432,12 +1516,13 @@ def _unreadable_complaint(db: projects.ProjectsDB, consequence: str) -> str:
     and is stopped anyway: with no ids loaded it would reject every id as unknown
     and report a typo nobody made.
 
+    Takes the **path** rather than a database, because `actions.json` runs under
+    exactly this rule and says exactly this sentence — see
+    :data:`CANNOT_TICK`. One template, and each store supplies its own ending.
+
     The parse error itself is in the log; this says what to do about it.
     """
-    return (
-        f"{db.path} exists but could not be read, {consequence}. "
-        f"Fix or delete that file first."
-    )
+    return f"{path} exists but could not be read, {consequence}. Fix or delete that file first."
 
 
 def _unknown_complaint(db: projects.ProjectsDB, ids: Sequence[str]) -> str:
@@ -1461,7 +1546,7 @@ def _open_project(
     """
     db = projects.ProjectsDB.load(config)
     if db.unreadable:
-        return None, None, _unreadable_complaint(db, WOULD_OVERWRITE)
+        return None, None, _unreadable_complaint(db.path, WOULD_OVERWRITE)
     project = db.projects.get(pid)
     if project is None:
         return db, None, _unknown_complaint(db, [pid])
@@ -1599,7 +1684,7 @@ def apply_tags(
     if add:
         db = projects.ProjectsDB.load(config)
         if db.unreadable:
-            return Outcome(False, _unreadable_complaint(db, CANNOT_TAG))
+            return Outcome(False, _unreadable_complaint(db.path, CANNOT_TAG))
         unknown = [pid for pid in add if pid not in db.projects]
         if unknown:
             # Refused, unlike a removal: an id no project answers to is an
@@ -2739,6 +2824,441 @@ def run_people(config: Config, as_json: bool = False) -> int:
     return 0
 
 
+ACTION_HEADERS = ("KEY", "OWNER", "DUE", "MEETING", "ITEM")
+
+EVERYONE = "*"
+"""What `--person` takes to mean *do not filter at all*.
+
+A sentinel rather than an empty string, because an empty `--person` is much more
+likely to be a shell variable that did not expand than a request for everybody.
+"""
+
+
+def is_mine(item: dict[str, Any], owner: str) -> bool:
+    """Whether an action item is the owner's, said once so two surfaces agree.
+
+    `owner` is `[speakers].owner_name`. The comparison is exact against the names
+    the note gave: a collective like `All authors` is **not** resolved to include
+    the owner even where it plainly does, because working that out would be
+    inferring an assignment, and that is the one line
+    :mod:`referat.ui.dashboard` records this feature as not crossing.
+
+    `Unassigned` is not mine either. The tab offers it as its own choice one
+    click away, which is the honest arrangement: an item nobody owns is a
+    question about the meeting, not an item on somebody's list.
+    """
+    return bool(owner) and owner in item["owners"]
+
+
+def owner_counts(document: dict[str, Any]) -> list[tuple[str, int]]:
+    """Every owner with a count, most items first, for the tab's person picker.
+
+    Ties break alphabetically so the order is stable between refreshes — a picker
+    whose entries swapped places when a meeting was transcribed would be a picker
+    nobody could learn.
+    """
+    counts: dict[str, int] = {}
+    for item in document["items"]:
+        for name in item["owners"] or [actions.UNASSIGNED]:
+            counts[name] = counts.get(name, 0) + 1
+    return sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+
+
+def day_summary_path(config: Config, day: str) -> Path:
+    """`<meetings_dir>/days/<day>.md`, whether or not it is there yet."""
+    return config.paths.meetings_dir / paths.DAYS_DIR / f"{day}.md"
+
+
+def write_day_summary(config: Config, day: str) -> Outcome:
+    """Write one day's summary by spawning `/standup`. The only implementation.
+
+    `referat day` is this printed and the command center's button is this on the
+    notes queue, which is the arrangement every write in this project has.
+
+    **Thinner than :func:`write_notes`, and the reason is worth stating** so that
+    nobody symmetrically adds the missing half. `write_notes` is an operation over
+    *two* things because `/cleanup` is forbidden to touch `meta.json` and somebody
+    has to record `notes_written` afterwards. A day is not a meeting: it has no
+    `meta.json`, no lifecycle and no status anything could hold, so there is
+    nothing to record and `referat state` must never learn a transition for it.
+    """
+    from referat import notes
+
+    written, message = notes.generate_day_summary(config, day)
+    return Outcome(written, message)
+
+
+def run_day(config: Config, day: str = "") -> int:
+    """`referat day [<YYYY-MM-DD>]`. Today when nothing is given."""
+    return _report(
+        write_day_summary(config, day or dt.date.today().isoformat()), "day"
+    )
+
+
+def actions_document(
+    config: Config, document: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """`referat actions --json`: every action item in every meeting, and its state.
+
+    **Pure over a `list_document` when it is handed one**, exactly as
+    :func:`pending` is, and for a sharper reason. Every other document builder
+    loads the meetings for itself; if this one did, the command center would pay
+    a *second* scan of both meeting roots on every refresh, having just paid for
+    the first. Handed the listing it already holds, an extra tab and an extra
+    dashboard box together cost the notes files and nothing else.
+
+    Reading `notes.md` is what this does and it is allowed to: the note is a
+    *derived* artifact, so parsing it does not breach *nothing is inferred from a
+    transcript*. What it may never do is act on what it reads — nothing here tags
+    a meeting, proposes a tag, or reorders a queue.
+
+    `complaint` carries an unreadable `actions.json` for the reason
+    :func:`project_document` carries an unreadable projects file, and here it
+    matters more than usual: with no state every item reads as **open**, so a
+    broken file makes the dashboard's box longer at precisely the moment it is
+    least trustworthy. Every surface shows the sentence instead.
+
+    `orphans` are stored ticks whose item no longer appears in any note, which is
+    what a `/cleanup` re-run leaves behind when it re-words a bullet. They are
+    reported and never pruned on read — pruning here would make a read into a
+    write, which is the one thing these loaders refuse to be.
+    """
+    if document is None:
+        document = list_document(config)
+    db = actions.ActionsDB.load(config)
+    known = projects.ProjectsDB.load(config).name_map()
+
+    items: list[dict[str, Any]] = []
+    live: set[tuple[str, str]] = set()
+    for meeting in document["meetings"]:
+        folder = Path(meeting["dir"])
+        for item in actions.read_actions(folder / paths.NOTES_MD, meeting["id"]):
+            state = db.get(meeting["id"], item.key)
+            live.add((meeting["id"], item.key))
+            items.append(
+                {
+                    "key": item.key,
+                    "meeting": meeting["id"],
+                    "meeting_title": meeting["title"],
+                    "started_at": meeting["started_at"],
+                    "tags": list(meeting["tags"]),
+                    "owners": list(item.owners),
+                    "owner_text": item.owner_text(),
+                    "unassigned": item.unassigned,
+                    "qualifier": item.qualifier,
+                    "text": state.text or item.text,
+                    "original": item.text,
+                    "edited": bool(state.text),
+                    "due": item.due,
+                    "at": list(item.at),
+                    "done": state.done,
+                    "done_at": state.done_at,
+                    "dismissed": state.dismissed,
+                }
+            )
+
+    orphans = [
+        {"meeting": mid, "key": key, "seen": db.get(mid, key).seen}
+        for mid, key in sorted(db.known() - live)
+    ]
+    owner = config.speakers.owner_name.strip()
+    open_items = [i for i in items if not i["done"] and not i["dismissed"]]
+    return {
+        "owner": owner,
+        "projects": known,
+        "complaint": _unreadable_complaint(db.path, CANNOT_TICK) if db.unreadable else "",
+        "counts": {
+            "total": len(items),
+            "open": len(open_items),
+            "mine": sum(1 for i in open_items if is_mine(i, owner)),
+            "done": sum(1 for i in items if i["done"]),
+            "orphans": len(orphans),
+        },
+        "items": items,
+        "orphans": orphans,
+    }
+
+
+def action_sort_key(item: dict[str, Any]) -> tuple[int, str, str]:
+    """Soonest deadline first, undated last, then oldest meeting.
+
+    Undated goes last rather than first because a date is a claim and its absence
+    is not: `no date` items are the long tail of every one of these lists, and
+    putting them on top would bury the three things that are actually due.
+    """
+    return (0, item["due"], item["started_at"]) if item["due"] else (1, "", item["started_at"])
+
+
+def select_actions(
+    document: dict[str, Any],
+    person: str = "",
+    include_done: bool = False,
+    meeting: str = "",
+) -> list[dict[str, Any]]:
+    """The items one surface is showing, filtered and ordered. Pure.
+
+    `person` is a name, :data:`EVERYONE`, :data:`referat.actions.UNASSIGNED`, or
+    empty for the owner's own. Shared by the CLI, the tab and the clipboard so
+    that what is copied is exactly what is shown — a Copy button that quietly
+    exported a different set than the one on screen would be worse than no Copy
+    button.
+    """
+    owner = document["owner"]
+    wanted = person or owner
+    items = [i for i in document["items"] if not i["dismissed"]]
+    if not include_done:
+        items = [i for i in items if not i["done"]]
+    if meeting:
+        items = [i for i in items if i["meeting"] == meeting]
+    if wanted == actions.UNASSIGNED:
+        items = [i for i in items if i["unassigned"] or not i["owners"]]
+    elif wanted != EVERYONE:
+        items = [i for i in items if wanted in i["owners"]]
+    return sorted(items, key=action_sort_key)
+
+
+def actions_markdown(items: Sequence[dict[str, Any]]) -> str:
+    """The clipboard payload, and `referat actions --markdown`'s output.
+
+    One implementation, because the whole point of the Copy button is pasting
+    into somebody's own TODO list and a CLI that produced a different shape would
+    make the two impossible to compare. A `- [ ]` task list, which is what every
+    Markdown TODO understands, carrying the due date and the meeting it came from
+    and **not** the timestamps — those are citations into a transcript that only
+    exists on this machine, so they are noise anywhere this text is going.
+
+    The annotation is parenthetical and deliberately **plain ASCII**, where the
+    obvious choice was the em dash the notes themselves use. This string is the
+    one thing here that leaves Referat — onto a clipboard, or down a pipe into
+    a file — and this console's code page already renders an em dash as a
+    replacement character, which is how the choice got noticed. Adding an
+    encoding hazard to the one payload whose whole purpose is to be pasted
+    somewhere else is the wrong place to be typographically nice. Whatever the
+    note's own wording contains is passed through untouched.
+    """
+    lines: list[str] = []
+    for item in items:
+        note = [f"due {item['due']}"] if item["due"] else []
+        note.append(item["meeting"])
+        box = "x" if item["done"] else " "
+        lines.append(f"- [{box}] {item['text'].rstrip('.')} ({', '.join(note)})")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _open_actions(config: Config) -> tuple[actions.ActionsDB | None, str]:
+    """Load the action store for a write, refusing an unreadable one.
+
+    The counterpart of :func:`_open_project`, minus the second guard: there is no
+    id to be unknown here, because a key is resolved against the notes rather
+    than against this file. :data:`WOULD_OVERWRITE` because the caller is about
+    to save.
+    """
+    db = actions.ActionsDB.load(config)
+    if db.unreadable:
+        return None, _unreadable_complaint(db.path, WOULD_OVERWRITE)
+    return db, ""
+
+
+def resolve_action(
+    config: Config, key: str, document: dict[str, Any] | None = None
+) -> tuple[dict[str, Any] | None, str]:
+    """One item by key or by a unique prefix of one, or a complaint.
+
+    Prefixes because a twelve-character hash is not something anybody types in
+    full, and the same courtesy `git` extends. An **ambiguous** prefix is refused
+    by naming every key it matched rather than by silently taking the first: the
+    two candidates are different items in different meetings, and acting on the
+    wrong one would tick something nobody looked at.
+    """
+    if document is None:
+        document = actions_document(config)
+    matches = [i for i in document["items"] if i["key"].startswith(key)]
+    if not matches:
+        return None, f"no action item {key}; `referat actions` lists them with their keys"
+    if len(matches) > 1:
+        found = ", ".join(sorted(i["key"] for i in matches))
+        return None, f"{key} matches {len(matches)} items ({found}); use more of the key"
+    return matches[0], ""
+
+
+def _write_action(
+    config: Config, key: str, change: Callable[[actions.Entry, dict[str, Any]], str]
+) -> Outcome:
+    """Resolve one item, apply one change to its entry, save once.
+
+    Every action mutation is this shape, so the guard order is stated once: the
+    unreadable file before the lookup, because a complaint about an unknown key
+    is advice about the wrong problem when the file that records keys did not
+    parse. `change` returns the sentence to report.
+
+    `seen` is stamped on the way through. It is the note's own wording at the
+    moment somebody acted on the item, and it is the only thing that will make
+    this entry legible later if `/cleanup` re-words the bullet out from under it.
+    """
+    db, why = _open_actions(config)
+    if db is None:
+        return Outcome(False, why)
+    item, complaint = resolve_action(config, key)
+    if item is None:
+        return Outcome(False, complaint)
+    entry = db.entry(item["meeting"], item["key"])
+    entry.seen = item["original"]
+    message = change(entry, item)
+    db.save()
+    return Outcome(True, message)
+
+
+def set_action_done(config: Config, key: str, done: bool = True) -> Outcome:
+    """Tick an action item off, or put it back."""
+
+    def change(entry: actions.Entry, item: dict[str, Any]) -> str:
+        entry.done = done
+        entry.done_at = dt.datetime.now().isoformat(timespec="seconds") if done else ""
+        return f"{item['key']}: {'done' if done else 'not done'} - {item['text'][:60]}"
+
+    return _write_action(config, key, change)
+
+
+def dismiss_action(config: Config, key: str, dismissed: bool = True) -> Outcome:
+    """Drop an action item from the lists, or bring it back.
+
+    **This does not touch `notes.md`.** The note is the record of what the meeting
+    said, and an item somebody drops because it was never really an action item
+    is still a thing the meeting produced. Dropping it says *do not show me this*,
+    which is a fact about the reader, and facts about the reader live in
+    `actions.json`. `referat actions restore` is the way back, and a re-read of
+    the note is the other one.
+    """
+
+    def change(entry: actions.Entry, item: dict[str, Any]) -> str:
+        entry.dismissed = dismissed
+        verb = "dropped" if dismissed else "restored"
+        return f"{item['key']}: {verb} - {item['text'][:60]}"
+
+    return _write_action(config, key, change)
+
+
+def edit_action(config: Config, key: str, text: str) -> Outcome:
+    """Correct an item's wording, or revert to the note's when `text` is empty.
+
+    The correction is stored beside the item and the **key does not move**,
+    because a key is a hash of what the *note* says and never of what was typed
+    over it. That is what makes an edit revertible: the original is still on disk,
+    in the file this never writes.
+    """
+
+    def change(entry: actions.Entry, item: dict[str, Any]) -> str:
+        wanted = " ".join(text.split())
+        entry.text = "" if wanted == item["original"] else wanted
+        if not entry.text:
+            return f"{item['key']}: back to what the notes say - {item['original'][:60]}"
+        return f"{item['key']}: {entry.text[:60]}"
+
+    return _write_action(config, key, change)
+
+
+def prune_actions(config: Config, keys: Sequence[str] | None = None) -> Outcome:
+    """Forget stored state whose action item is no longer in any note.
+
+    Only ever on request. An orphan is a tick whose bullet `/cleanup` re-worded,
+    and it is kept and shown rather than cleaned up quietly for the reason a
+    deleted project's tags are rendered as orphans: state that vanishes on its own
+    is state nobody can trust. This is the button that says yes.
+    """
+    db, why = _open_actions(config)
+    if db is None:
+        return Outcome(False, why)
+    orphans = actions_document(config)["orphans"]
+    wanted = set(keys) if keys else None
+    gone = 0
+    for orphan in orphans:
+        if wanted is not None and orphan["key"] not in wanted:
+            continue
+        gone += db.drop(orphan["meeting"], orphan["key"])
+    if not gone:
+        return Outcome(True, "nothing to prune")
+    db.save()
+    return Outcome(True, f"forgot {gone} orphaned item{'s' if gone != 1 else ''}")
+
+
+def run_actions(config: Config, args: argparse.Namespace) -> int:
+    """`referat actions`, and the five verbs under it.
+
+    No verb means `list`, unlike `referat project`, and the difference is real:
+    `project` is a namespace of things you do to projects, while `actions` is a
+    **question** — the answer to which is the list. Making somebody type
+    `actions list` to ask it would be a namespace pretending to be a verb.
+    """
+    verb = getattr(args, "actions_command", None) or "list"
+    if verb == "done":
+        return _report(set_action_done(config, args.key, True), "actions")
+    if verb == "undone":
+        return _report(set_action_done(config, args.key, False), "actions")
+    if verb == "drop":
+        return _report(dismiss_action(config, args.key, True), "actions")
+    if verb == "restore":
+        return _report(dismiss_action(config, args.key, False), "actions")
+    if verb == "edit":
+        return _report(edit_action(config, args.key, " ".join(args.text)), "actions")
+    if verb == "prune":
+        return _report(prune_actions(config, args.key or None), "actions")
+
+    document = actions_document(config)
+    if getattr(args, "as_json", False):
+        print(json.dumps(document, indent=2))
+        return 0
+
+    person = EVERYONE if getattr(args, "everyone", False) else getattr(args, "person", "") or ""
+    items = select_actions(
+        document, person, include_done=args.done, meeting=getattr(args, "meeting", "") or ""
+    )
+    if getattr(args, "as_markdown", False):
+        print(actions_markdown(items), end="")
+        return 0
+
+    if document["complaint"]:
+        print(f"referat actions: {document['complaint']}", file=sys.stderr)
+
+    whose = person or document["owner"]
+    if not items:
+        if not document["items"]:
+            print(
+                "No action items yet. They are the `## Action items` section of a "
+                "meeting's notes.md, written by `referat notes <id>`."
+            )
+        else:
+            print(f"Nothing open for {whose}. Try --everyone, or --done to see what is finished.")
+        return 0
+
+    rows = [
+        (
+            item["key"][:8],
+            item["owner_text"][:22],
+            item["due"] or "-",
+            item["meeting"],
+            (("[x] " if item["done"] else "") + item["text"])[:72],
+        )
+        for item in items
+    ]
+    print(render_table(rows, ACTION_HEADERS))
+    print()
+    counts = document["counts"]
+    print(
+        f"{len(rows)} shown for {'everybody' if whose == EVERYONE else whose}; "
+        f"{counts['open']} open in all, {counts['mine']} of them {document['owner']}'s"
+    )
+    if counts["orphans"]:
+        # Named as a count rather than listed, because the list is only useful
+        # next to what it used to say - which is what `actions prune` prints.
+        print(
+            f"{counts['orphans']} stored item{'s' if counts['orphans'] != 1 else ''} no longer "
+            f"{'appear' if counts['orphans'] != 1 else 'appears'} in any notes.md; a /cleanup "
+            f"re-run re-worded {'them' if counts['orphans'] != 1 else 'it'}. "
+            f"`referat actions prune` forgets {'them' if counts['orphans'] != 1 else 'it'}."
+        )
+    return 0
+
+
 HOTWORD_HEADERS = ("TERM", "SOURCE")
 
 HOTWORD_SOURCES = (
@@ -2985,6 +3505,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "hotwords":
         return run_hotwords(config, as_json=args.as_json)
+
+    if args.command == "day":
+        return run_day(config, args.day)
+
+    if args.command == "actions":
+        return run_actions(config, args)
 
     if args.command == "people":
         return run_people(config, as_json=args.as_json)

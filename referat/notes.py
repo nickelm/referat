@@ -35,6 +35,7 @@ and would fail at the moment somebody clicks *Generate notes*.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import os
@@ -44,7 +45,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from referat import progress
+from referat import paths, progress
 from referat.config import Config
 
 log = logging.getLogger(__name__)
@@ -149,18 +150,120 @@ def generate_notes(config: Config, meeting_id: str) -> tuple[bool, str]:
     while it runs, and a surface that must not block runs it on a thread. The
     tray already has that thread for transcription.
     """
+    meetings_dir = config.paths.meetings_dir
+    if not (meetings_dir / meeting_id).is_dir():
+        return False, f"{meeting_id} is not in {meetings_dir}; only a promoted meeting has notes"
+    return _spawn(
+        config,
+        prompt=f"/cleanup {meeting_id}",
+        key=progress_key(meeting_id),
+        kind=progress.NOTES,
+        title=meeting_id,
+        expect=meetings_dir / meeting_id / paths.NOTES_MD,
+        what=f"notes for {meeting_id}",
+    )
+
+
+def day_progress_key(day: str) -> str:
+    """The :mod:`referat.progress` key for one day's summary pass.
+
+    A namespace of its own rather than `notes:<day>`, which would only stay
+    distinct from a meeting's key because meeting ids carry `_HHMM` — and
+    :func:`referat.progress.begin` *replaces* whatever is under a key, so a
+    collision would silently erase a running job rather than fail.
+    """
+    return f"{progress.DAY}:{day}"
+
+
+def generate_day_summary(config: Config, day: str) -> tuple[bool, str]:
+    """Run `/standup <YYYY-MM-DD>` over that day's notes. The only implementation.
+
+    The second caller of :func:`_spawn`, and the reason it exists. Everything
+    about the invocation is the same as a cleanup's — the meetings folder as cwd,
+    the same three allowed tools, no `Bash`, the same streamed events — because
+    all of that is a property of *running Claude Code in that folder* rather than
+    of what is being written.
+
+    **Two guards, and neither is `generate_notes`'.** The date is validated as
+    exactly `%Y-%m-%d` before it reaches either the prompt or a path: it is
+    interpolated into both, which makes it the one injection-shaped surface here.
+    And the day has to *have* notes — a `/standup` over nothing would spend a
+    subprocess to write an empty file. Reusing the is-this-a-meeting-folder check
+    would have silently accepted `days` as a meeting.
+
+    No lifecycle is recorded afterwards, unlike a cleanup: a day is not a meeting
+    and has no `meta.json` to hold a status. See
+    :func:`referat.cli.write_day_summary`.
+    """
+    try:
+        parsed = dt.datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return False, f"{day!r} is not a date; write it as YYYY-MM-DD"
+    if parsed.strftime("%Y-%m-%d") != day:
+        # `strptime` is lenient about zero padding, so `2026-9-3` parses happily
+        # and would then name a *second* file for a day that already has one.
+        # The canonical spelling is the file name, so it is the only one accepted.
+        return False, f"write the date zero-padded: {parsed:%Y-%m-%d}, not {day!r}"
+
+    meetings_dir = config.paths.meetings_dir
+    noted = [
+        folder
+        for folder in sorted(meetings_dir.glob(f"{day}_*"))
+        if (folder / paths.NOTES_MD).exists()
+    ]
+    if not noted:
+        return False, (
+            f"no meeting on {day} has notes yet; write some with `referat notes <id>` "
+            f"and a summary will have something to read"
+        )
+
+    return _spawn(
+        config,
+        prompt=f"/standup {day}",
+        key=day_progress_key(day),
+        kind=progress.DAY,
+        title=day,
+        expect=meetings_dir / paths.DAYS_DIR / f"{day}.md",
+        what=f"a summary of {day} ({len(noted)} meeting{'s' if len(noted) != 1 else ''})",
+    )
+
+
+def _spawn(
+    config: Config,
+    *,
+    prompt: str,
+    key: str,
+    kind: str,
+    title: str,
+    expect: Path,
+    what: str,
+) -> tuple[bool, str]:
+    """Run one slash command in the meetings folder and report what happened.
+
+    Everything both passes share, which is everything but the prompt and what
+    they are expected to leave behind. Factored out when the day summary arrived
+    rather than copied, because the parts worth getting right — the deny rule
+    reaching the pass, `Bash` staying out of `--allowedTools`, the streamed events
+    that make a hang distinguishable from work — are exactly the parts a second
+    copy would eventually differ on.
+
+    **cwd is the meetings folder and never the repository.** The slash commands,
+    that folder's `CLAUDE.md` and the `.voices/` deny rule all live in its
+    `.claude/`, and a pass run anywhere else would have none of them — including
+    the deny rule, which is the one that matters.
+
+    Blocking, and deliberately so: it reports through :mod:`referat.progress`
+    while it runs, and a surface that must not block runs it on a thread.
+    """
     binary = resolve_claude(config)
     if binary is None:
         return False, NO_BINARY
 
     meetings_dir = config.paths.meetings_dir
-    if not (meetings_dir / meeting_id).is_dir():
-        return False, f"{meeting_id} is not in {meetings_dir}; only a promoted meeting has notes"
-
     args = [
         binary,
         "-p",
-        f"/cleanup {meeting_id}",
+        prompt,
         "--allowedTools",
         ALLOWED_TOOLS,
         "--permission-mode",
@@ -173,16 +276,15 @@ def generate_notes(config: Config, meeting_id: str) -> tuple[bool, str]:
         "stream-json",
         "--verbose",
     ]
-    key = progress_key(meeting_id)
     log.info("running %s in %s", " ".join(args[1:]), meetings_dir)
-    progress.begin(key, progress.NOTES, meeting_id, "starting claude")
+    progress.begin(key, kind, title, "starting claude")
 
     try:
-        return _run(args, meetings_dir, key, meeting_id)
+        return _run(args, meetings_dir, key, what, expect)
     except FileNotFoundError:
         return False, f"could not run {binary}: it is not there any more"
     except Exception as exc:  # pragma: no cover - a spawn that fails oddly
-        log.exception("could not run claude for %s", meeting_id)
+        log.exception("could not run claude for %s", title)
         return False, f"could not run claude: {exc}"
     finally:
         progress.end(key)
@@ -234,7 +336,7 @@ def _phase(event: dict[str, Any]) -> str:
     return phase
 
 
-def _run(args: list[str], cwd: Path, key: str, meeting_id: str) -> tuple[bool, str]:
+def _run(args: list[str], cwd: Path, key: str, what: str, expect: Path) -> tuple[bool, str]:
     """Spawn, turn each streamed event into a progress phase, and judge the result.
 
     **The events are the point.** Plain `-p` prints one blob when the whole pass
@@ -307,13 +409,13 @@ def _run(args: list[str], cwd: Path, key: str, meeting_id: str) -> tuple[bool, s
 
     if result.get("is_error") or (result and result.get("subtype") != "success"):
         complaint = str(result.get("result") or result.get("subtype") or "it reported an error")
-        return False, f"claude could not write notes for {meeting_id}: {complaint[:300]}"
+        return False, f"claude could not write {what}: {complaint[:300]}"
     if code != 0:
         complaint = next((line for line in reversed(errors) if line), f"exit code {code}")
-        return False, f"claude could not write notes for {meeting_id}: {complaint}"
-    if not (cwd / meeting_id / "notes.md").exists():
-        # Exit zero and no file. Reported rather than believed: the caller is
-        # about to record `notes_written`, which would then be a lie in
-        # `meta.json` about a file that is not there.
-        return False, f"claude exited cleanly but wrote no notes.md for {meeting_id}"
-    return True, f"wrote notes for {meeting_id}"
+        return False, f"claude could not write {what}: {complaint}"
+    if not expect.exists():
+        # Exit zero and no file. Reported rather than believed: after a cleanup
+        # the caller is about to record `notes_written`, which would then be a lie
+        # in `meta.json` about a file that is not there.
+        return False, f"claude exited cleanly but wrote no {expect.name} for {what}"
+    return True, f"wrote {what}"

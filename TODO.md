@@ -1953,7 +1953,8 @@ only* toggle had ever been planned.
 
 ## 20. The command center
 
-**Planned on 2026-09-02; phases 0 and 1 built the same day.** The primary
+**Planned on 2026-09-02; phases 0 to 4 built the same day, phase 5 on
+2026-09-03.** The primary
 graphical surface becomes a **command center**: a desktop window owned by the
 tray app and opened from the tray icon. The VS Code extension drops to
 maintenance — bug fixes only, no new features — and is deleted once this reaches
@@ -2227,34 +2228,103 @@ clipboard, and none of it touches `meta.json`, a tag or a name.
 
 ### Phase 3 — labeling
 
-- [ ] Snippet playback, the known-name chips and the name field, driving
+**Built on 2026-09-02.** Two new modules — `referat/people.py` for the derivation
+and `referat/ui/speakers.py` for the dialog — plus `label.label_document` and
+`label.name_speaker`, which are the document and the operation the surfaces share.
+
+- [x] Snippet playback, the known-name chips and the name field, driving
       `label.apply_name` — which writes the database, `meta.json`, the transcript
       labels and the snippet cleanup in that order, and which the UI reimplements
-      no part of. `voices.name_complaint` still decides what a name may be
-- [ ] **Project-scoped identification, and it is the gallery only.** When a
+      no part of. `voices.name_complaint` still decides what a name may be.
+      **Built, and it drives `label.name_speaker` rather than `apply_name`, which
+      this box named because the layer did not exist yet.** `apply_name` is the
+      primitive and the pipeline calls it too; what makes *naming* correct is the
+      four things `run_apply` had wrapped around it where only the CLI could
+      reach them — the reserved-name rule, the meeting lookup, the refusal to
+      rename somebody who already has a name, and regenerating the dashboard.
+      A dialog reaching past those would have been the second implementation of
+      all four. Exactly the correction phase 2 made about `apply_tags` against
+      `projects.add_tags`, one module along, and worth noticing that the same box
+      was written the same wrong way twice
+- [x] **Project-scoped identification, and it is the gallery only.** When a
       meeting carries a project, the names offered are the people associated with
       that project, with everybody else behind a *show all* — narrower and
       better-ordered choices for a human, and nothing more. Every name written is
-      still somebody's decision
-- [ ] **The automatic match is unchanged and stays global.** `voices.identify`
+      still somebody's decision, which is why a chip **fills the field rather than
+      applying itself**: a name teaches every meeting after this one a voice, and
+      the click that starts that should not also commit it
+- [x] **The automatic match is unchanged and stays global.** `voices.identify`
       runs during the pipeline, before anything has been tagged, so there is
       nothing to scope on; the threshold-and-margin rule in `voices.match` is
       untouched, including the single-name case where the margin is asked of the
-      score itself. Automatic re-matching of a meeting's unnamed speakers when it
-      is tagged is a deferred option and not this phase — see the open questions
-- [ ] **Project membership never touches clustering.** Diarization is upstream of
+      score itself. Nothing in `people.py` is reachable from the pipeline at all
+- [x] **Project membership never touches clustering.** Diarization is upstream of
       all of this and knows nothing about projects. Narrowing a gallery changes
       what a person is offered; changing the clustering would change what the
       machine decided, and that line does not move
-- [ ] `label <id> --json` gains a **`gallery`** field: the names this meeting's
+- [x] `label <id> --json` gains a **`gallery`** field: the names this meeting's
       tags associate with, and the rest as a second list. The scoping is computed
       in Python and the UI renders it, because working out which people belong to
       a project in the UI would be a second implementation of exactly the thing
-      this whole arrangement exists to have one of
-- [ ] The association itself has to be derived, because nothing indexes it: a
+      this whole arrangement exists to have one of.
+      **It carries a third key, `tags`**, which was not planned and earns its
+      place: it lets a surface say *this meeting has no project, so every name is
+      offered* as a fact it was **told**, rather than inferring it from `scoped`
+      being short — the same shape of mistake as inferring a lifecycle from which
+      files exist
+- [x] The association itself has to be derived, because nothing indexes it: a
       `Voiceprint` records the meeting it was filed from, that meeting has
       `tags`, and a person appears in a meeting whose `speaker_names` names them.
-      Both directions are needed and neither is stored
+      Both directions are needed and neither is stored.
+      **Measured rather than argued, and the measurement is the useful part**: on
+      the six meetings here, Niklas has voiceprints filed from **two** meetings
+      and appears in **all six**, so five of six projects associate the owner
+      through the appearances direction alone. The other direction covers the
+      case a `rerun` makes — renumbered clusters that were not re-matched, whose
+      `speaker_names` loses the name while the print filed from that meeting keeps
+      its provenance
+
+#### What building it settled
+
+- [x] **The owner is scoped into every meeting**, whatever it carries. Not in the
+      plan; found by reading the first gallery this produced, where the owner sat
+      in `rest` for five of six projects for the reason the box above measures.
+      They pressed the button, so they were in the room — and leaving them out put
+      the one name a surface can honestly lead with behind a *show all*, on
+      exactly the meetings where an unnamed microphone cluster is most likely to
+      be them. It goes through the same intersection with the database as every
+      other name, so an `[speakers].owner_name` with no voiceprint behind it yet
+      is still not offered
+- [x] **Playback is refused while a meeting is recording**, `paused` included.
+      The one thing in this phase that is not a UI decision: this is the tray's
+      process, so snippets play out of the speakers WASAPI is looping back into
+      `system.wav`, and a person's earlier speech would be captured into the
+      meeting being recorded, transcribed, diarized and rendered as if the far end
+      had said it. The transcript is evidence of what was said, and that is the
+      one way a UI could quietly write something into one. Paused too, because a
+      paused meeting is still being recorded — which is why the recorder's state
+      machine has a `paused` and the meeting's lifecycle does not
+- [x] **The echo refusal now says what is actually wrong.** Naming an echo cluster
+      through `--speaker` used to come back *"is not an unnamed speaker in …"*,
+      which is what `unknown_speakers` filtering it out reduces the question to.
+      That flag is typed by somebody who can see the cluster in `referat show`,
+      and the real reason is the one that costs a database entry if it is ignored
+- [x] **`label.concatenate` is shared by both playbacks.** `play` blocks for the
+      prompt and `play_async` returns for the window, and both decode through one
+      function rather than two loops. A clip that will not decode is skipped
+      rather than fatal: one unreadable snippet out of three costs a third of the
+      evidence, not all of it
+- [ ] **Still unexercised: playing a real snippet from the window.** Every meeting
+      on this machine is fully named, so the dialog was driven against a synthetic
+      meetings folder and against the six real ones read-only. What has not
+      happened is a person hearing a voice come out of this dialog and typing a
+      name they were not already sure of. The next meeting with an unknown speaker
+      in it settles that, and it is also the first test of whether the scoped
+      gallery is the right list or merely a shorter one
+- [ ] **Two graphical surfaces now render the same `gallery`, and only one uses
+      it.** The extension is in maintenance, so it keeps showing every known name;
+      the field is additive and nothing there broke. Worth watching only in the
+      sense every `--json` change is until `referat-vscode/` goes
 
 ### Phase 4 — projects
 
@@ -2266,22 +2336,42 @@ would be a second place to say what `projects.json` says. Read the first box as
 widened by the boxes at the end of this phase, not as replaced — everything it says about
 lightness still holds, and a glossary is a list of words rather than a feature.
 
-- [ ] **Deliberately lightweight: a tag, a name, and an optional one-line
+**Built on 2026-09-02.** One new module, `referat/ui/projects.py`, four new
+guarded functions in `cli.py`, two new CLI verbs, two setters on `ProjectsDB`,
+and the window's central widget became a `QTabWidget`.
+
+- [x] **Deliberately lightweight: a tag, a name, and an optional one-line
       description.** The description already exists as a reserved field in
       `projects.py` and is written by nothing; this is what starts writing it
-- [ ] Create, rename and delete through `ProjectsDB`. A rename changes the
+- [x] Create, rename and delete through `ProjectsDB`. A rename changes the
       display name alone — the id is a slug fixed at creation, which is the whole
-      reason `meta.json` stores ids
-- [ ] **Deleting orphans its tags, visibly, and cascade-deletes nothing.** The
+      reason `meta.json` stores ids. **Built, and through `cli.rename_project`
+      and `cli.remove_project` rather than through `ProjectsDB` itself**, which
+      this box named because the layer did not exist yet — the third time the
+      same correction has been made, after `apply_tags` in phase 2 and
+      `name_speaker` in phase 3, and the first time it was made *before* the
+      second surface existed rather than after. `rename` and `rm` had loaded,
+      checked, mutated and saved inside `run_project`, where only the CLI could
+      reach any of it
+- [x] **Deleting orphans its tags, visibly, and cascade-deletes nothing.** The
       orphan chips get a section of their own, as they do in the sidebar, because
       a tag vanishing quietly off three meetings is how you lose track of what a
-      meeting was about
+      meeting was about. Built as a section in the project list, shown and
+      **unselectable**: there is no project there to edit, and an orphan comes off
+      a *meeting*. The delete modal names the count before the command runs,
+      which is the one place this page says something Python also says — the same
+      exception the sidebar's Delete modal is, and for the same reason: there is
+      no outcome to quote yet
 - [ ] **One Google Doc per project in the command center's model**, linked to an
       existing doc or created new. Note the divergence and do not resolve it
       here: step 13 specifies **zero or more** docs per project and `DocRef` is
       already a list. The UI showing one is a presentation choice on a list of
-      one, never a schema change — see the open questions
-- [ ] **The glossary is edited here, beside the description**, and that makes
+      one, never a schema change — see the open questions.
+      **Left unbuilt, and the reason is the rule rather than the effort**: the
+      CLI owns every mutation and `project link-doc` does not exist until step
+      13. The page renders the references it finds — a list, not a doc, so
+      nothing here narrows the schema — and says where linking will come from
+- [x] **The glossary is edited here, beside the description**, and that makes
       this page the hotword surface. It is already a `Project` field, written
       today by nothing but a hand edit to `projects.json`, and it is the one key
       in that file something outside step 13 depends on: `hotwords.merge` folds
@@ -2289,15 +2379,24 @@ lightness still holds, and a glossary is a list of words rather than a feature.
       **before** any meeting has been tagged. So editing it here is hotword
       management arriving where the terms already live, rather than a new screen
       about a config file
-- [ ] **`ProjectsDB` needs a setter and the CLI needs a verb, and neither is an
+- [x] **`ProjectsDB` needs a setter and the CLI needs a verb, and neither is an
       extra.** `add`, `rename` and `remove` exist; nothing sets `glossary` or
       `description`. The CLI owns every mutation, so the window may not reach
       past it into `ProjectsDB` — a `referat project glossary <id>` verb, with
       the description alongside it, is a **prerequisite** of the box above.
       Cross-reference the deferred `referat glossary prune --dry-run` idea under
       *Surfaced later*: it acts on the same field and should not be designed
-      twice
-- [ ] **`[transcription].hotword_extras` stays hand-edited, and is shown
+      twice.
+      **Built as `project describe <id> [text] [--clear]` and `project glossary
+      <id> [--add ...] [--remove ...] [--clear]`.** `--add` and `--remove` are
+      ergonomics over a **whole-list replacement**: both read the current list and
+      hand the whole of it to `set_glossary`, which is the one call that reaches
+      the file. Deliberately the opposite of `apply_tags`, which is a diff and
+      must be — a picker renders a *subset* of the projects, so a replacement
+      there could drop a tag it never drew, while a glossary is edited as the
+      whole list. Removal is case-insensitive, matching the deduplication that put
+      the terms there
+- [x] **`[transcription].hotword_extras` stays hand-edited, and is shown
       read-only.** This is the deliberate half rather than an omission.
       `config.py` promises never to write `config.toml` back, and a UI that
       edited one key of it would either break that promise or make `config.toml`
@@ -2305,48 +2404,184 @@ lightness still holds, and a glossary is a list of words rather than a feature.
       the terms belonging to no project and no person, which is a short and
       rarely-touched list — the cost of a text editor is low and the cost of the
       promise is not
-- [ ] **A read-only merged-list panel, from `hotwords.merge`**: every term with
+- [x] **A read-only merged-list panel, from `hotwords.merge`**: every term with
       the source it came from, and what the 223-token cap dropped. That last
       part is the point. A cap nobody can see is how this turns into a bug
       report about one specific name that is never heard right — step 12b said
       so and answered it with a log line and a CLI table, and this page is now
       where somebody will be *adding* the terms that push the list over
-- [ ] **`hotwords_document(config)` splits out of `run_hotwords`, and the verb
+- [x] **`hotwords_document(config)` splits out of `run_hotwords`, and the verb
       gains `--json`.** Step 12b deliberately gave it none, on the recorded
       reason that nothing reads this document; that stops being true here. Same
       shape as `list_document` and `transcript_document`, which the window
       already imports — one builder, a human table and a JSON form over it, and
       a document you can print is a document you can test
-- [ ] None of this breaches *the window may not read `meta.json`, `voices.json`
+- [x] None of this breaches *the window may not read `meta.json`, `voices.json`
       or `projects.json` itself*. `hotwords.merge` and `ProjectsDB` are this
       package's own functions, exactly as `cli.list_document` is; the rule is
       about a second implementation, not about which files are eventually opened
 
+#### What building it settled
+
+- [x] **The window is tabs, and the recorder is not one of them.** `QTabWidget`
+      with Meetings and Projects, People and the dashboard being phases 5 and 6 —
+      but record, pause and stop stay *above* the tabs, because the recorder is
+      not one of the three entities and a Stop button hidden behind a tab is a
+      recording somebody cannot stop from here. `Tags…` and `Speakers…` went the
+      other way and moved down into the meetings page: they act on a selected
+      meeting, and on a screen about projects they would have been two dead
+      buttons
+- [x] **Only the page in front is refreshed.** Every page costs a scan of both
+      meeting roots and `refresh` runs on every transition; a hidden one is
+      brought up to date when it is switched to, which is the moment before
+      anybody could read a stale figure off it. The projects page keeps whatever
+      is half-typed into its form across a refresh, because reselecting the row
+      that is already selected fires no change — which then made the Save button's
+      state something that has to be recomputed explicitly, or it stayed lit after
+      a save, offering to write again what had just been written
+- [x] **An unreadable `projects.json` was saying the wrong thing to the wrong
+      caller.** One sentence, three endings, and the ending is the caller's:
+      `WOULD_OVERWRITE`, `CANNOT_TAG`, and a new `CANNOT_LOOK_UP` for a read.
+      `referat project glossary` reads the file to print a list, and being told
+      *nothing can be tagged until it is* is an answer to a question nobody asked
+- [x] **`project_document` grew a `complaint`, and `referat project list` prints
+      it.** An unreadable file loads as *no projects*, which is the rule that
+      keeps a broken one from costing a transcript — and it means an empty list
+      has two causes that draw the same picture. The listing answered both with
+      *No projects yet. Create one with…*; the page must not guess either, since
+      it offers to create a project into a file whose contents it cannot see, so
+      a complaint disables every control that would write
+- [x] **Cleaning a glossary belongs on the way into the file.**
+      `projects.clean_terms` collapses whitespace, drops blanks and deduplicates
+      case-insensitively with the first spelling winning — the same reduction
+      `hotwords.collect` applies on the way into Whisper's prompt. Not a second
+      implementation of it: `collect` deduplicates *across* three sources and
+      cannot stop, and this is the file being written in the shape it will be read
+      in, so `referat project glossary` prints what `referat hotwords` will merge
+- [x] **Only the dirty field is written, and the form is refilled from the file
+      afterwards.** Two calls rather than one composite, because they are two
+      operations with two messages and each rewrites `projects.json` whole and
+      atomically — so the worst an interruption between them does is leave the
+      description saved and the glossary not, which the refresh then shows
+      honestly. Refilling is the tag picker's rule one module along: a box still
+      showing the three lines that became two would be this page holding an
+      opinion about somebody else's field. A refusal is the exception, where the
+      typed text stays so it can be corrected rather than retyped
+- [ ] **Still unexercised: the page against a project that actually needs a
+      glossary.** Every glossary on this machine is empty, so the panel was driven
+      against synthetic terms and the six real projects read-only. What has not
+      happened is somebody adding the name their transcripts keep mangling and a
+      later meeting coming out with it spelled right — which is the only test of
+      whether the merged panel is where hotword management belongs
+- [ ] **The cap has never been reached in anger.** Nine names and no glossaries
+      is 49 of 223 tokens; the drop list was seen only by pushing 40 synthetic
+      terms through it. Watch what it drops the first time a real glossary
+      approaches the budget, since the priority order — extras, names, glossaries —
+      means a project's own terms are what goes first
+
 ### Phase 5 — people
 
-- [ ] **A person page unifying the voiceprint identity with a lightweight tag**:
+**Built on 2026-09-03.** One new module, `referat/ui/people.py`, one new CLI verb,
+one new guarded function in `label.py`, a `Person` record and a second reading of
+the join in `people.py`, and a second kind of link in the viewer.
+
+- [x] **A person page unifying the voiceprint identity with a lightweight tag**:
       which projects they appear in, which meetings, how many voiceprints are
       filed under them and where each came from
-- [ ] **Clicking a person's name in any document opens that page** — in a
+- [x] **Clicking a person's name in any document opens that page** — in a
       transcript's label column, in a note's `[[Wikilink]]`, in a speaker chip.
-      That is the whole argument for a page rather than a row
-- [ ] `referat people [--json]`: one entry per known name with its print count,
+      That is the whole argument for a page rather than a row.
+      **Two of the three, and the chip is a deliberate refusal** — see the box
+      under *What building it settled*. A `referat-person:` scheme carries the
+      name, percent-encoded because a name is whatever somebody typed
+- [x] `referat people [--json]`: one entry per known name with its print count,
       the meetings its prints were filed from, the meetings it appears in and the
       projects those meetings carry. **Names, counts and ids — never an
       embedding, and never a path into `.voices/`.** The database is biometric
       personal data about people who never asked to be in it, and a listing verb
-      is the first place that is easy to forget
-- [ ] Appearances need a scan of `speaker_names` across `Config.meeting_roots()`,
+      is the first place that is easy to forget.
+      **Checked by grepping the `--json` for `embedding`, `.voices` and the
+      configured voices path: zero of each.** That is the verification this phase
+      has, and it is worth re-running whenever the document grows a field
+- [x] Appearances need a scan of `speaker_names` across `Config.meeting_roots()`,
       because `voices.json` records only where a print was *filed* and somebody
       recognised in a meeting files nothing new
-- [ ] **The privacy rules are unchanged and restated here because a page makes
+- [x] **The privacy rules are unchanged and restated here because a page makes
       them easier to break.** The database never leaves the machine, is not
       synced, is not backed up, stays denied to the `/cleanup` pass, and `referat
       label --forget <name>` deletes a person outright — embeddings gone, labels
-      reverted everywhere. Deleting a meeting still does not delete a person
-- [ ] A **Forget this person** action, behind a modal, driving `label.forget`. It
+      reverted everywhere. Deleting a meeting still does not delete a person.
+      Said on the page itself, under the lists, rather than only here
+- [x] A **Forget this person** action, behind a modal, driving `label.forget`. It
       is the one destructive thing on this page and it is the point of the page
-      being honest about what is stored
+      being honest about what is stored.
+      **Driving `label.forget_person`**, not `forget` — see below
+
+#### What building it settled
+
+- [x] **`forget` was a primitive with the operation wrapped around it inside
+      `run_forget`**, exactly as `rename`/`rm` were before phase 4 and
+      `apply_name` was before phase 3. Split into `label.forget_person`, which
+      holds the refusal of a name nothing is filed under and the
+      `index.write_index` that reverting a label makes necessary; `run_forget` is
+      the confirmation and one line of dispatch. **The fourth time this
+      correction has been made, and the second time before the second surface
+      existed.** The confirmation stayed *outside* deliberately: `_confirm` reads
+      `input()` and answers no on EOF, which is a question asked of a terminal,
+      and a window asks the same one with a modal
+- [x] **`project_people` and the new per-person read were two walks of the same
+      two files.** `people.directory` is the one walk and `project_people` is
+      derived from it. Same contract, checked against `gallery` on the six real
+      meetings
+- [x] **A name with no voiceprint behind it is a real category and nothing else
+      shows it.** A transcript still calling somebody `Anna` while the database
+      holds nothing under that name is drift — a `rerun` that renumbered past
+      them, or a hand edit — and no other surface compares those two files. It
+      gets its own section, as the orphaned tag ids do on the projects page, with
+      `Forget` disabled because there is nothing filed to delete. Forced in a
+      scratch config to check it renders; **empty on this machine**, which is the
+      right answer rather than a missing feature
+- [x] **A wikilink is linked whatever it says.** Nothing in a note distinguishes
+      `[[Gaby]]` from `[[DuckDuckTalk]]`, and the alternatives were to link none
+      of them or to hold a known-name list inside the viewer that goes stale
+      between refreshes and costs a second scan of both roots per keystroke. A
+      name nobody is filed under opens the page and is told so, which is
+      information about the note. Which *transcript labels* are names is the
+      opposite case and is decided in Python, by `voices.name_complaint`, and
+      carried as `transcript_document`'s new `people` field
+- [x] **A speaker chip does not navigate, and that is the exception to the box
+      above.** A chip fills the name field rather than applying itself — two
+      keystrokes on purpose, because a name teaches every later meeting a voice —
+      and the dialog is modal over the page a link would go to. So a chip carries
+      a **tooltip** instead: prints, meetings, projects, which is the question
+      somebody has while naming. Folded in at `open_for` rather than by widening
+      `label_document`, since a tooltip is presentation and `referat label --json`
+      has no use for it, and a failure to read it costs the tooltip and never the
+      dialog
+- [x] **Arriving by a link is a row change the row handler never sees.** Both
+      `ProjectsPage.select_project` and the people page's own reselect had to ask
+      the unsaved-changes question and fill the form explicitly, because
+      reselecting a row that is already current fires no signal — which is the
+      very property that keeps a half-typed glossary across a refresh. Same fact,
+      two opposite consequences, in two files
+- [x] **Every navigation clears what would hide its target.** `open_meeting`
+      turns off the untagged filter and empties the search box, and `select`
+      clears the people search. A link landing behind a filter somebody set ten
+      minutes ago looks exactly like a link that did nothing — and on this page it
+      would look like *nobody is filed under that name*, which is the one message
+      here that must never be shown wrongly
+- [ ] **Still unexercised: the page against a meeting with an unnamed speaker in
+      it.** No meeting on this machine has one, so the chip tooltips were built
+      from the real people document but never seen on screen, and neither was a
+      `Forget` on a person somebody actually wants gone. `forget_person` itself
+      was driven end to end in a scratch config — 245 lines reverted from a name
+      to `SPEAKER_02`, the embedding gone, `speaker_names` cleared, the dashboard
+      regenerated — and the real `.voices/` was never the subject of a test
+- [ ] **The page has never met a person with more than two voiceprints**, so the
+      Voiceprints table has never needed to scroll and the *filed from* / *appears
+      in* gap has never been larger than four. Watch it as the database grows;
+      the gap is the thing the page exists to explain and a big one is where the
+      sentence under the heading gets tested
 
 ### Phase 6 — the dashboard
 
@@ -2384,8 +2619,19 @@ lightness still holds, and a glossary is a list of words rather than a feature.
       match *and its runner-up, including where the match was refused*, which
       nothing had ever printed and which is the only material there is for
       calibrating `[speakers]`' two numbers. See the open item under 7b
-- [ ] `label <id> --json` gains `gallery` — phase 3
-- [ ] `referat people [--json]` — phase 5
+- [x] `label <id> --json` gains `gallery` — phase 3. Built as `scoped`,
+      `rest` and `tags`, out of `referat/people.py`'s two-direction join, with
+      the whole document split into `label.label_document` so the window renders
+      what the CLI prints
+- [x] `referat project describe` and `project glossary`, and `hotwords --json`
+      — phase 4. The two verbs are the prerequisite that box named: the CLI owns
+      every mutation, so the projects page could not edit a glossary until
+      something could. `hotwords_document` is the third `--json` this step has
+      added over a document the window also renders
+- [x] `referat people [--json]` — phase 5. Plus the `people` field on `transcript
+      <id> --json`, which was not foreseen here and is the same move a fourth
+      time: the rule for *what counts as a name* is `voices.name_complaint`'s, so
+      the document names the labels rather than the viewer re-deciding
 - [ ] **No `--json` on the write verbs.** `tag`, `untag`, `state`, `promote`,
       `delete`, `label --speaker`, `label --forget` and the project verbs keep
       answering in prose, and the window keeps the property `cli.ts`'s `mutate`
@@ -2418,7 +2664,12 @@ lightness still holds, and a glossary is a list of words rather than a feature.
 - [ ] **When does `referat-vscode/` actually go?** "At feature parity" is a
       judgment call and the phase is not fixed. Phase 5 is the earliest honest
       candidate, since that is where the window does something the sidebar never
-      could
+      could.
+      **Phase 5 is built and the answer was: not yet, decided on 2026-09-03.**
+      The window now does the thing a column could not, but the page has been
+      driven against six meetings and no unnamed speaker; parity is reassessed
+      once it has met real work. The extension stays in maintenance meanwhile —
+      fixed when it breaks, never extended, not packaged again
 - [ ] **Automatic project-scoped re-matching**, which this step narrows to the
       gallery. A re-match of a meeting's still-unnamed speakers when it is tagged
       is the obvious next move if the gallery proves the restriction is right; it

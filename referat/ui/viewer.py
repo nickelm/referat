@@ -18,6 +18,21 @@ cross-link is a scroll position and nothing more. That is why the target is
 found by *nearest entry at or before* rather than by exact match: the notes are
 written by a person or by `/cleanup` and their timestamps are approximate, while
 the transcript's are whole seconds of a real segment start.
+
+**A name is the second kind of link, and phase 5 is what gave it somewhere to
+go.** A speaker label that is somebody's name, and every `[[Wikilink]]` in the
+notes, becomes a `referat-person:` link the window answers by opening that
+person's page. Which labels are names is **not decided here** —
+:func:`referat.cli.transcript_document` says so in its `people` field, from
+:func:`referat.voices.name_complaint`, which is the one function that knows `ME`
+and `REMOTE` are channel labels and `SPEAKER_NN` is a number.
+
+A wikilink is linked *whatever it says*, deliberately. `/cleanup` writes them for
+people and for projects alike and nothing in the file distinguishes the two, so
+the alternatives were to link none of them or to hold a list of known names in
+this widget that goes stale between refreshes. The people page answers a name
+nothing is filed under by saying exactly that, which is information about the
+note rather than a dead end.
 """
 
 from __future__ import annotations
@@ -27,6 +42,7 @@ import logging
 import re
 from bisect import bisect_right
 from typing import Any
+from urllib.parse import quote, unquote
 
 from PySide6.QtCore import QUrl, Signal
 from PySide6.QtWidgets import QTabWidget, QTextBrowser, QWidget
@@ -51,10 +67,46 @@ left to its own devices would try to *load* an unknown URL into itself and
 blank the pane.
 """
 
+PERSON_SCHEME = "referat-person"
+"""The scheme a name links to: `referat-person:<percent-encoded name>`.
+
+A separate scheme rather than a path under :data:`SCHEME`, so
+:func:`parse_target` keeps matching a whole timestamp and neither parser has to
+guess which kind of link it is holding. The name is percent-encoded because it is
+whatever somebody typed into `referat label` — spaces, non-ASCII and `#` are all
+allowed in a name and none of them survive a URL raw.
+"""
+
+WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+)\]\]")
+"""A `[[Wikilink]]` in `notes.md`, which the cleanup prompt writes for a person.
+
+Deliberately refuses nested brackets and a line break: a `[[` that never closes
+on its own line is a typo in a note, and matching across lines would swallow a
+paragraph.
+"""
+
 
 def _anchor(seconds: float) -> str:
     """The anchor name for an entry starting at `seconds`. Whole seconds, as rendered."""
     return f"t{int(seconds)}"
+
+
+def person_url(name: str) -> str:
+    """The link a name becomes. Percent-encoded, because a name is somebody's typing."""
+    return f"{PERSON_SCHEME}:{quote(name, safe='')}"
+
+
+def parse_person(url: QUrl) -> str | None:
+    """The name a `referat-person:` link points at, or None for anything else.
+
+    `QUrl.scheme` lowercases, which is right here — the scheme is ours and fixed —
+    while the name after it is taken from the raw string and decoded, so its own
+    case survives. Reading it back through `QUrl.path` would let Qt normalise a
+    name, and a name is compared against the database exactly as it was filed.
+    """
+    if url.scheme() != PERSON_SCHEME:
+        return None
+    return unquote(url.toString()[len(PERSON_SCHEME) + 1 :]).strip() or None
 
 
 def render_transcript_html(document: dict[str, Any]) -> str:
@@ -71,12 +123,17 @@ def render_transcript_html(document: dict[str, Any]) -> str:
     palette already paints the background and the body text, and the only two
     things this stylesheet says are *the timestamp is quieter than the speech*
     and *the label is not*.
+
+    A label that is a **name** is also a link to that person, and which labels
+    those are comes from the document's `people` — never from a rule spelled out
+    here. `ME`, `REMOTE` and every `SPEAKER_NN` are drawn exactly as they were.
     """
     style = (
         "<style>"
         "p.e { margin: 0 0 6px 0; }"
         "span.ts { color: #909090; font-family: monospace; }"
         "span.lb { font-weight: bold; }"
+        "a.lb { font-weight: bold; text-decoration: none; }"
         "p.hd { margin: 0 0 12px 0; font-weight: bold; }"
         "p.no { margin: 0; color: #909090; }"
         "</style>"
@@ -91,15 +148,24 @@ def render_transcript_html(document: dict[str, Any]) -> str:
             f'{style}{head}<p class="no">transcript.md holds no entry this '
             f"parser recognises.</p>"
         )
+    named = set(document.get("people", ()))
     body = [
         f'<p class="e" id="{_anchor(entry["at"])}">'
         f'<a name="{_anchor(entry["at"])}"></a>'
         f'<span class="ts">[{html.escape(entry["time"])}]</span> '
-        f'<span class="lb">{html.escape(entry["label"])}:</span> '
+        f'{_label_html(entry["label"], named)} '
         f'{html.escape(entry["text"])}</p>'
         for entry in entries
     ]
     return style + head + "".join(body)
+
+
+def _label_html(label: str, named: set[str]) -> str:
+    """The speaker cell: a link when the label is a person, plain bold otherwise."""
+    text = html.escape(label)
+    if label not in named:
+        return f'<span class="lb">{text}:</span>'
+    return f'<a class="lb" href="{html.escape(person_url(label), quote=True)}">{text}</a>:'
 
 
 def link_timestamps(markdown: str) -> str:
@@ -121,6 +187,29 @@ def link_timestamps(markdown: str) -> str:
     return TIMESTAMP_RE.sub(link, markdown)
 
 
+def link_people(markdown: str) -> str:
+    """Rewrite every `[[Wikilink]]` in the notes into a link to that person.
+
+    The brackets are escaped back in, as :func:`link_timestamps` keeps its own:
+    a `[[Wikilink]]` is how `/cleanup` spells a person and a link that quietly
+    dropped the brackets would look like a different notation. They also mean the
+    two rewrites cannot collide — a timestamp has no `[[` and this leaves
+    `[00:12:30]` alone.
+
+    Every wikilink is linked, including one naming a project or a topic. Nothing
+    in a note distinguishes those from a person, and the people page answers a
+    name nothing is filed under by saying so — see the module docstring.
+    """
+
+    def link(match: re.Match[str]) -> str:
+        name = match.group(1).strip()
+        if not name:
+            return match.group(0)
+        return rf"[\[\[{name}\]\]](<{person_url(name)}>)"
+
+    return WIKILINK_RE.sub(link, markdown)
+
+
 CLOCK_RE = re.compile(r"(\d{2}):(\d{2}):(\d{2})")
 
 
@@ -139,7 +228,14 @@ class Viewer(QTabWidget):
     """The transcript and the notes for one meeting, and the links between them."""
 
     external_requested = Signal(QUrl)
-    """A link that is not a `referat:` timestamp. The window decides what to do."""
+    """A link that is neither a timestamp nor a name. The window decides what to do."""
+
+    person_requested = Signal(str)
+    """A speaker label or a `[[Wikilink]]` was clicked. The window opens that person.
+
+    A name rather than a URL, because the receiver looks it up by name and this
+    widget is the only thing that should know a name was ever percent-encoded.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -185,17 +281,29 @@ class Viewer(QTabWidget):
                 "never by Referat itself.</p>"
             )
         else:
-            self.notes.setMarkdown(link_timestamps(notes))
+            # Both rewrites, and they cannot collide: a timestamp has no `[[` and a
+            # wikilink has no `[HH:MM:SS]` inside it.
+            self.notes.setMarkdown(link_people(link_timestamps(notes)))
         self.transcript.moveCursor(self.transcript.textCursor().MoveOperation.Start)
 
     # --- Cross-links --------------------------------------------------------
 
     def _on_anchor(self, url: QUrl) -> None:
+        """Three kinds of link: a timestamp scrolls, a name is emitted, the rest leave.
+
+        Ordered narrowest first, and the fallthrough is unchanged: anything this
+        widget does not recognise is still the window's to decide about, which is
+        what keeps an `http://` in somebody's notes working.
+        """
         target = parse_target(url)
-        if target is None:
-            self.external_requested.emit(url)
+        if target is not None:
+            self.goto(target)
             return
-        self.goto(target)
+        name = parse_person(url)
+        if name is not None:
+            self.person_requested.emit(name)
+            return
+        self.external_requested.emit(url)
 
     def goto(self, seconds: float) -> None:
         """Show the transcript tab, scrolled to the entry covering `seconds`.

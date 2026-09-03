@@ -29,9 +29,17 @@ them, because a tag quietly vanishing off three meetings is how you lose track o
 what a meeting was about.
 
 Light on purpose — JSON and string handling, no optional extra. `project add`,
-`rename`, `rm` and `list`, and the `tag` / `untag` verbs in :mod:`referat.cli`,
-are a JSON read and a JSON write; only build step 13's `link-doc` and `sync` will
-need the `digest` extra.
+`rename`, `rm`, `describe`, `glossary` and `list`, and the `tag` / `untag` verbs
+in :mod:`referat.cli`, are a JSON read and a JSON write; only build step 13's
+`link-doc` and `sync` will need the `digest` extra.
+
+**The mutations here are primitives and the CLI owns the operations.** `add`,
+`rename`, `remove`, `describe` and `set_glossary` each change one field of an
+in-memory object and save nothing; what makes a change *correct* — the
+unreadable-file guard, the name rules, the unknown-id refusal and the single
+save — lives in :mod:`referat.cli`, and every surface goes through it. A window
+reaching past that into these methods would be the second implementation of all
+four.
 """
 
 from __future__ import annotations
@@ -177,11 +185,17 @@ class Project:
     meeting's notes against. So it must be readable for a project with no docs
     attached, and nothing here makes it conditional on one.
 
-    Hand-edited into `projects.json` for now — no verb writes it — which is safe
-    because the file is loaded and written back whole.
+    Written by `referat project glossary` since build step 20's phase 4, and by
+    the command center's projects page through it. Hand edits still work and
+    always did: the file is loaded and written back whole.
     """
     description: str = ""
-    """One line. Reserved for build step 17's notes splitting; written by nothing yet."""
+    """One line about this thread of work.
+
+    Reserved for build step 17's notes splitting, and written since phase 4 by
+    `referat project describe` — the field arriving before its consumer, which is
+    the order it was designed in.
+    """
     created_at: str = ""
 
     def to_json(self) -> dict[str, Any]:
@@ -328,6 +342,68 @@ class ProjectsDB:
     def remove(self, pid: str) -> Project | None:
         """Delete a project. Cascades nothing: its tags stay put, as orphans."""
         return self.projects.pop(pid, None)
+
+    def describe(self, pid: str, description: str) -> Project | None:
+        """Set the one-line description, or None when there is no such project.
+
+        Collapsed to one line here rather than refused, because a description is
+        prose somebody pasted and a newline in it is a formatting accident rather
+        than a mistake worth stopping for. A name is the opposite -- it becomes an
+        id and is refused outright by :func:`name_complaint`.
+        """
+        project = self.projects.get(pid)
+        if project is None:
+            return None
+        project.description = " ".join(description.split())
+        return project
+
+    def set_glossary(self, pid: str, terms: Iterable[str]) -> Project | None:
+        """Replace the glossary wholesale, or None when there is no such project.
+
+        A replacement rather than a diff, which is the opposite of what
+        :func:`add_tags` and :func:`remove_tags` are, and the difference is real:
+        a tag list is rendered by a picker showing a *subset* of the projects, so
+        a replacement there would silently drop whatever the picker failed to
+        draw. A glossary is edited as the whole list -- a text box, or a `--add`
+        that has just read it -- so the caller has all of it in hand and a
+        replacement drops nothing it did not mean to.
+
+        Cleaning is :func:`clean_terms`', so a term reaching `projects.json` is
+        already in the shape :func:`referat.hotwords.collect` would have reduced
+        it to. Doing it here rather than in the caller keeps a hand-edited file
+        and a UI-edited one the same kind of file.
+        """
+        project = self.projects.get(pid)
+        if project is None:
+            return None
+        project.glossary = clean_terms(terms)
+        return project
+
+
+def clean_terms(terms: Iterable[str]) -> list[str]:
+    """Whitespace-collapsed, empties dropped, deduplicated case-insensitively.
+
+    The same reduction :func:`referat.hotwords.collect` applies on the way into
+    Whisper's prompt, applied on the way into the file instead. That is not a
+    second implementation of anything -- `collect` deduplicates *across* three
+    sources and cannot stop deduplicating -- it is the file being written in the
+    shape it will be read in, so `referat project glossary` prints what
+    `referat hotwords` will use rather than something one term longer.
+
+    First occurrence wins, and its spelling wins with it: a glossary is what a
+    term is *called*, so `MacOS` typed after `macOS` is the duplicate rather than
+    the correction.
+    """
+    kept: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        cleaned = " ".join(str(term).split())
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        kept.append(cleaned)
+    return kept
 
 
 def projects_path(config: Config) -> Path:

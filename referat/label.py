@@ -25,8 +25,17 @@ name from the database by itself. The reverse order would lose the voiceprint an
 keep the label, which nothing can undo.
 
 The interactive prompt and the primitives underneath it are kept apart, because
-step 11's labeling webview is meant to drive :func:`apply_name` and
-:func:`forget` rather than reimplement the matching in TypeScript.
+step 11's labeling webview and step 20's dialog drive :func:`apply_name` and
+:func:`forget` rather than reimplementing the matching in TypeScript or in Qt.
+
+**There are two layers below the prompt and they are not the same layer.**
+:func:`apply_name` is the primitive and knows the order of writes; it is called
+by the pipeline as well. :func:`name_speaker` is the *operation* — the primitive
+plus the reserved-name rule, the meeting lookup, the refusal to rename somebody
+who already has a name, and the dashboard regeneration — and it is what every
+surface calls. The distinction is `cli.apply_tags`' against `projects.add_tags`,
+and it exists for the same reason: a surface reaching past the guards would be
+the second implementation of them.
 """
 
 from __future__ import annotations
@@ -37,8 +46,9 @@ import logging
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
-from referat import index, paths, voices
+from referat import index, paths, people, voices
 from referat.config import Config
 from referat.meeting import Meeting, load_meetings, resolve_meeting
 
@@ -49,6 +59,12 @@ TIMESTAMP = r"\[\d{2}:\d{2}:\d{2}\]"
 
 FUZZY_CUTOFF = 0.7
 """How close a typo has to be to an existing name before it is worth asking about."""
+
+SNIPPET_RATE = 16000
+"""What :func:`referat.voices.write_snippet` writes, so nothing here resamples."""
+
+SNIPPET_GAP_SECONDS = 0.25
+"""Silence between snippets played back to back, so two clips do not run together."""
 
 HELP = """  <name>  name this speaker        r  replay the snippets
   <n>     pick a name from above    s  skip, and ask again next time
@@ -239,26 +255,104 @@ def sample_lines(meeting: Meeting, speaker: str, count: int = 3) -> list[str]:
     return [m[1] for line in text.split("\n") if (m := pattern.match(line))][:count]
 
 
-def play(clips: list[Path]) -> None:
-    """Play a speaker's snippets back to back. Never raises — it only costs a replay."""
+def concatenate(clips: list[Path]) -> tuple[Any, str]:
+    """A speaker's snippets decoded into one array, or the complaint that stopped it.
+
+    The shape :func:`referat.meeting.resolve_meeting` uses — a value and an
+    unprefixed sentence — because the two callers say it in different places: the
+    prompt prints it, and the command center's dialog puts it beside a disabled
+    button.
+
+    **A clip that will not decode is skipped rather than fatal.** Playback is
+    worth exactly one thing, a person recognising a voice, and one unreadable
+    snippet out of three costs a third of the evidence rather than all of it. The
+    complaint is for having nothing left to play at all.
+
+    Snippets are written at 16 kHz, so this never reaches `decode_wav`'s
+    resampler — which is the reason naming somebody needs neither scipy nor any
+    part of the `transcribe` extra beyond a WAV reader.
+    """
     try:
-        import sounddevice as sd
+        import numpy as np
 
         from referat.transcribe import decode_wav
     except Exception:
-        print("  (cannot play audio: no working sound device)")
-        return
+        log.warning("cannot decode snippets", exc_info=True)
+        return None, "cannot read the snippets"
 
-    for index, clip in enumerate(clips, start=1):
+    parts = []
+    gap = np.zeros(int(SNIPPET_RATE * SNIPPET_GAP_SECONDS), dtype=np.float32)
+    for clip in clips:
         try:
-            # Snippets are written at 16 kHz, so this never reaches decode_wav's
-            # resampler and therefore never needs scipy.
-            audio = decode_wav(clip)
-            print(f"  [{index}/{len(clips)}] {clip.name} ({audio.size / 16000:.1f}s)")
-            sd.play(audio, 16000)
-            sd.wait()
-        except Exception as exc:
-            print(f"  could not play {clip.name}: {exc}")
+            parts.append(decode_wav(clip))
+        except Exception:
+            log.warning("could not decode %s", clip, exc_info=True)
+    if not parts:
+        return None, "none of the snippets could be read"
+    # A gap between them, or two clips of the same voice run together and sound
+    # like one utterance with a join in it.
+    joined = [part for clip in parts for part in (clip, gap)][:-1]
+    return np.concatenate(joined), ""
+
+
+def play(clips: list[Path]) -> None:
+    """Play a speaker's snippets back to back, blocking. Never raises.
+
+    The prompt's half of playback. :func:`play_async` is the window's, and both
+    go through :func:`concatenate` so that a snippet the terminal can play is one
+    the command center can play too.
+    """
+    audio, complaint = concatenate(clips)
+    if complaint:
+        print(f"  ({complaint})")
+        return
+    try:
+        import sounddevice as sd
+
+        print(f"  playing {len(clips)} snippet(s), {audio.size / SNIPPET_RATE:.1f}s")
+        sd.play(audio, SNIPPET_RATE)
+        sd.wait()
+    except Exception as exc:
+        print(f"  could not play the snippets: {exc}")
+
+
+def play_async(clips: list[Path]) -> str:
+    """Start a speaker's snippets playing and return at once. The complaint, or `""`.
+
+    `sounddevice.play` is asynchronous by itself — PortAudio pulls the array on
+    its own callback thread — so a window needs no thread of its own here, and
+    starting one would only give it something to join on close.
+
+    **This is the tray's process, which is the process that records**, and that
+    is the one thing to be careful about: playing a snippet through the speakers
+    while a meeting is being recorded puts that person's earlier speech into
+    `system.wav` through WASAPI loopback, where it is transcribed and diarized as
+    if the far end had said it. Nothing in here can tell — the caller knows the
+    recorder's state and :class:`referat.ui.speakers.SpeakerDialog` refuses the
+    button for it. A transcript is evidence of what was said, and this is the one
+    way a UI could quietly write something into one.
+    """
+    audio, complaint = concatenate(clips)
+    if complaint:
+        return complaint
+    try:
+        import sounddevice as sd
+
+        sd.play(audio, SNIPPET_RATE)
+    except Exception as exc:
+        log.warning("could not play snippets", exc_info=True)
+        return f"could not play the snippets: {exc}"
+    return ""
+
+
+def stop_playback() -> None:
+    """Stop whatever :func:`play_async` started. Safe when nothing is playing."""
+    try:
+        import sounddevice as sd
+
+        sd.stop()
+    except Exception:
+        log.debug("nothing to stop", exc_info=True)
 
 
 # --- The prompt -------------------------------------------------------------
@@ -415,36 +509,53 @@ def _resolve_meeting(config: Config, meeting_id: str) -> Meeting | None:
     return meeting
 
 
-def run_json(config: Config, meeting_id: str) -> int:
-    """`referat label <id> --json` — everything the labeling webview needs.
+def label_document(config: Config, meeting: Meeting) -> dict[str, Any]:
+    """One meeting's unnamed speakers, and everything a labeling surface needs.
 
-    The extension gets the snippet *paths* rather than the audio: they are
-    ordinary WAVs on disk and a webview can load them through
-    `asWebviewUri`. `has_embedding` is the one case naming cannot repair — a
-    speaker whose embedding never made it into `meta.json` has nothing to file,
-    so the webview must show that rather than offer a field that will fail.
+    What `referat label <id> --json` prints and what
+    :class:`referat.ui.speakers.SpeakerDialog` renders — the same builder, for
+    the same reason `list_document` and `transcript_document` are: the extension
+    shells out because it is TypeScript, the window imports because it is already
+    a Python process in this package, and neither may hold an opinion about a
+    meeting the other does not share.
 
-    `channel` and `owner` are here to answer one question the panel could not:
-    *is this me?* Naming four speakers after one Teams call, one of them was the
-    person doing the naming, and nothing on screen said that cluster had come out
-    of their own microphone. The page can now say so and lead with the owner's
-    name — a hint, never a name applied on its own, since the mic hears the whole
-    room in a meeting held in person.
+    The snippet *paths* rather than the audio: they are ordinary WAVs on disk,
+    which a webview loads through `asWebviewUri` and a window decodes in place.
+    `has_embedding` is the one case naming cannot repair — a speaker whose
+    embedding never made it into `meta.json` has nothing to file, so a surface
+    must say so rather than offer a field that is guaranteed to be refused.
 
-    `owner` crosses the wire as a string rather than as a pre-sorted `known_names`
-    because what the owner is *called* is Python's to know and the order chips
-    appear in is the page's to decide. It is `""` when `[speakers].owner_name` is
-    unset, which the page has to render as no chip rather than an empty one.
+    `channel` and `owner` answer the question a panel could not: *is this me?*
+    Naming four speakers after one Teams call, one of them was the person doing
+    the naming, and nothing on screen said that cluster had come out of their own
+    microphone. `owner` crosses as a string rather than as a pre-sorted
+    `known_names` because what the owner is *called* is Python's to know and the
+    order chips appear in is the surface's to decide. It is `""` when
+    `[speakers].owner_name` is unset, which is rendered as no chip rather than an
+    empty one.
+
+    `gallery` is phase 3's addition and the project-scoped half of identification:
+    `scoped` is the people this meeting's tags associate with and `rest` is
+    everybody else, the two together being exactly `known_names`. `tags` is what
+    did the scoping, carried beside them so a surface can say *this meeting has no
+    project, so every name is offered* as a **fact it was told** rather than as
+    something inferred from `scoped` being short — which would be the same shape
+    of mistake as inferring a meeting's lifecycle from which files exist. It is
+    also what makes the nudge honest: tag first, then label. The join is
+    :func:`referat.people.gallery`'s and is computed here rather than in a
+    surface, because working out which people belong to a project in TypeScript —
+    or in a dialog — would be a second implementation of the one thing this whole
+    arrangement exists to have one of. It **narrows and orders what a human is
+    offered and nothing else**: the automatic match during the pipeline stays
+    global, and every name written is still somebody's decision.
     """
-    meeting = _resolve_meeting(config, meeting_id)
-    if meeting is None:
-        return 1
-
-    document = {
+    scoped, rest = people.gallery(config, meeting)
+    return {
         "meeting": meeting.id,
         "dir": str(meeting.dir),
         "known_names": voices.VoicesDB.load(config).names(),
         "owner": config.speakers.owner_name.strip(),
+        "gallery": {"tags": list(meeting.tags), "scoped": scoped, "rest": rest},
         "speakers": [
             {
                 "speaker": speaker,
@@ -456,52 +567,129 @@ def run_json(config: Config, meeting_id: str) -> int:
             for speaker in voices.unknown_speakers(meeting)
         ],
     }
-    print(json.dumps(document, indent=2))
-    return 0
 
 
-def run_apply(config: Config, meeting_id: str, speaker: str, name: str) -> int:
-    """`referat label <id> --speaker <s> --name <n>` — the prompt's answer, given.
-
-    Every rule the prompt enforces is enforced here too, and in Python: the
-    reserved-name check is :func:`referat.voices.name_complaint`, and it stays
-    the only copy of that rule rather than being restated in the webview that
-    calls this.
-    """
-    complaint = voices.name_complaint(name)
-    if complaint:
-        print(f"referat label: a name {complaint}", file=sys.stderr)
-        return 1
-
+def run_json(config: Config, meeting_id: str) -> int:
+    """`referat label <id> --json` — the document above, printed."""
     meeting = _resolve_meeting(config, meeting_id)
     if meeting is None:
         return 1
-
-    if speaker not in voices.unknown_speakers(meeting):
-        known = meeting.speaker_names.get(speaker)
-        why = f"is already {known}" if known else f"is not an unnamed speaker in {meeting.id}"
-        print(f"referat label: {speaker} {why}", file=sys.stderr)
-        return 1
-
-    if not apply_name(config, meeting, speaker, name):
-        print(
-            f"referat label: no embedding was stored for {speaker}; nothing to file",
-            file=sys.stderr,
-        )
-        return 1
-
-    # `apply_name` deliberately does not touch the dashboard — it is a primitive,
-    # and the pipeline calls it too. Every *entry point* that names somebody has
-    # to, or the Unnamed column goes stale the moment the webview is used.
-    index.write_index(config)
-    print(f"{speaker} is {name}")
+    print(json.dumps(label_document(config, meeting), indent=2))
     return 0
 
 
-def run_forget(config: Config, name: str, assume_yes: bool = False) -> int:
-    """`referat label --forget <name>`."""
+def name_speaker(config: Config, meeting_id: str, speaker: str, name: str) -> tuple[bool, str]:
+    """Name one speaker, with every rule that governs it. The only implementation.
+
+    `referat label <id> --speaker <s> --name <n>` is this printed, and the
+    command center's dialog is this in process — which is the point, because the
+    rules are not in :func:`apply_name`. That function is the primitive: it files
+    the embedding, writes `meta.json`, rewrites the labels and drops the snippets,
+    in that order and no other. What makes *naming* correct is the four things
+    around it — the reserved-name rule, resolving the meeting, refusing a speaker
+    who is not waiting for a name, and regenerating the dashboard afterwards —
+    and a surface growing its own copy of those is exactly the second
+    implementation the one-implementation rule exists to prevent. `cli.apply_tags`
+    is the same shape for the same reason.
+
+    Returns the value-and-unprefixed-complaint pair
+    :func:`referat.meeting.resolve_meeting` returns, because the prefix is the
+    caller's: the CLI says `referat label:` and a dialog says nothing at all.
+
+    **Renaming is a different operation from naming**, so a speaker who already
+    has one is refused rather than overwritten — the way back is `--forget`,
+    which also reverts the labels that name wrote everywhere else.
+
+    :func:`apply_name` refuses an echo cluster on its own and says so in the log
+    alone, so the `False` it returns is reported here as the one thing a caller
+    can act on: there is nothing to file.
+    """
+    complaint = voices.name_complaint(name)
+    if complaint:
+        return False, f"a name {complaint}"
+
+    meeting, why = resolve_meeting(config, meeting_id)
+    if meeting is None:
+        return False, why
+
+    if speaker not in voices.unknown_speakers(meeting):
+        if name_it_has := meeting.speaker_names.get(speaker):
+            why = f"is already {name_it_has}"
+        elif voices.is_echo(meeting, speaker):
+            # Said in full rather than as "not an unnamed speaker", which is what
+            # `unknown_speakers` filtering it out would otherwise reduce it to.
+            # This is reached by `--speaker`, which is typed by somebody who can
+            # see the cluster in `referat show` and is owed the actual reason —
+            # and the reason is the one that costs a database entry if ignored.
+            why = (
+                "is the loopback coming back into the microphone rather than a "
+                "person, so a name here would file a voiceprint of a loudspeaker"
+            )
+        else:
+            why = f"is not an unnamed speaker in {meeting.id}"
+        return False, f"{speaker} {why}"
+
+    if not apply_name(config, meeting, speaker, name):
+        return False, f"no embedding was stored for {speaker}; nothing to file"
+
+    # `apply_name` deliberately does not touch the dashboard — it is a primitive,
+    # and the pipeline calls it too. Every *entry point* that names somebody has
+    # to, or the Unnamed column goes stale the moment anything but the prompt is
+    # used.
+    index.write_index(config)
+    return True, f"{speaker} is {name}"
+
+
+def run_apply(config: Config, meeting_id: str, speaker: str, name: str) -> int:
+    """`referat label <id> --speaker <s> --name <n>` — the prompt's answer, given."""
+    named, message = name_speaker(config, meeting_id, speaker, name)
+    if not named:
+        print(f"referat label: {message}", file=sys.stderr)
+        return 1
+    print(message)
+    return 0
+
+
+def forget_person(config: Config, name: str) -> tuple[bool, str]:
+    """Delete a person, with every rule that governs it. The only implementation.
+
+    `referat label --forget <name>` is this with a confirmation in front of it, and
+    the command center's people page is this in process — which is the point, for
+    the reason :func:`name_speaker` sits above :func:`apply_name`. That function is
+    the primitive: it empties the database entry and reverts the labels, in that
+    order and no other. What makes *forgetting* correct is the two things around
+    it — refusing a name nothing is filed under, and regenerating the dashboard
+    afterwards, since reverting a label puts the Unnamed column back up — and a
+    surface growing its own copy of those is exactly the second implementation the
+    one-implementation rule exists to prevent.
+
+    Returns the value-and-unprefixed-complaint pair
+    :func:`referat.meeting.resolve_meeting` returns, because the prefix is the
+    caller's: the CLI says `referat label:` and a dialog says nothing at all.
+
+    **The confirmation is deliberately not here.** It is not a rule about the
+    operation, it is a question asked of a terminal — `_confirm` reads `input()`
+    and answers *no* on EOF, which is the whole reason `--yes` exists — and a
+    window asks it with a modal instead. Both are asking the same thing and
+    neither is asking it twice.
+    """
     db = voices.VoicesDB.load(config)
     if name not in db.people:
+        return False, f"{name} is not in the known-voices database"
+
+    deleted, reverted = forget(config, name)
+    # Forgetting puts labels back to SPEAKER_NN, so the Unnamed column goes up.
+    index.write_index(config)
+    return True, f"Deleted {deleted} voiceprint(s) of {name}; reverted {reverted} transcript(s)."
+
+
+def run_forget(config: Config, name: str, assume_yes: bool = False) -> int:
+    """`referat label --forget <name>` — the confirmation, and one line of dispatch."""
+    if name not in voices.VoicesDB.load(config).people:
+        # Asked before the confirmation rather than after it, so a mistyped name
+        # is a refusal rather than a question about deleting somebody who does not
+        # exist. `forget_person` checks it again because it is its rule, not this
+        # command's, and a caller with no terminal reaches it directly.
         print(f"referat label: {name} is not in the known-voices database", file=sys.stderr)
         return 1
     if not assume_yes and not _confirm(
@@ -510,10 +698,11 @@ def run_forget(config: Config, name: str, assume_yes: bool = False) -> int:
         print("Nothing was deleted.")
         return 0
 
-    deleted, reverted = forget(config, name)
-    # Forgetting puts labels back to SPEAKER_NN, so the Unnamed column goes up.
-    index.write_index(config)
-    print(f"Deleted {deleted} voiceprint(s) of {name}; reverted {reverted} transcript(s).")
+    forgotten, message = forget_person(config, name)
+    if not forgotten:
+        print(f"referat label: {message}", file=sys.stderr)
+        return 1
+    print(message)
     return 0
 
 

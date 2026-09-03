@@ -1,10 +1,14 @@
 """The command center window: the meetings list, the viewer, and the controls.
 
-Phase 1 of build step 20, and **the whole of it reads**. Nothing here writes a
-tag, a name or a `meta.json` key; the only thing it changes is the recorder, and
-that goes through the very methods the two hotkeys call. Tagging is phase 2 and
-labeling is phase 3, and keeping the first phase read-only is what makes it a
-safe place to settle the toolkit question against real meetings.
+Phases 1 to 3 of build step 20. Phase 1 was deliberately read-only — the list,
+the viewer, the cross-links, the recording buttons and the ambient state — so
+that the toolkit question was settled against real meetings with nothing at
+risk; phase 2 added tagging and phase 3 labeling, and **this file still writes
+nothing itself**. It opens two dialogs, and each of them makes its one kind of
+change through a function it does not implement: :mod:`referat.ui.tags` through
+`cli.apply_tags`, and :mod:`referat.ui.speakers` through `label.name_speaker`.
+The only other thing the window changes is the recorder, and that goes through
+the very methods the two hotkeys call.
 
 **It calls the CLI's functions, never its subprocess.** `list_document`,
 `show_document` and `transcript_document` are the same builders `referat list
@@ -36,6 +40,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSplitter,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -44,7 +49,9 @@ from PySide6.QtWidgets import (
 
 from referat import cli, paths
 from referat.state import State
-from referat.ui import tags
+from referat.ui import speakers, tags
+from referat.ui.people import PeoplePage
+from referat.ui.projects import ProjectsPage
 from referat.ui.viewer import Viewer
 
 log = logging.getLogger(__name__)
@@ -111,6 +118,15 @@ class CommandCenter(QMainWindow):
         self.tag_button.setEnabled(False)
         self.tag_button.clicked.connect(self._on_tag)
 
+        # Second, and to the right of the tag button, because that order is the
+        # flow rule made visible: tag first, then label, so the gallery a person
+        # is offered is already narrowed to the project's people. A nudge and
+        # never a gate — an untagged meeting labels perfectly well, with the full
+        # gallery, because a missing tag must never cost a name.
+        self.label_button = QPushButton("Speakers...")
+        self.label_button.setEnabled(False)
+        self.label_button.clicked.connect(self._on_label)
+
         self.meetings = QTreeWidget()
         self.meetings.setColumnCount(len(COLUMNS))
         self.meetings.setHeaderLabels(list(COLUMNS))
@@ -135,23 +151,35 @@ class CommandCenter(QMainWindow):
         filters.addWidget(self.untagged_only)
         filters.addWidget(self.search, 1)
 
-        # The filter row belongs to the list rather than to the window, which is
-        # also the shape phase 6 wants when this pane grows a dashboard beside it.
+        # The filter row and the two per-meeting buttons belong to the list
+        # rather than to the window, which is also the shape phase 6 wants when
+        # this pane grows a dashboard beside it. Phase 4 is what forced the
+        # distinction: the record buttons are the *recorder* and stay above the
+        # tabs, while `Tags...` and `Speakers...` act on a selected meeting and
+        # would be a pair of dead buttons on the projects page.
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.addStretch(1)
+        actions.addWidget(self.tag_button)
+        actions.addWidget(self.label_button)
+
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.addLayout(filters)
         left.addWidget(self.meetings, 1)
+        left.addLayout(actions)
         left_pane = QWidget()
         left_pane.setLayout(left)
 
         self.viewer = Viewer()
         self.viewer.external_requested.connect(self._on_external_link)
+        self.viewer.person_requested.connect(self.open_person)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(left_pane)
-        splitter.addWidget(self.viewer)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 4)
+        self.meetings_page = QSplitter(Qt.Orientation.Horizontal)
+        self.meetings_page.addWidget(left_pane)
+        self.meetings_page.addWidget(self.viewer)
+        self.meetings_page.setStretchFactor(0, 3)
+        self.meetings_page.setStretchFactor(1, 4)
 
         controls = QHBoxLayout()
         for button in (self.record_button, self.pause_button, self.stop_button):
@@ -160,15 +188,26 @@ class CommandCenter(QMainWindow):
         controls.addSpacing(12)
         controls.addWidget(self.state_label)
         controls.addStretch(1)
-        # Last, at the right edge, and the space beside it is where phase 3's
-        # "Label speakers..." goes. The order is the flow rule made visible: tag
-        # first, then label. A nudge and never a gate.
-        controls.addWidget(self.tag_button)
+
+        # One tab per entity, which is the window this step is building: all three
+        # are here from phase 5, and phase 6 puts a Dashboard in front. The
+        # recorder's three buttons stay *above* the tabs, because the recorder is
+        # not one of the three entities and a Stop button that hid behind a tab
+        # would be a recording somebody could not stop from here.
+        self.pages = QTabWidget()
+        self.projects = ProjectsPage(self.app.config)
+        self.people = PeoplePage(self.app.config)
+        self.people.meeting_requested.connect(self.open_meeting)
+        self.people.project_requested.connect(self.open_project)
+        self.pages.addTab(self.meetings_page, "Meetings")
+        self.pages.addTab(self.projects, "Projects")
+        self.pages.addTab(self.people, "People")
+        self.pages.currentChanged.connect(self._on_page_changed)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 6)
         layout.addLayout(controls)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self.pages, 1)
         central = QWidget()
         central.setLayout(layout)
         self.setCentralWidget(central)
@@ -202,9 +241,33 @@ class CommandCenter(QMainWindow):
 
         Split from :meth:`_rebuild` so the filter widgets can redraw without
         rescanning both meeting roots on every keystroke.
+
+        **Only the page in front is refreshed.** Every page costs a scan of both
+        meeting roots, and this runs on every transition; a hidden page is
+        brought up to date by :meth:`_on_page_changed` when it is switched to,
+        which is the moment before anybody could read a stale figure off it.
         """
         self._reload()
         self._rebuild()
+        self._refresh_page(self.pages.currentWidget())
+
+    def _on_page_changed(self, index: int) -> None:
+        """Refresh the page being switched to.
+
+        Every page but the meetings list carries figures anything on another page
+        can invalidate — the projects page's meeting counts and merged hotword
+        list, the people page's whole directory, all moved by tagging a meeting or
+        naming a speaker. Each is refreshed on arrival rather than kept live,
+        which is the moment before anybody could read a stale figure off it, and
+        the projects page keeps whatever is typed into its form across one: see
+        :meth:`referat.ui.projects.ProjectsPage._fill_list`.
+        """
+        self._refresh_page(self.pages.widget(index))
+
+    def _refresh_page(self, page: QWidget | None) -> None:
+        """Re-read one page, if it is one of the ones that reads anything."""
+        if page in (self.projects, self.people):
+            page.refresh()
 
     def _reload(self) -> None:
         """Re-read `list_document`, keeping the previous list if it will not read."""
@@ -326,9 +389,22 @@ class CommandCenter(QMainWindow):
     def _on_row_changed(self, item: QTreeWidgetItem | None, _previous: object) -> None:
         self.tag_button.setEnabled(item is not None)
         if item is None:
+            self.label_button.setEnabled(False)
             return
         self._selected = str(item.data(0, ID_ROLE))
+        # Disabled rather than hidden when there is nobody left to name, for the
+        # reason the three recording buttons are: a button that moves is a button
+        # you have to look for. The count is the listing's own `unnamed`, which is
+        # `voices.unknown_speakers` — so an echo cluster is not offered here
+        # either, and this enables on exactly what the dialog would show.
+        self.label_button.setEnabled(bool(self._unnamed(self._selected)))
         self._show(self._selected)
+
+    def _unnamed(self, meeting_id: str) -> list[str]:
+        """The speakers this meeting is still waiting on, out of the listing. Reads nothing."""
+        return next(
+            (m["unnamed"] for m in self._document["meetings"] if m["id"] == meeting_id), []
+        )
 
     # --- Tagging ------------------------------------------------------------
 
@@ -351,6 +427,25 @@ class CommandCenter(QMainWindow):
             (m["tags"] for m in self._document["meetings"] if m["id"] == meeting_id), []
         )
         if tags.open_for(self, self.app.config, meeting_id, list(carried)):
+            self.refresh()
+
+    # --- Labeling -----------------------------------------------------------
+
+    def _on_label(self) -> None:
+        """Open the labeling dialog on the selected meeting. The second thing this writes.
+
+        Takes the id off `self._selected` for the same reason :meth:`_on_tag`
+        does: `_rebuild` destroys every `QTreeWidgetItem`, and a transition
+        arriving through the shell's `Bridge` can run it while the dialog is up.
+
+        Refreshes only when a name was actually filed. Unlike the tag picker there
+        is nothing a dismissed dialog can have created — naming is the only write
+        it makes, and it makes it immediately.
+        """
+        meeting_id = self._selected
+        if meeting_id is None:
+            return
+        if speakers.open_for(self, self.app.config, meeting_id, self.app):
             self.refresh()
 
     def _show(self, meeting_id: str) -> None:
@@ -376,13 +471,47 @@ class CommandCenter(QMainWindow):
         self.setWindowTitle(f"Referat - {document['title']}")
 
     def _on_external_link(self, url: QUrl) -> None:
-        """A link in the notes that is not a timestamp. Hand it to the desktop.
+        """A link in the notes that is neither a timestamp nor a name.
 
-        `notes.md` is written by `/cleanup` and may carry a real URL. `[[Wikilinks]]`
-        are not links at all in CommonMark and render as the text they are, which
-        is what they should do until phase 5 gives a person somewhere to go.
+        `notes.md` is written by `/cleanup` and may carry a real URL, which is the
+        one thing this window hands outside itself.
         """
         QDesktopServices.openUrl(url)
+
+    # --- Going somewhere ----------------------------------------------------
+
+    def open_person(self, name: str) -> None:
+        """Show one person, from a speaker label or a `[[Wikilink]]` being clicked.
+
+        The whole argument for a window rather than a column: a name in a document
+        is a thing you can follow. A name nobody is filed under still opens the
+        page, which says so — see :meth:`referat.ui.people.PeoplePage.select`.
+        """
+        self.pages.setCurrentWidget(self.people)
+        self.people.select(name)
+
+    def open_meeting(self, meeting_id: str) -> None:
+        """Show one meeting on the Meetings tab, from wherever it was clicked.
+
+        The filters are cleared first: a meeting reached by following a link from
+        somewhere else must not be hidden by a search somebody typed ten minutes
+        ago, which would look exactly like a link that did nothing.
+        """
+        for widget, clear in (
+            (self.untagged_only, lambda: self.untagged_only.setChecked(False)),
+            (self.search, self.search.clear),
+        ):
+            widget.blockSignals(True)
+            clear()
+            widget.blockSignals(False)
+        self._selected = meeting_id
+        self.pages.setCurrentWidget(self.meetings_page)
+        self.refresh()
+
+    def open_project(self, pid: str) -> None:
+        """Show one project on the Projects tab."""
+        self.pages.setCurrentWidget(self.projects)
+        self.projects.select_project(pid)
 
     # --- Ambient state ------------------------------------------------------
 

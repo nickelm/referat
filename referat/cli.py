@@ -3,9 +3,11 @@
 `config` since build step 1, `label` since 7b, `list`, `rerun` and `status`
 since step 8, `devices` since the first USB microphone, `index` with the
 meetings folder scaffold at step 10, `hotwords` at step 12b, `project`, `tag`,
-`untag` and `state` at step 14, and `promote` at step 15. Between them they are
+`untag` and `state` at step 14, `promote` at step 15, and `people` at step 20's
+phase 5. Between them they are
 the whole of Referat that is not the tray: what has been recorded, what still
-needs a name, what work each meeting belongs to, what the tray is doing, what it
+needs a name, who Referat knows a name for, what work each meeting belongs to,
+what the tray is doing, what it
 will record with, what Whisper is told about before it transcribes, how to
 transcribe a meeting again, how to accept a transcript the quality gate refused,
 and how to rebuild the dashboard over all of it.
@@ -19,7 +21,7 @@ package. The rule is one implementation, not one process boundary.
 
 **Light by default.** Only `rerun` needs the `transcribe` extra, and it imports
 it inside :func:`referat.rerun.run`, so `list` and `status` answer instantly
-without three gigabytes of torch. `project`, `tag`, `untag`, `state` and `hotwords` are a
+without three gigabytes of torch. `project`, `tag`, `untag`, `state`, `people` and `hotwords` are a
 JSON read and a JSON write and need no extra at all — only step 13's `project
 link-doc` and `project sync` will need `digest`. `label` and `devices` are
 imported here rather than at module scope for the same kind of reason: a broken
@@ -62,6 +64,7 @@ NEEDS_CONFIG = (
     "index",
     "label",
     "list",
+    "people",
     "project",
     "promote",
     "reflow",
@@ -182,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    subcommands.add_parser(
+    hotwords_parser = subcommands.add_parser(
         "hotwords",
         help="the words Whisper is told about before it transcribes",
         description=(
@@ -196,6 +199,36 @@ def build_parser() -> argparse.ArgumentParser:
             "dropped. Capped here rather than by faster-whisper, which slices an "
             "over-long list mid-name and says nothing."
         ),
+    )
+    hotwords_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit the merged list, its sources and what the cap dropped as JSON",
+    )
+
+    people_parser = subcommands.add_parser(
+        "people",
+        help="everybody Referat knows a name for, and where they appear",
+        description=(
+            "One row per known name: how many voiceprints are filed under it, the "
+            "meetings those prints came from, the meetings the name appears in, and "
+            "the projects those meetings carry. The two directions differ - a "
+            "person recognised automatically files nothing new, and a rerun can "
+            "renumber past somebody whose print keeps the provenance the meeting "
+            "record lost - so both are shown. A name a transcript still uses that "
+            "the database holds nothing under is listed too, with no prints, "
+            "because nothing else compares those two files. "
+            "Names, counts and meeting ids only: no embedding and no path into "
+            "the voices database is printed, here or in --json. "
+            "`referat label --forget <name>` is how a person is deleted."
+        ),
+    )
+    people_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit the same people as JSON, for the command center",
     )
 
     subcommands.add_parser(
@@ -506,6 +539,45 @@ def _add_project_parser(subcommands: argparse._SubParsersAction) -> None:
         ),
     )
     remove.add_argument("project_id")
+
+    describe = verbs.add_parser(
+        "describe",
+        help="read or set a project's one-line description",
+        description=(
+            "One line about what this thread of work is. With no text it prints "
+            "what is there. The empty string clears it, and so does --clear."
+        ),
+    )
+    describe.add_argument("project_id")
+    describe.add_argument("description", nargs="?", help="the new description")
+    describe.add_argument(
+        "--clear", action="store_true", help="remove the description"
+    )
+
+    glossary = verbs.add_parser(
+        "glossary",
+        help="the terms of art, product names and people belonging to this project",
+        description=(
+            "A project's glossary is read twice, at two different times. Every "
+            "glossary is merged into the one global hotword list handed to "
+            "faster-whisper, which acts before any meeting has been tagged; and "
+            "once a meeting is tagged, the glossaries of all its tags are what "
+            "/cleanup normalizes its notes against. With no flags this prints the "
+            "list. `referat hotwords` shows what the merge did with it, including "
+            "anything the 223-token cap dropped."
+        ),
+    )
+    glossary.add_argument("project_id")
+    glossary.add_argument(
+        "--add", nargs="+", metavar="TERM", help="terms to add, in the order given"
+    )
+    glossary.add_argument(
+        "--remove",
+        nargs="+",
+        metavar="TERM",
+        help="terms to take out, matched without regard to case",
+    )
+    glossary.add_argument("--clear", action="store_true", help="empty the glossary")
 
     listing = verbs.add_parser("list", help="every project, and how many meetings carry it")
     listing.add_argument(
@@ -891,6 +963,13 @@ def transcript_document(config: Config, meeting: Meeting) -> dict[str, Any]:
 
     `labels` is the distinct speaker labels in order of first appearance, which
     is the order :func:`referat.diarize.assign` numbers them in.
+
+    `people` is the subset of those labels that are somebody's *name*, decided by
+    :func:`referat.voices.name_complaint` — the one function that knows `ME` and
+    `REMOTE` are channel labels and `SPEAKER_NN` is a number. Phase 5 needs it so
+    the command center can turn a name in the label column into a link to that
+    person without a second copy of that rule in the UI, which is the same reason
+    `unnamed` is computed here rather than in the sidebar.
     """
     from referat.transcribe import parse_transcript
 
@@ -913,6 +992,7 @@ def transcript_document(config: Config, meeting: Meeting) -> dict[str, Any]:
         "duration_seconds": meeting.duration_seconds,
         "duration": format_duration(meeting.duration_seconds),
         "labels": labels,
+        "people": [label for label in labels if voices.name_complaint(label) is None],
         "unparsed": unparsed,
         "entries": [
             {"at": at, "time": _hms(at), "label": label, "text": text}
@@ -988,11 +1068,20 @@ def project_document(config: Config) -> dict[str, Any]:
     `orphans` is the other half of the same question: ids that meetings still
     carry and no project answers to. They are counted here rather than left for
     each reader to derive, which is the whole habit this step is about.
+
+    **`complaint` is why the list is empty when it is not really empty.** A
+    `projects.json` that will not parse loads as no projects at all, which is the
+    rule that keeps a broken file from costing a transcript — and it means an
+    empty `projects` here has two causes that look identical. Every other reader
+    of this document had to guess between them; phase 4's projects page is the
+    first that must not, since it offers to *create* a project into a file whose
+    contents it cannot see. Empty when the file is fine.
     """
     db = projects.ProjectsDB.load(config)
     counts = projects.tag_counts(load_meetings(config))
     return {
         "projects_file": str(projects.projects_path(config)),
+        "complaint": _unreadable_complaint(db, CANNOT_LOOK_UP) if db.unreadable else "",
         "names": db.name_map(),
         "projects": [
             {
@@ -1012,6 +1101,13 @@ def run_project_list(config: Config, as_json: bool = False) -> int:
         return 0
 
     document = project_document(config)
+    if document["complaint"]:
+        # Said rather than rendered as an empty list, which is what this printed
+        # before phase 4 gave the document somewhere to say it: an unreadable
+        # file and a file with nothing in it are the same picture and must not
+        # get the same sentence.
+        print(f"referat project list: {document['complaint']}", file=sys.stderr)
+        return 1
     entries = document["projects"]
     if not entries:
         print("No projects yet. Create one with: referat project add <name>")
@@ -1050,13 +1146,13 @@ def project_names(config: Config) -> tuple[dict[str, str], str]:
     a full `load_meetings` scan of both roots for the per-project meeting counts.
     A picker wants a map of names, and this is one file read.
 
-    The complaint is `writing=False`'s, because that is what this is: with no
+    The complaint is :data:`CANNOT_TAG`, because that is what this is: with no
     names loaded every tag would render as an orphan, which is a worse thing to
     show than a refusal.
     """
     db = projects.ProjectsDB.load(config)
     if db.unreadable:
-        return {}, _unreadable_complaint(db, writing=False)
+        return {}, _unreadable_complaint(db, CANNOT_TAG)
     return db.name_map(), ""
 
 
@@ -1081,7 +1177,7 @@ def create_project(config: Config, name: str) -> tuple[projects.Project | None, 
     """
     db = projects.ProjectsDB.load(config)
     if db.unreadable:
-        return None, _unreadable_complaint(db, writing=True)
+        return None, _unreadable_complaint(db, WOULD_OVERWRITE)
     complaint = projects.name_complaint(name)
     if complaint:
         return None, f"a project name {complaint}"
@@ -1091,18 +1187,27 @@ def create_project(config: Config, name: str) -> tuple[projects.Project | None, 
 
 
 def run_project(config: Config, args: argparse.Namespace) -> int:
-    """`referat project <verb>`. Every verb here is a JSON read and a JSON write."""
+    """`referat project <verb>`. Every verb here is a JSON read and a JSON write.
+
+    **Every mutating verb is one line of dispatch onto a guarded function**, and
+    none of them opens `projects.json` for itself. That is phase 4's correction:
+    `rename` and `rm` used to load the database here, check it here and save it
+    here, so the command center's projects page would have had to grow a second
+    copy of all three to do the same thing. The verbs now say what to print and
+    nothing else — an :class:`Outcome`'s message, prefixed with the command,
+    which is exactly what the sidebar's `mutate` gives the extension.
+    """
     if args.verb is None:
-        print("referat project: pick a verb - add, rename, rm or list", file=sys.stderr)
+        print(
+            "referat project: pick a verb - add, rename, describe, glossary, rm or list",
+            file=sys.stderr,
+        )
         return 2
 
     if args.verb == "list":
         return run_project_list(config, as_json=args.as_json)
 
     if args.verb == "add":
-        # Delegated before the shared load below, or `project add` would read
-        # `projects.json` twice: once for the guard here and once inside
-        # `create_project`, which owns the guard for its own callers anyway.
         project, complaint = create_project(config, args.name)
         if project is None:
             print(f"referat project add: {complaint}", file=sys.stderr)
@@ -1113,42 +1218,108 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
         print(f"{project.id}  {project.name}")
         return 0
 
-    db = projects.ProjectsDB.load(config)
-    if db.unreadable:
-        return _unreadable_projects(db, f"project {args.verb}", writing=True)
-
     if args.verb == "rename":
-        complaint = projects.name_complaint(args.name)
-        if complaint:
-            print(f"referat project rename: a project name {complaint}", file=sys.stderr)
-            return 1
-        project = db.rename(args.project_id, args.name)
-        if project is None:
-            return _no_such_project(db, args.project_id, "project rename")
-        db.save()
-        # Said out loud because the id *not* moving is the surprising half, and it
-        # is the half every meeting record depends on.
-        print(f"{project.id} is now called {project.name} (the id does not change)")
-        return 0
+        return _report(rename_project(config, args.project_id, args.name), "project rename")
 
     if args.verb == "rm":
-        project = db.remove(args.project_id)
-        if project is None:
-            return _no_such_project(db, args.project_id, "project rm")
-        db.save()
-        carrying = projects.tag_counts(load_meetings(config)).get(project.id, 0)
-        print(f"Deleted {project.id} ({project.name}).")
-        if carrying:
-            print(
-                f"{carrying} meeting{'s' if carrying != 1 else ''} still carr"
-                f"{'y' if carrying != 1 else 'ies'} that id as an orphaned tag; "
-                f"nothing else was touched. Remove them with: referat untag <id> "
-                f"{project.id}"
-            )
-        return 0
+        return _report(remove_project(config, args.project_id), "project rm")
+
+    if args.verb == "describe":
+        return run_project_describe(config, args)
+
+    if args.verb == "glossary":
+        return run_project_glossary(config, args)
 
     print(f"referat project: unknown verb {args.verb}", file=sys.stderr)
     return 2
+
+
+def _report(outcome: Outcome, command: str) -> int:
+    """Print an :class:`Outcome` as a command prints one, and become its exit code.
+
+    The prefix is added here rather than baked into the message, for the reason
+    :class:`Outcome` records: it is direction-dependent, and the command center
+    calls these same functions with no command to name.
+    """
+    if outcome.ok:
+        print(outcome.message)
+        return 0
+    print(f"referat {command}: {outcome.message}", file=sys.stderr)
+    return 1
+
+
+def run_project_describe(config: Config, args: argparse.Namespace) -> int:
+    """`referat project describe <id> [text]` — read it, set it, or clear it.
+
+    With no text it prints what is there, because a `project list` shows no
+    descriptions and this is where somebody comes to read one. Setting the empty
+    string is how a description is removed, and `--clear` is that spelled out so
+    a shell cannot swallow it.
+    """
+    if args.description is None and not args.clear:
+        project, complaint = _read_project(config, args.project_id)
+        if project is None:
+            print(f"referat project describe: {complaint}", file=sys.stderr)
+            return 1
+        print(project.description or f"{project.id} has no description")
+        return 0
+    text = "" if args.clear else str(args.description)
+    return _report(set_description(config, args.project_id, text), "project describe")
+
+
+def run_project_glossary(config: Config, args: argparse.Namespace) -> int:
+    """`referat project glossary <id>` — print it, or add to, remove from or clear it.
+
+    Every writing form ends in one :func:`set_glossary` call over the **whole**
+    list, which is why the current terms are read here first. `--add` and
+    `--remove` are ergonomics over a replacement rather than a second kind of
+    write: a diff that reached the file would be a second implementation of what
+    a text box in the command center does in one go.
+
+    Removal is case-insensitive, matching the deduplication that put the terms
+    there. A term typed in the wrong case is a term somebody means, and being
+    told nothing was removed because they wrote `Elmqvist` for `elmqvist` would
+    be the tool insisting on a distinction it does not itself keep.
+    """
+    project, complaint = _read_project(config, args.project_id)
+    if project is None:
+        print(f"referat project glossary: {complaint}", file=sys.stderr)
+        return 1
+
+    if not (args.add or args.remove or args.clear):
+        if not project.glossary:
+            print(
+                f"{project.id} has an empty glossary. Add to it with: "
+                f"referat project glossary {project.id} --add <term>..."
+            )
+            return 0
+        for term in project.glossary:
+            print(term)
+        return 0
+
+    if args.clear:
+        terms: list[str] = []
+    else:
+        dropping = {term.casefold() for term in args.remove or ()}
+        terms = [t for t in project.glossary if t.casefold() not in dropping]
+        terms.extend(args.add or ())
+    return _report(set_glossary(config, args.project_id, terms), "project glossary")
+
+
+def _read_project(config: Config, pid: str) -> tuple[projects.Project | None, str]:
+    """One project, for reading, or the complaint that stopped it.
+
+    The reading counterpart of :func:`_open_project`, and separate from it because
+    the guard differs where it matters: an unreadable file complains in
+    :data:`CANNOT_LOOK_UP` here, since nothing is about to be overwritten.
+    """
+    db = projects.ProjectsDB.load(config)
+    if db.unreadable:
+        return None, _unreadable_complaint(db, CANNOT_LOOK_UP)
+    project = db.projects.get(pid)
+    if project is None:
+        return None, _unknown_complaint(db, [pid])
+    return project, ""
 
 
 @dataclass(frozen=True)
@@ -1176,7 +1347,20 @@ class Outcome:
     message: str
 
 
-def _unreadable_complaint(db: projects.ProjectsDB, writing: bool) -> str:
+WOULD_OVERWRITE = "so writing now would replace everything in it"
+CANNOT_TAG = "so nothing can be tagged until it is"
+CANNOT_LOOK_UP = "so no project can be looked up until it is"
+"""The three consequences of a `projects.json` that will not parse.
+
+One sentence template, three endings, and the ending is the caller's to choose
+because it is the only part that differs by what was being attempted. Phase 4 is
+what made that a real distinction: `referat project glossary` reads this file to
+print a list, and telling somebody nothing can be *tagged* would be an answer to
+a question they did not ask.
+"""
+
+
+def _unreadable_complaint(db: projects.ProjectsDB, consequence: str) -> str:
     """Why a command stops when it cannot tell an empty projects file from a broken one.
 
     An unreadable file loads as *no projects*. That is right for reading — the
@@ -1188,20 +1372,10 @@ def _unreadable_complaint(db: projects.ProjectsDB, writing: bool) -> str:
 
     The parse error itself is in the log; this says what to do about it.
     """
-    consequence = (
-        "so writing now would replace everything in it"
-        if writing
-        else "so nothing can be tagged until it is"
-    )
     return (
         f"{db.path} exists but could not be read, {consequence}. "
         f"Fix or delete that file first."
     )
-
-
-def _unreadable_projects(db: projects.ProjectsDB, command: str, writing: bool) -> int:
-    print(f"referat {command}: {_unreadable_complaint(db, writing)}", file=sys.stderr)
-    return 1
 
 
 def _unknown_complaint(db: projects.ProjectsDB, ids: Sequence[str]) -> str:
@@ -1210,9 +1384,118 @@ def _unknown_complaint(db: projects.ProjectsDB, ids: Sequence[str]) -> str:
     return f"no project {', '.join(ids)} (known: {known})"
 
 
-def _no_such_project(db: projects.ProjectsDB, pid: str, command: str) -> int:
-    print(f"referat {command}: {_unknown_complaint(db, [pid])}", file=sys.stderr)
-    return 1
+def _open_project(
+    config: Config, pid: str
+) -> tuple[projects.ProjectsDB | None, projects.Project | None, str]:
+    """Load the projects file for a write and find one project in it.
+
+    The two guards every project mutation runs first, in the order they have to
+    run in: an unreadable file before an unknown id, because a complaint about a
+    typo is advice about the wrong problem when the file that would answer it did
+    not parse. :data:`WOULD_OVERWRITE` throughout — a caller here is about to
+    save, and saving over an unreadable file replaces everything in it.
+
+    Returns the database as well as the project, because every caller saves.
+    """
+    db = projects.ProjectsDB.load(config)
+    if db.unreadable:
+        return None, None, _unreadable_complaint(db, WOULD_OVERWRITE)
+    project = db.projects.get(pid)
+    if project is None:
+        return db, None, _unknown_complaint(db, [pid])
+    return db, project, ""
+
+
+def rename_project(config: Config, pid: str, name: str) -> Outcome:
+    """Change a project's display name. The only implementation of renaming one.
+
+    `referat project rename` is this, and so is the command center's projects
+    page. The id does **not** move, which is said out loud in the message because
+    it is the surprising half and the half every `meta.json` depends on.
+    """
+    db, project, complaint = _open_project(config, pid)
+    if project is None or db is None:
+        return Outcome(False, complaint)
+    name_complaint = projects.name_complaint(name)
+    if name_complaint:
+        return Outcome(False, f"a project name {name_complaint}")
+    db.rename(pid, name)
+    db.save()
+    return Outcome(True, f"{project.id} is now called {project.name} (the id does not change)")
+
+
+def set_description(config: Config, pid: str, description: str) -> Outcome:
+    """Set a project's one-line description. The only implementation of that.
+
+    No name rules apply: a description is prose about a thread of work and never
+    becomes an id. An empty string clears it, which is the honest way to say
+    "there is nothing to say about this project" and needs no separate verb.
+    """
+    db, project, complaint = _open_project(config, pid)
+    if project is None or db is None:
+        return Outcome(False, complaint)
+    db.describe(pid, description)
+    db.save()
+    if not project.description:
+        return Outcome(True, f"{project.id} has no description")
+    return Outcome(True, f"{project.id}: {project.description}")
+
+
+def set_glossary(config: Config, pid: str, terms: Sequence[str]) -> Outcome:
+    """Replace a project's glossary. The only implementation of that.
+
+    **A replacement, unlike :func:`apply_tags`**, and the difference is the same
+    one :meth:`referat.projects.ProjectsDB.set_glossary` records: a tag picker
+    renders a subset of the projects, so a replacement there could drop a tag it
+    never drew, while a glossary is edited as the whole list and the caller has
+    all of it in hand. `referat project glossary --add` reads the list and hands
+    back the whole of it for exactly that reason.
+
+    The message names what the file now holds rather than what changed. A
+    glossary is short, the whole of it fits on one line, and the next question
+    after editing one is always what the list is now — which is also what
+    `referat hotwords` will merge.
+    """
+    db, project, complaint = _open_project(config, pid)
+    if project is None or db is None:
+        return Outcome(False, complaint)
+    db.set_glossary(pid, terms)
+    db.save()
+    if not project.glossary:
+        return Outcome(True, f"{project.id} has an empty glossary")
+    return Outcome(
+        True,
+        f"{project.id}: {len(project.glossary)} term(s) - {', '.join(project.glossary)}",
+    )
+
+
+def remove_project(config: Config, pid: str) -> Outcome:
+    """Delete a project, and say what it left behind. The only implementation of that.
+
+    Cascades nothing: no `meta.json`, no `notes.md` and no Google Doc is touched,
+    so the meetings carrying this id keep carrying it as orphans. The count of
+    them is in the message rather than in the log, because it is the one
+    consequence somebody would otherwise not see — and the `referat untag` that
+    clears them is spelled out beside it.
+
+    The meeting scan happens **after** the save, as `referat project rm` has
+    always done it: it is a scan of both roots for a sentence, and a delete that
+    failed to report its orphans is better than one that refused to happen.
+    """
+    db, project, complaint = _open_project(config, pid)
+    if project is None or db is None:
+        return Outcome(False, complaint)
+    db.remove(pid)
+    db.save()
+    lines = [f"Deleted {project.id} ({project.name})."]
+    carrying = projects.tag_counts(load_meetings(config)).get(project.id, 0)
+    if carrying:
+        lines.append(
+            f"{carrying} meeting{'s' if carrying != 1 else ''} still carr"
+            f"{'y' if carrying != 1 else 'ies'} that id as an orphaned tag; "
+            f"nothing else was touched. Remove them with: referat untag <id> {project.id}"
+        )
+    return Outcome(True, "\n".join(lines))
 
 
 def apply_tags(
@@ -1254,7 +1537,7 @@ def apply_tags(
     if add:
         db = projects.ProjectsDB.load(config)
         if db.unreadable:
-            return Outcome(False, _unreadable_complaint(db, writing=False))
+            return Outcome(False, _unreadable_complaint(db, CANNOT_TAG))
         unknown = [pid for pid in add if pid not in db.projects]
         if unknown:
             # Refused, unlike a removal: an id no project answers to is an
@@ -2197,41 +2480,181 @@ def _loopback_section(recorder: ModuleType, wanted: str) -> str:
     return "\n".join(lines)
 
 
+# --- referat people ---------------------------------------------------------
+
+
+PEOPLE_HEADERS = ("NAME", "PRINTS", "FILED FROM", "APPEARS IN", "PROJECTS")
+PEOPLE_RIGHT_ALIGNED = (1, 2, 3)
+
+NO_PRINTS = (
+    "no voiceprint on file, but a transcript still calls somebody this - a rerun "
+    "that renumbered past them, or a hand edit. `referat label <id>` files one "
+    "again, or `--forget` takes the name out of the transcripts too"
+)
+
+
+def people_document(config: Config) -> dict[str, Any]:
+    """`referat people --json`: everybody Referat knows a name for.
+
+    The ninth JSON document, and the one that has to be read twice before it is
+    changed. **Names, counts and meeting ids** — no embedding, no path into
+    `.voices/`, not even the folder those live in. The database is biometric
+    personal data about people who never asked to be in it, and a listing verb is
+    the first place that is easy to forget; :func:`referat.people.directory` keeps
+    the same promise one layer down, and this adds nothing to what it returns.
+
+    The join is :mod:`referat.people`'s and is not re-derived here, exactly as
+    :func:`hotwords_document` merges nothing itself. What this adds is the
+    presentation join every other document already carries: `projects` is
+    :meth:`referat.projects.ProjectsDB.name_map`, the very map
+    :func:`list_document` and :func:`project_document` embed, so a tag and its
+    display name cannot drift between the three.
+
+    `owner` crosses as a string, as it does in
+    :func:`referat.label.label_document`: what the owner is *called* is Python's
+    to know, and whether that name leads a list is the surface's to decide.
+    """
+    from referat import people
+
+    return {
+        "owner": config.speakers.owner_name.strip(),
+        "projects": projects.ProjectsDB.load(config).name_map(),
+        "people": [
+            {
+                "name": person.name,
+                "prints": person.prints,
+                "in_database": person.in_database,
+                "is_owner": person.is_owner,
+                "filed_from": [asdict(f) for f in person.filed_from],
+                "appears_in": list(person.appears_in),
+                "tags": list(person.tags),
+            }
+            for person in people.directory(config)
+        ],
+    }
+
+
+def run_people(config: Config, as_json: bool = False) -> int:
+    """`referat people`. Two JSON reads and a folder scan, so it needs no extra."""
+    document = people_document(config)
+    if as_json:
+        print(json.dumps(document, indent=2))
+        return 0
+
+    entries = document["people"]
+    if not entries:
+        print(
+            "Nobody is known yet. A name is filed by `referat label <meeting-id>`, "
+            "which plays an unnamed speaker and asks who it was."
+        )
+        return 0
+
+    known = document["projects"]
+    rows = [
+        (
+            p["name"] + (" (you)" if p["is_owner"] else ""),
+            str(p["prints"]) if p["in_database"] else "-",
+            str(len({f["meeting"] for f in p["filed_from"]})),
+            str(len(p["appears_in"])),
+            ", ".join(pid if pid in known else f"{pid}?" for pid in p["tags"]) or "-",
+        )
+        for p in entries
+    ]
+    print(render_table(rows, PEOPLE_HEADERS, PEOPLE_RIGHT_ALIGNED))
+    print()
+    print(f"{len(rows)} known name{'s' if len(rows) != 1 else ''}")
+
+    # FILED FROM and APPEARS IN are two counts of two different things and the
+    # table cannot say so in a header. The one that is worth spelling out is the
+    # gap: a print records where it was *filed*, and somebody recognised
+    # automatically files nothing new, so appearing in more meetings than you have
+    # prints from is the normal state rather than a discrepancy.
+    print(
+        "FILED FROM counts the meetings a voiceprint came out of; APPEARS IN counts "
+        "the meetings the name is used in. Recognition files nothing new, so the "
+        "second is usually the larger."
+    )
+    drifted = [p["name"] for p in entries if not p["in_database"]]
+    if drifted:
+        # Named rather than counted, for the reason the hotword cap's drop list is:
+        # this is the only place the two files are compared.
+        print(f"{', '.join(drifted)}: {NO_PRINTS}")
+    return 0
+
+
 HOTWORD_HEADERS = ("TERM", "SOURCE")
 
+HOTWORD_SOURCES = (
+    "[transcription].hotword_extras in config.toml",
+    "a name in the known-voices database (referat label)",
+    "a project's glossary (referat project glossary <id>)",
+)
+"""The three places a term reaches this list from, in the priority order the cap uses.
 
-def run_hotwords(config: Config) -> int:
-    """`referat hotwords` -- the list, where each term came from, and what was cut.
+Said in one place because two surfaces say it: the empty-list message here, and
+the command center's hotword panel, which is the screen somebody will be *adding*
+terms on when they push the list over the budget.
+"""
 
-    No `--json`. Nothing reads this document: the JSON verbs exist because a
-    surface asked for them, and one nobody consumes would be speculative. Two JSON
-    reads, so it needs no optional extra -- naming what Whisper will be told
-    should not cost three gigabytes of resident torch.
+
+def hotwords_document(config: Config) -> dict[str, Any]:
+    """The merged hotword list, what it cost, and what the cap dropped.
+
+    Split out of :func:`run_hotwords` at build step 20's phase 4, and the `--json`
+    that step 12b deliberately withheld comes with it. That refusal was recorded
+    with its reason — nothing read this document — and phase 4 is where that stops
+    being true: the command center's projects page is the hotword surface, because
+    a glossary is where the terms live.
+
+    The token figures are :func:`referat.hotwords.estimate_tokens`' estimate rather
+    than a count, and are named `estimated_tokens` so no reader mistakes them for
+    one. There is no tokenizer to ask without the `transcribe` extra, and the
+    estimate errs upwards on purpose so that a term is dropped here and named
+    rather than sliced mid-name by faster-whisper and not.
     """
     from referat import hotwords
 
-    terms = hotwords.collect(config)
-    if not terms:
-        print("No hotwords. A term reaches this list from one of three places:")
-        print("  [transcription].hotword_extras in config.toml")
-        print("  a name in the known-voices database (referat label)")
-        print("  a project's glossary, hand-edited into projects.json")
+    kept, dropped = hotwords.cap(hotwords.collect(config))
+    return {
+        "budget": hotwords.TOKEN_BUDGET,
+        "estimated_tokens": sum(hotwords.estimate_tokens(t.term) for t in kept),
+        "terms": [{"term": t.term, "source": t.source} for t in kept],
+        "dropped": [{"term": t.term, "source": t.source} for t in dropped],
+    }
+
+
+def run_hotwords(config: Config, as_json: bool = False) -> int:
+    """`referat hotwords` -- the list, where each term came from, and what was cut.
+
+    Two JSON reads, so it needs no optional extra -- naming what Whisper will be
+    told should not cost three gigabytes of resident torch.
+    """
+    document = hotwords_document(config)
+    if as_json:
+        print(json.dumps(document, indent=2))
         return 0
 
-    kept, dropped = hotwords.cap(terms)
-    print(render_table([(t.term, t.source) for t in kept], HOTWORD_HEADERS))
-    used = sum(hotwords.estimate_tokens(t.term) for t in kept)
+    terms = document["terms"]
+    dropped = document["dropped"]
+    if not terms and not dropped:
+        print("No hotwords. A term reaches this list from one of three places:")
+        for source in HOTWORD_SOURCES:
+            print(f"  {source}")
+        return 0
+
+    print(render_table([(t["term"], t["source"]) for t in terms], HOTWORD_HEADERS))
     print()
     print(
-        f"{len(kept)} term{'s' if len(kept) != 1 else ''}, "
-        f"about {used} of {hotwords.TOKEN_BUDGET} tokens of Whisper's prompt window"
+        f"{len(terms)} term{'s' if len(terms) != 1 else ''}, "
+        f"about {document['estimated_tokens']} of {document['budget']} tokens "
+        f"of Whisper's prompt window"
     )
     if dropped:
         # Named rather than counted. A cap nobody can see is how this turns into a
         # bug report about one specific name that is never heard right.
         print(
             f"{len(dropped)} dropped by the cap, lowest priority first: "
-            + ", ".join(f"{t.term} ({t.source})" for t in dropped)
+            + ", ".join(f"{t['term']} ({t['source']})" for t in dropped)
         )
     return 0
 
@@ -2404,7 +2827,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_devices(config)
 
     if args.command == "hotwords":
-        return run_hotwords(config)
+        return run_hotwords(config, as_json=args.as_json)
+
+    if args.command == "people":
+        return run_people(config, as_json=args.as_json)
 
     if args.command == "label":
         # Imported here rather than at module scope so `referat --version` and

@@ -933,6 +933,25 @@ class ProjectsPage(QWidget):
         self.unlink_button.setEnabled(has_doc and not self._syncing)
         self.sync_button.setEnabled(linked and not self._syncing)
 
+    def _refresh_docs(self) -> None:
+        """Redraw the doc list alone, from the document just re-read.
+
+        **`refresh()` does not refill the form, deliberately**, and that is what
+        made linking a document look like it had done nothing: the list beneath
+        the button kept the state from before the write until you clicked away
+        and back. The reason `refresh()` leaves the form alone is good --
+        refilling it would discard a half-typed glossary, which is the same
+        reason `_fill_archive_state` exists -- so the fix is the same shape as
+        that one: touch the part that changed and nothing else.
+
+        Third time this page has needed it, and the third is the one that says
+        it is a pattern rather than a coincidence. `_on_rename`'s stale heading
+        is the fourth and is still open in `TODO.md`.
+        """
+        project = self._project(self._selected)
+        if project is not None:
+            self._fill_docs(project)
+
     def _icon_color(self) -> str:
         return self.palette().windowText().color().name()
 
@@ -995,6 +1014,8 @@ class ProjectsPage(QWidget):
             return
         outcome = cli.unlink_doc(self.config, project["id"], gdoc_id)
         self._show_outcome(outcome)
+        self._refresh_docs()
+        self._refresh_doc_buttons()
 
     def _on_sync(self) -> None:
         """Reconcile this project's docs against the meetings tagged with it."""
@@ -1051,6 +1072,8 @@ class ProjectsPage(QWidget):
         """Back on the GUI thread. Refresh, then say what happened."""
         self._syncing = False
         self.refresh()
+        self._refresh_docs()
+        self._refresh_doc_buttons()
         self._show_outcome(cli.Outcome(ok, message))
 
     def _show_outcome(self, outcome: cli.Outcome) -> None:

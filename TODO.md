@@ -3414,6 +3414,14 @@ I would like to be able to paste a link into the UI and not use the CLI."*
 
 ### Left open
 
+- [x] **Two things a running window found**, reported on 2026-09-04 after real
+      use: the doc list did not redraw after a link (the `_fill_form` staleness
+      above), and **selected rows were black on dark blue** -- a Qt
+      `windows11` style bug that only bites views with `alternatingRowColors`
+      on, which is every view here that shows data. Both fixed; the second was
+      diagnosed by rendering a `QListWidget` to a pixmap and counting light and
+      dark pixels, since the palette itself was correct and said nothing was
+      wrong.
 - [ ] **Nobody has clicked these buttons in a running window.** They were driven
       offscreen — the page builds, the buttons enable and disable correctly, the
       dialog's lookup thread returns real tabs — but a `QApplication` under
@@ -3747,6 +3755,13 @@ of it.** Nothing is hidden from a meeting, nothing is deleted, nothing cascades.
 
 ### Open questions
 
+- [x] **Two more instances of it, fixed on 2026-09-04**, which is what makes it a
+      pattern rather than a coincidence: the doc list did not redraw after a
+      document was linked, because `refresh()` deliberately does not refill the
+      form -- refilling would eat a half-typed glossary. `_refresh_docs` is the
+      same surgical shape as `_fill_archive_state`. **`_on_rename` is still the
+      one left**, and the note below is still the right description of it.
+      Original note follows.
 - [ ] **`_on_rename` has the same staleness the archive button had**, and it is
       pre-existing rather than introduced here: after a rename the list row shows
       the new name and the form's heading still shows the old one, until you

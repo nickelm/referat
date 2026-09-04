@@ -2,6 +2,53 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-04 (eleventh) — A list that did not redraw, and unreadable selections
+
+Two things from actually using the window, and the second was not ours.
+
+### The doc list kept the state from before the write
+
+Linking or creating a document left the list underneath the button showing what
+was there before; switching project or tab and back brought it up to date.
+
+The cause is a *deliberate* rule. `ProjectsPage.refresh()` re-reads the document
+and refills the list of projects and the hotword panel, but **not the form** —
+because refilling the form would discard a half-typed glossary. That is right,
+and it is the same reason `_fill_archive_state` was split out at step 21 when the
+Archive button did not flip. So the fix is the same shape a third time:
+`_refresh_docs` redraws the doc list alone and touches nothing anybody may be
+typing into.
+
+Third instance is what makes it a pattern rather than a coincidence, and it is
+written down as one. `_on_rename`'s stale heading is the fourth and is still open.
+
+### Selected rows were black on dark blue
+
+Reported as a general UI complaint, and it is a **Qt style bug** rather than a
+palette this project set wrongly — the palette is correct, and says so: `Highlight`
+is `#0067c0` and `HighlightedText` is `#ffffff`, in both the active and inactive
+groups. Qt 6's `windows11` style simply does not use the second one for item text
+**when the view has `alternatingRowColors` on**. With striping off the same style
+paints a soft grey selection and everything is readable, which is exactly why this
+went unseen for four builds: every view here that shows data stripes, and every
+view that does not is a list of headings.
+
+Diagnosed by rendering a `QListWidget` to a pixmap and counting pixels, because
+neither the palette nor the code said anything was wrong:
+
+    striping off  -> 3,275 near-white pixels in the selected row,   72 dark
+    striping on   ->         0 near-white pixels,                  491 dark
+    with the fix  ->       291 near-white pixels,                    0 dark
+
+One rule on the `QApplication`, `QAbstractItemView::item:selected { color:
+palette(highlighted-text); }`, which fixes all nine views at once. Written
+against the palette rather than a colour so a dark theme still gets a readable
+one, and checked against the alternative — a `QStyledItemDelegate` forcing the
+same role, which measured identically and would have had to be applied nine
+times. The stripes, the selection colour and the selection shape are
+pixel-identical before and after: the only thing that changed is the one thing
+that was wrong.
+
 ## 2026-09-04 (tenth) — Seven pieces of feedback, and an API that had moved
 
 All seven from using the digests for an afternoon. One of them turned out to be

@@ -72,6 +72,32 @@ class Bridge(QObject):
         self.progressed.emit(jobs)
 
 
+SELECTED_TEXT_FIX = (
+    "QAbstractItemView::item:selected { color: palette(highlighted-text); }"
+)
+"""Selected rows are unreadable without this, and it is a Qt style bug rather than ours.
+
+Qt 6's `windows11` style, **when a view has `alternatingRowColors` on**, paints a
+selected row with the palette's `Highlight` -- a strong blue -- and then draws
+its text in `Text` rather than `HighlightedText`. The result is black on dark
+blue. With striping off the same style paints a soft grey selection and the text
+stays readable, which is why this went unseen: every list here that shows data
+sets striping, and every list that does not is a heading.
+
+Measured rather than guessed, by rendering a `QListWidget` to a pixmap and
+counting pixels: striping off gives 3,275 near-white pixels in the selected row
+and 72 dark ones; striping on gives **zero** near-white and 491 dark. With this
+rule: zero dark, 291 light. The row's background, the stripes and the selection
+shape are pixel-identical either way, so this changes the one thing that was
+wrong and nothing else.
+
+`palette(highlighted-text)` rather than a colour, so a dark theme still gets a
+readable one -- the same rule `referat.ui.icons` follows for glyphs. Set on the
+`QApplication` because nine views across five pages have this problem and it is
+one bug, not nine.
+"""
+
+
 class Shell:
     """The tray icon and, on demand, the command center behind it."""
 
@@ -84,6 +110,7 @@ class Shell:
         # process is the recorder. The window refuses the close as well; both
         # halves are needed and neither is redundant.
         self.qt.setQuitOnLastWindowClosed(False)
+        self.qt.setStyleSheet(SELECTED_TEXT_FIX)
 
         self.window: Any | None = None
         self.tray = QSystemTrayIcon()

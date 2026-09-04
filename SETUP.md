@@ -846,3 +846,140 @@ Nothing else has to be undone. It had two settings, `referat.repoRoot` and
 `referat.claudeBinary`, and both are inert once it is gone; there was never a
 meetings-folder setting, deliberately, because `[paths].meetings_dir` in
 `config.toml` is the one place that says where meetings live.
+
+## 13. Google Docs digests
+
+Optional, and the only part of Referat that talks to anything but your own
+machine. A project can carry one or more Google Docs, and `referat project sync`
+writes every meeting tagged with that project into each of them as a dated block.
+What it sends is `notes.md` and nothing else — never `transcript.md`, never a
+WAV, never `.voices/`. Skip this whole section if you do not want it; nothing
+else depends on it.
+
+### 13a. The extra
+
+```powershell
+.venv\Scripts\python.exe -m pip install google-api-python-client google-auth-oauthlib google-auth-httplib2
+```
+
+Tens of megabytes, unlike the transcribe stack's three gigabytes. Only
+`project link-doc`, `project unlink-doc` and `project sync` need it; every other
+project verb, and `tag`, `untag` and `state`, keep working without it and say so
+plainly if you try one of the three.
+
+It adds exactly two unsigned native files, `google\_upb\_message.pyd` and
+`cryptography\hazmat\bindings\_rust.pyd`. Both are **off the recording path** —
+nothing between a WAV and a transcript imports either — so if Smart App Control
+ever blocks one you lose a digest push and nothing else. That is the degradation
+section 2's rule permits, and it is worth re-running the signature sweep after an
+upgrade the same way you would for PySide6.
+
+### 13b. The Google Cloud side, once
+
+This is the part nobody can do for you.
+
+1. Go to <https://console.cloud.google.com/> and create a project. `Referat` is a
+   fine name; an existing personal project is fine too.
+2. **APIs & Services → Library**, and enable both:
+   - **Google Docs API** — creating and writing the digest documents.
+   - **Google Drive API** — used for *one* thing, searching your Drive by name so
+     *select existing doc* has something to offer.
+3. **OAuth consent screen** → *External*. App name `Referat`, your own address
+   for both contact fields.
+4. Add exactly two scopes:
+   - `https://www.googleapis.com/auth/documents`
+   - `https://www.googleapis.com/auth/drive.metadata.readonly`
+
+   The second one returns names, ids and modification times and **no file
+   content at all**. Do not be tempted by `drive.readonly`, which reads every
+   byte of everything you own; and note that the narrower-sounding `drive.file`
+   does not work here — it grants access only to files this application itself
+   created, so on a fresh install the document search would return an empty list.
+5. **Set the publishing status to "In production", not "Testing".** This is the
+   one setting that will otherwise bite you weeks later: Google expires a testing
+   app's refresh tokens after **seven days**, so the browser consent would come
+   back roughly weekly. In production an unverified app shows a *"Google hasn't
+   verified this app"* interstitial once — *Advanced → Go to Referat (unsafe)* —
+   and the token then persists. Verification is not required for your own
+   account.
+6. **Credentials → Create credentials → OAuth client ID**, application type
+   **Desktop app**. Not "Web application".
+7. Download the JSON and save it as `~/.referat/google_client_secret.json`,
+   beside `hf_token`. Nothing goes into the repository, and `.gitignore` names
+   both files anyway because a browser download lands in `Downloads` and the
+   repository root is where somebody would drop it.
+
+`[paths].google_client_secret_file` and `[paths].google_token_file` in
+`config.toml` move either file if you want them elsewhere.
+
+### 13c. The consent, once
+
+The first command that needs Google will print a URL, open your browser, and ask
+you to paste something back:
+
+```powershell
+.venv\Scripts\python.exe -m referat.cli project link-doc <project-id> --create
+```
+
+Approve it. **The browser will then fail to load a page at `localhost` — that is
+expected.** Nothing is listening there, deliberately: the usual way to do this is
+to run a small web server on a loopback port to catch the redirect, and Referat
+has a standing rule against binding a port at all. Copy the whole address out of
+the address bar (it looks like `http://localhost/?code=4/0Ab...&scope=...`) and
+paste it at the prompt. The code is in it.
+
+The refresh token is cached in `~/.referat/google_token.json`. Delete that file
+to sign out. Because the flow needs a terminal, **the command center can never
+ask for consent** — do this once at a prompt and every later sync, from the
+window included, uses the stored token.
+
+### 13d. Linking, and the tab
+
+```powershell
+# create a new doc titled "<Project> Meeting Digest", and backfill it
+referat project link-doc my-project --create
+
+# or find an existing one
+referat project link-doc my-project --search "Weekly notes"
+referat project link-doc my-project --doc <gdoc-id>
+```
+
+Attaching an **existing** document has one awkward step, and it is the API's
+fault rather than Referat's: the document must have a tab named exactly
+`Meetings`, and **the Docs API cannot create a tab** — there is no request type
+for it. If it has none, Referat writes nothing, gives you the document's URL, and
+tells you the command to re-run once you have added the tab by hand (in Docs, the
+tab sidebar → *Add tab*, then rename it). There is deliberately no fallback to
+the document's first tab: that would be a meeting written into whatever you
+happened to have there, with no error to notice.
+
+Linking ends by running a sync, which is what makes attaching an existing
+document backfill every meeting already tagged.
+
+### 13e. Syncing
+
+```powershell
+referat project sync my-project --dry-run   # say what would change, write nothing
+referat project sync my-project
+referat project sync my-project --prune     # also remove blocks for untagged meetings
+```
+
+Use `--dry-run` first on any document somebody else can see. A sync inserts what
+is missing in date order, re-renders in place anything whose `notes.md` has
+changed since it was written, and **reports rather than removes** a block whose
+meeting no longer carries the tag — the document may be shared and somebody may
+have written around it. `referat project list` shows a `PENDING` count so you can
+see a sync is owed without making a network call.
+
+`referat project unlink-doc my-project <gdoc-id>` stops writing there. It does
+not delete anything: every block stays exactly where it is.
+
+### 13f. Before you share a digest doc with anybody
+
+Read the `notes.md` files that will land in it first. A shared document is a much
+wider blast radius than a synced folder, what goes into it is whatever `/cleanup`
+decided to write about people who never read the prompt, and some notes carry a
+`SPEAKER_02` in their participant line for somebody nobody has named yet. The
+transcript, the audio and the voiceprints never leave this machine at all — but
+the notes are not nothing.
+

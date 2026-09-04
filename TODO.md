@@ -1194,6 +1194,24 @@ terms go into Whisper's prompt, not through another model.
 
 ## 13. Per-project digests
 
+**Built on 2026-09-04**, and it had been the one genuinely lagging build step:
+forty unchecked boxes, nothing built, and both gates met since 2026-09-01. What
+was still open was the auth question below, settled here as a **desktop OAuth
+client** — because *select existing doc* has to search your own Drive, which a
+service account cannot do.
+
+Three things the boxes did not say and building it found. **A style reset before
+styling**, because `insertText` inherits the style at the insertion point, so a
+block inserted before an existing anchor arrives small and gray. **The acceptance
+check is per paragraph**, because applied flat it fires on the documented `####`
+pass-through. And **`synced` needed a way back**: `cli.set_notes_written` accepts
+it now and drops to `notes_written`, which is the one lifecycle edge that runs
+backwards.
+
+The consent has to be given once at a terminal, so nothing has been written into
+a real doc yet — the network half type-checks, renders and passes an offline
+simulator rather than having run. Same honesty as step 23's two buttons.
+
 **Gated on step 10** and, since 2026-09-01, **on step 14 as well**: the projects
 file, the tag model and the lifecycle field all move there, and this step is the
 consumer of them. A digest block is a meeting's `notes.md` translated into a
@@ -1297,35 +1315,35 @@ Both halves of the create-or-select flow, the `Meetings` tab check and the
 hand-off to the browser are unchanged — they just run once per doc being
 attached. Everything else in this sub-section stands.
 
-- [ ] A new `digest` extra: `google-api-python-client` and whatever the auth
+- [x] A new `digest` extra: `google-api-python-client` and whatever the auth
       decision needs. Small — tens of megabytes, not the three gigabytes of
       `transcribe` — but still optional, because `project list` and `project
       assign` must work without it
-- [ ] `referat/gdocs.py`: auth, `documents.create`, `documents.get`,
+- [x] `referat/gdocs.py`: auth, `documents.create`, `documents.get`,
       `documents.batchUpdate`, `files.list`. The only module that touches the
       network
-- [ ] `referat project link <name>` offers **Create new doc**:
+- [x] `referat project link <name>` offers **Create new doc**:
       `documents.create(title="<Project> Meeting Digest")`. Summaries go in the
       doc's default tab; read its `tabId` back from `documents.get` and store it
       rather than relying on the default, so every later write is located
       explicitly
-- [ ] …or **Select existing doc**: search Drive with `files.list`,
+- [x] …or **Select existing doc**: search Drive with `files.list`,
       `q = "mimeType='application/vnd.google-apps.document' and name contains
       '<query>' and trashed=false"`, `orderBy=modifiedTime desc`, printed as a
       numbered list in the CLI and as a live QuickPick in the extension
-- [ ] After selecting an existing doc, look for a tab whose
+- [x] After selecting an existing doc, look for a tab whose
       `tabProperties.title` is `Meetings`. **Tabs cannot be created through the
       API** — there is no `createTab` request — so if it is missing, open
       `https://docs.google.com/document/d/<id>/edit`, say to add a tab named
       `Meetings`, and re-check when told to. Store `gdoc_id` and `tab_id`
-- [ ] `referat project unlink <name>` clears `gdoc_id` and `tab_id` and leaves
+- [x] `referat project unlink <name>` clears `gdoc_id` and `tab_id` and leaves
       the doc exactly as it is. Unlinking is not deleting
-- [ ] Linking ends by running a sync, which is what makes linking an *existing*
+- [x] Linking ends by running a sync, which is what makes linking an *existing*
       doc backfill every already-assigned meeting automatically
 
 ### Every write is located by `tab_id`
 
-- [ ] `documents.get` is always called with `includeTabsContent=True`, and every
+- [x] `documents.get` is always called with `includeTabsContent=True`, and every
       `batchUpdate` request carries `tabId` in its `Location` / `Range`. **A
       request with no `tabId` silently targets the first tab** — writing a
       meeting into somebody's unrelated notes tab, with no error to notice.
@@ -1342,79 +1360,79 @@ another, which is why `meta.json`'s `digest` becomes keyed by `gdoc_id`; and an
 "orphan" is now an anchor whose meeting no longer carries *this* tag, which is
 what an untag produces and is still reported rather than deleted.
 
-- [ ] Each meeting's block starts with an **anchor paragraph** whose text is
+- [x] Each meeting's block starts with an **anchor paragraph** whose text is
       `[referat:2026-08-27_1400]`, styled small and gray. A block runs from its
       anchor's start index to the next anchor's start, or to the end of the tab
-- [ ] A visible text anchor rather than a Docs **named range**: named ranges are
+- [x] A visible text anchor rather than a Docs **named range**: named ranges are
       the API's own mechanism and are the fragile choice — invisible to a person
       editing the doc, destroyed along with their content, and not carried by a
       copy of the document. A text anchor survives everything except deleting
       that line, and deleting it only makes the reconciler re-append the block
-- [ ] `referat project sync <name>`: `documents.get` the tab, scan the anchors,
+- [x] `referat project sync <name>`: `documents.get` the tab, scan the anchors,
       and diff them against every meeting assigned to the project that has a
       `notes.md`, sorted by meeting id — `YYYY-MM-DD_HHMM` sorts chronologically
       by construction, so no date parsing is needed to order them
-- [ ] **Missing** — no anchor for an assigned meeting: render and insert it
+- [x] **Missing** — no anchor for an assigned meeting: render and insert it
       before the first existing anchor that sorts after it, or at the end. That
       is what puts a backfilled meeting in date order instead of at the bottom
-- [ ] **Stale** — `sha256` of the current `notes.md` differs from the
+- [x] **Stale** — `sha256` of the current `notes.md` differs from the
       `digest.notes_sha256` recorded in `meta.json`: delete the block's range and
       insert the re-rendered block at that index. This is the whole reason
       `/cleanup` can be re-run
-- [ ] **Orphan** — an anchor for a meeting no longer assigned: leave it, and
+- [x] **Orphan** — an anchor for a meeting no longer assigned: leave it, and
       report it. The doc may be shared and somebody may have written around that
       block; deleting on their behalf is not Referat's call. `sync --prune` is
       the explicit opt-in
-- [ ] **Apply block operations in reverse document order**, one `batchUpdate`
+- [x] **Apply block operations in reverse document order**, one `batchUpdate`
       per block. Every insert and delete shifts every index after it, so working
       back to front keeps the indices from the single `documents.get` valid.
       This is the single most likely thing in step 13 to be gotten wrong
-- [ ] Write each meeting's `digest` block to `meta.json` through
+- [x] Write each meeting's `digest` block to `meta.json` through
       `paths.write_json_atomic` as its block lands, not in one pass at the end,
       so an interrupted sync resumes cheaply instead of rewriting the doc
-- [ ] Run a sync at the end of `/cleanup`'s follow-up too — or at least document
+- [x] Run a sync at the end of `/cleanup`'s follow-up too — or at least document
       that `notes.md` changing is what makes a block stale, so nobody expects the
       doc to update itself
 
 ### Markdown to Docs
 
-- [ ] `referat/digest.py`: the translator, the anchor scan and the diff. Pure —
+- [x] `referat/digest.py`: the translator, the anchor scan and the diff. Pure —
       no Google import, so the part carrying all the index arithmetic is
       testable without a network or the `digest` extra
-- [ ] **No raw Markdown text may ever appear in the doc.** The input is the
+- [x] **No raw Markdown text may ever appear in the doc.** The input is the
       constrained subset `/cleanup` emits: `##` / `###`, `**bold**`, `*italic*`,
       `` `code` ``, `-` bullets one level deep, `[text](url)`, `[[Wikilinks]]`,
       paragraphs. Anything outside that is passed through as plain text rather
       than guessed at
-- [ ] Two passes: build the block's plain text with a running offset, recording
+- [x] Two passes: build the block's plain text with a running offset, recording
       `(start, end, style)` spans, then emit **one `insertText` followed by N
       style requests** in a single batch. Style requests do not move indices, so
       the spans stay valid — which is exactly why it is one insert and not one
       per span
-- [ ] **Docs indices are UTF-16 code units, not Python characters.** One emoji
+- [x] **Docs indices are UTF-16 code units, not Python characters.** One emoji
       in a note shifts every span after it. Offsets are
       `len(s.encode("utf-16-le")) // 2`, and there should be a test with an
       emoji in it
-- [ ] `createParagraphBullets` converts *existing* paragraphs into a list, so
+- [x] `createParagraphBullets` converts *existing* paragraphs into a list, so
       the inserted text must not contain the `- ` itself. A second nesting level
       is a leading tab character
-- [ ] The block's date line is Heading 3, so `notes.md`'s own `##` becomes
+- [x] The block's date line is Heading 3, so `notes.md`'s own `##` becomes
       **Heading 4** and `###` becomes **Heading 5**. Its `#` H1 is consumed into
       the date line's title and not emitted twice
-- [ ] `[[Wikilinks]]` have no target in a Google Doc: render them as bold text
+- [x] `[[Wikilinks]]` have no target in a Google Doc: render them as bold text
       with the brackets stripped. A reader outside this machine should see
       `Anna`, not `[[Anna]]`
-- [ ] Acceptance check on the produced plain text: no `**`, no leading `#`, no
+- [x] Acceptance check on the produced plain text: no `**`, no leading `#`, no
       leading `- `, no `](`, no `[[`. Any hit is a translator bug, and it is
       cheap enough to assert on every render
 
 ### Date headers
 
-- [ ] Each block's first content line is Heading 3, text `YYYY-MM-DD — <title>`,
+- [x] Each block's first content line is Heading 3, text `YYYY-MM-DD — <title>`,
       em dash. The title is the H1 of `notes.md` falling back to the meeting id —
       the same rule as `referat index`, sharing that helper rather than growing
       a second reader of the same file
-- [ ] The Docs API cannot insert an @-date smart chip; there is no request type
+- [x] The Docs API cannot insert an @-date smart chip; there is no request type
       for it. Keep the date as a fixed-width prefix in leading position, so that
       if the API ever gains one, swapping it for a chip is a one-request change
       to this line and leaves the ` — <title>` remainder alone. Noted in
@@ -1422,22 +1440,22 @@ what an untag produces and is still reported rather than deleted.
 
 ### meta.json
 
-- [ ] ~~`project`: the project slug, absent when unassigned~~ **Superseded by step
+- [x] ~~`project`: the project slug, absent when unassigned~~ **Superseded by step
       14's `tags`**, a list of project ids. It is a list because a meeting may
       belong to several threads of work, and it holds *ids* rather than names so
       a rename touches one file. Absent or empty means untagged
-- [ ] `digest`: **keyed by doc**, `{"<gdoc_id>": {tab_id, notes_sha256,
+- [x] `digest`: **keyed by doc**, `{"<gdoc_id>": {tab_id, notes_sha256,
       written_at}}` — what was written, where, and from which bytes of
       `notes.md`. It was a single object when a project had one doc; a meeting
       can now be current in one doc and stale in another, and one flat object
       could not say so. That is still what makes reconciliation and a correction
       cheap: the sync reads `meta.json` and one `documents.get` per doc, and never
       has to re-read the doc's prose to work out what changed
-- [ ] `status` reaches `synced` when **every** doc of **every** tag is current,
+- [x] `status` reaches `synced` when **every** doc of **every** tag is current,
       and drops back to `notes_written` the moment a `notes.md` sha stops
       matching. The lifecycle field is step 14's; this is the step that writes its
       last two transitions
-- [ ] The folder contract table does not change. No new file appears in a
+- [x] The folder contract table does not change. No new file appears in a
       meeting folder; the digest lives in the doc and in these `meta.json` keys
 
 ---
@@ -1454,6 +1472,92 @@ before or after 14 and slots in wherever it is wanted.
 Steps 14-16 are **not** behind the steps-10-13 gate above. That gate is about
 having real transcripts to tune `/cleanup` against; tagging a meeting needs
 nothing of the sort. Step 13 stays gated, twice over now.
+
+### What building it settled
+
+- [x] **The subset had to move first.** `ui/richtext.py` has said since it was
+      written that it is the manual half of this step — but it imports PySide6 at
+      module scope and lives in the one sub-package, so `digest.py` could not
+      reach it without inverting the layering and putting Qt behind a network
+      push. `referat/markdown.py` is the grammar, extracted; each renderer kept
+      its own walk, because HTML nests and Docs styles flat ranges, and
+      flattening them into shared tokens would have changed what a paste
+      produces. **What stops them drifting is a check and not an abstraction**:
+      `scripts/digest_report.py` renders every real note through both and
+      compares. Byte-identical over all fourteen before and after
+- [x] **A style reset, which no box here called for.** `insertText` inherits the
+      character and paragraph style at the insertion point, so a block inserted
+      immediately before an existing anchor arrives small and gray and one
+      inserted after a heading arrives as a heading. The batch resets everything
+      it just inserted before styling any of it, which makes the result
+      independent of what happened to be there
+- [x] **The acceptance check is per paragraph, against the kind `blocks` gave
+      it.** As specified — no `**`, no leading `#`, no leading `- `, no `](`, no
+      `[[` — it is a flat scan, and a flat scan fires on a *documented*
+      behaviour: `HEADING_RE` matches one to three hashes, so a `####` line falls
+      through to a paragraph carrying its own hashes. A plain paragraph starting
+      with `#` is explicitly not a bug; a *heading* paragraph that still has
+      them is
+- [x] **`synced` needed a way back and there was none.** A meeting reaches it
+      when every doc of every project it carries holds the current notes, and
+      re-running `/cleanup` makes that false. `cli.set_notes_written` now accepts
+      `synced` and drops it to `notes_written` — written from the function that
+      *knows* the notes just changed, because deciding it later by comparing a
+      sha would be inferring a lifecycle from the filesystem
+- [x] **The reverse-order rule is asserted where it is produced**, not hoped for
+      where it is applied, and the sort key is `(at, meeting_id)` — the second
+      half because two missing meetings can land at the same index and applying
+      the later-sorting one first is what leaves them in date order. Twelve cases
+      through a twenty-line simulator of `insertText` and `deleteContentRange`
+- [x] **The fixture's first version failed six of those twelve and every failure
+      was its own.** The fake `documents.get` and the simulated document built
+      their text separately, so the indices the reconciler was handed did not
+      describe the string they were applied to. One `block_text` serves both now,
+      which is what makes a miss there mean something. Worth writing down: a
+      fixture that can be wrong in the same way as the code is not a fixture
+- [x] **`tabId` is checked mechanically, at the one place every write passes
+      through.** A request without one silently targets the first tab, and the
+      consequence is a meeting in somebody's unrelated notes with nothing to
+      notice. `find_tab` recurses `childTabs` for the same class of reason: a
+      missed nested tab is not an error, it is a *second* `Meetings` tab
+- [x] **The `#` H1 is dropped from the block** — the Heading 3 date line carries
+      that exact string already, from the same `index.meeting_title`, so every
+      block would announce its title twice
+- [ ] **The byline's relative `[transcript.md](transcript.md)` is left alone**,
+      reversing the recommendation made while planning. It renders as the plain
+      words `transcript.md`; dropping the clause would be `digest.py` editing
+      somebody's prose, which is larger than an odd-looking line. Revisit if a
+      shared doc's readers actually ask what it means
+- [x] **The extra adds two native files and both are unsigned** —
+      `google/_upb/_message.pyd` and `cryptography/hazmat/bindings/_rust.pyd`.
+      Both are off the recording path, so a Smart App Control block costs a
+      digest push and nothing else, which is the degradation the rule permits.
+      Re-run the sweep after an upgrade, as with PySide6
+- [ ] **Nothing has been written into a real Google Doc.** Consent needs a
+      terminal and the session that built this had none, so create, attach,
+      backfill, re-render, orphan and prune are code that renders and passes an
+      offline simulator rather than code that has run. The first
+      `referat project link-doc` is the test, and the walkthrough is in
+      `CHANGELOG.md` and `SETUP.md` section 13
+
+### Left open
+
+- [ ] **`--prune` has never removed a real block.** It is the one operation here
+      that destroys somebody's prose, and it is the least exercised
+- [ ] **A block runs to the next anchor, so anything written *underneath* one in
+      the doc belongs to it and is replaced with it.** That is the honest reading
+      of what a block is, and the alternative — stopping at some heuristic end —
+      leaves orphaned prose behind after a re-render. Worth watching the first
+      time somebody actually annotates a digest
+- [ ] **A rename of a person goes stale in a pushed doc**, which is step 20c's
+      problem and has no story here. Report it, never reach into the doc — the
+      same rule as an orphaned anchor
+- [ ] **Re-read the `/cleanup` prompt before the first digest doc is shared with
+      anybody.** The standing item under *Surfaced later* is now live rather than
+      hypothetical: three of the fourteen notes carry a `SPEAKER_02` or a
+      `SPEAKER_07 (addressed as Asmus)` in their byline, and those are people who
+      never read the prompt
+
 
 ## 14. Projects as labels: the data model and the CLI
 
@@ -2436,6 +2540,14 @@ and the window's central widget became a `QTabWidget`.
       which is the one place this page says something Python also says — the same
       exception the sidebar's Delete modal is, and for the same reason: there is
       no outcome to quote yet
+- [ ] **Phase 7's, now that step 13 exists.** The reason this box gave for being
+      unbuilt — the CLI owns every mutation and `project link-doc` does not
+      exist — stopped being true on 2026-09-04. What it needs is three buttons
+      driving `cli.link_doc`, `cli.unlink_doc` and `cli.sync_project`, with the
+      sync on a thread and `cli.doc_candidates` behind the picker. Note that the
+      window can never *authenticate*: consent needs a terminal by construction,
+      so its failure mode is a sentence naming one command.
+      Original note follows.
 - [ ] **One Google Doc per project in the command center's model**, linked to an
       existing doc or created new. Note the divergence and do not resolve it
       here: step 13 specifies **zero or more** docs per project and `DocRef` is
@@ -4725,8 +4837,19 @@ Diagnosed from `2026-09-03_1459`, whose mic diarization took **6527.8s against
       it was run, and every claim cross-checked against the code — so the one
       thing it cannot prove is that nothing is *missing*. Read it against a clean
       Windows install the first time there is one
-- [ ] **How step 13 authenticates to Google is unresolved**, deliberately, and
-      recorded rather than decided. A **desktop OAuth client** means one browser
+- [x] **How step 13 authenticates to Google was unresolved** and was settled at
+      implementation on 2026-09-04, as this box said it would be: a **desktop
+      OAuth client**, for the reason below — the picker has to see your own
+      Drive. Two scopes and no more: `documents`, and
+      `drive.metadata.readonly` for the search, which returns names and ids and
+      no content. `drive.file` was refused as insufficient rather than chosen
+      as minimal: it sees only files this application created, so on a fresh
+      install the picker would find nothing at all. The one thing this box did
+      not foresee is that the standard flow **binds a socket** and Conventions
+      forbid one, so consent is a URL you open and a redirect you paste back.
+      `.gitignore` gained both files in the same change.
+      Original note follows.
+- [ ] A **desktop OAuth client** means one browser
       consent and a refresh token cached to a file — which follows the
       `hf_token_file` precedent in `config.py` exactly — and Drive search sees
       the user's own Drive, which the "select existing doc" picker needs to be

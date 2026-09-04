@@ -44,8 +44,8 @@ that field rather than guessing from which files happen to exist.
 
 The `referat` CLI is the rest of it: `list` (the inventory and the queue),
 `show`, `transcript`, `status`, `devices`, `rerun`, `promote`, `label`, `people`,
-`actions`, `day`, `notes`, `project`, `tag`, `untag`, `state`, `hotwords`,
-`index` and `config`.
+`actions`, `day`, `notes`, `project` (including `link-doc`, `unlink-doc` and
+`sync`), `tag`, `untag`, `state`, `hotwords`, `index` and `config`.
 
 A `/cleanup` slash command writes `notes.md` beside a transcript when asked —
 lazily, never automatically. The graphical surface is a **command center** — a
@@ -65,9 +65,22 @@ Record, pause and stop drive the same recorder the two hotkeys do.
 A VS Code extension held that job from build step 15 until step 20, and was
 **deleted at step 23** once the window could re-transcribe a meeting and release
 a staged one's audio, which were the last two things it could do and the window
-could not. There is one UI again. What is next: per-project digests pushed into
-Google Docs. See [TODO.md](TODO.md) for the plan and
-[CHANGELOG.md](CHANGELOG.md) for what has landed.
+could not. There is one UI again.
+
+A project may also carry **Google Docs**, and `referat project sync` writes every
+meeting tagged with that project into each of them as a dated block. It is
+reconciliation rather than appending: each block is found by its own
+`[referat:<id>]` anchor, so a note rewritten by `/cleanup` is re-rendered in
+place rather than appended twice, and a block whose meeting no longer carries the
+tag is reported and left alone rather than quietly removed. This is the only
+thing Referat ever sends anywhere, it happens only when you ask, and what it
+sends is `notes.md` — never the transcript, never the audio, never a voiceprint.
+It needs the optional `digest` extra and one browser consent; `referat project
+link-doc` is where both are asked for.
+
+What is next: the same three verbs as buttons on the command center's projects
+page. See [TODO.md](TODO.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for
+what has landed.
 
 ## Quick start
 

@@ -51,7 +51,21 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
-from referat import __version__, actions, build_info, index, paths, projects, status, voices
+from referat import (
+    __version__,
+    actions,
+    build_info,
+    digest,
+    gdocs,
+    index,
+    paths,
+    projects,
+    status,
+    voices,
+)
+# `digest` is pure stdlib and `gdocs` defers every google import into a
+# function body, so naming both here costs the base install nothing -- the
+# same arrangement that lets `rerun` be imported only inside its own branch.
 from referat.config import Config, ConfigError, load_config
 from referat.meeting import (
     Meeting,
@@ -596,9 +610,11 @@ def _add_project_parser(subcommands: argparse._SubParsersAction) -> None:
     mechanism for the sake of four commands that are each a JSON read and a JSON
     write.
 
-    `link-doc`, `unlink-doc` and `sync` are missing on purpose: they arrive with
-    the digests at build step 13. A verb that exists and answers "not built yet"
-    reads as a bug; argparse listing the four that do exist does not.
+    `link-doc`, `unlink-doc` and `sync` arrived with the digests at build step
+    13 and are the only three verbs here that are not a JSON read and a JSON
+    write. They need the `digest` extra, which they ask for before they open
+    anything: a complaint about an unknown project id is advice about the wrong
+    problem when the thing that would do the work is not installed.
     """
     project = subcommands.add_parser(
         "project",
@@ -712,6 +728,82 @@ def _add_project_parser(subcommands: argparse._SubParsersAction) -> None:
         ),
     )
     unarchive.add_argument("project_id")
+
+    link_doc_parser = verbs.add_parser(
+        "link-doc",
+        help="attach a Google Doc, and write every tagged meeting's notes into it",
+        description=(
+            "A project may carry several docs; this appends one. With no flags it "
+            "asks whether to create a new document or attach an existing one. "
+            "Creating makes '<Project> Meeting Digest' and uses its default tab; "
+            "attaching looks for a tab named 'Meetings', and the Docs API cannot "
+            "create one, so a document without it is reported with the URL to go "
+            "and add it at. Linking ends by running a sync, which is what makes "
+            "attaching an existing doc backfill every meeting already tagged."
+        ),
+    )
+    link_doc_parser.add_argument("project_id")
+    link_doc_parser.add_argument(
+        "--create", action="store_true", help="make a new document without asking"
+    )
+    link_doc_parser.add_argument(
+        "--doc", metavar="GDOC_ID", default="", help="attach this document, without asking"
+    )
+    link_doc_parser.add_argument(
+        "--search", metavar="QUERY", default="", help="list matching documents and stop"
+    )
+    link_doc_parser.add_argument(
+        "--title", default="", help="title for a created document, instead of the default"
+    )
+    link_doc_parser.add_argument(
+        "--no-sync",
+        action="store_false",
+        dest="sync",
+        help="link without backfilling; `project sync` afterwards does it",
+    )
+    link_doc_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="with --search, emit the candidates as JSON for a picker to render",
+    )
+
+    unlink_doc_parser = verbs.add_parser(
+        "unlink-doc",
+        help="stop writing into one of a project's docs; the document is untouched",
+        description=(
+            "Unlinking is not deleting. Every block Referat wrote stays exactly "
+            "where it is, and the `digest` record in each meeting stays too, so "
+            "re-linking the same document later finds those blocks already current."
+        ),
+    )
+    unlink_doc_parser.add_argument("project_id")
+    unlink_doc_parser.add_argument("gdoc_id")
+
+    sync = verbs.add_parser(
+        "sync",
+        help="reconcile this project's docs against the meetings tagged with it",
+        description=(
+            "Reconciliation, not appending. Each doc is read once, the blocks "
+            "already in it are matched by their [referat:<id>] anchors, and what "
+            "is missing is inserted in date order while what is stale -- the "
+            "notes.md has changed since it was written -- is re-rendered in "
+            "place. A block for a meeting that no longer carries this tag is "
+            "reported and left alone: the document may be shared and somebody "
+            "may have written around it, so --prune is what removes one. "
+            "Deliberately takes one project: a network write across every "
+            "project is the wrong thing for a bare verb to do."
+        ),
+    )
+    sync.add_argument("project_id")
+    sync.add_argument(
+        "--prune", action="store_true", help="also remove blocks for meetings no longer tagged"
+    )
+    sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="say what would change and write nothing, anywhere",
+    )
 
     listing = verbs.add_parser("list", help="every project, and how many meetings carry it")
     listing.add_argument(
@@ -1266,6 +1358,13 @@ def project_document(config: Config) -> dict[str, Any]:
     first that must not, since it offers to *create* a project into a file whose
     contents it cannot see. Empty when the file is fine.
 
+    **`pending` is how many of a project's meetings are not yet in every one of
+    its docs**, which is `TODO.md`'s "how many of those meetings are not yet in
+    the doc" and is what tells somebody a sync is owed. Entirely local — it is
+    `meta.json` and `projects.json` and never a network call — so `project list`
+    stays a JSON read even now that three verbs are not. A project with no docs
+    has nothing pending, which is right: there is nowhere for it to be behind.
+
     **Each project is spread from its own `to_json`, so a new field arrives here
     for free** — `archived_at` did, at build step 21, with no change to this
     function. That is a property worth relying on rather than an accident: the
@@ -1275,7 +1374,9 @@ def project_document(config: Config) -> dict[str, Any]:
     of the same fact is a second thing that can disagree.
     """
     db = projects.ProjectsDB.load(config)
-    counts = projects.tag_counts(load_meetings(config))
+    meetings = load_meetings(config)
+    counts = projects.tag_counts(meetings)
+    pending = _digest_pending(meetings, db)
     return {
         "projects_file": str(projects.projects_path(config)),
         "complaint": _unreadable_complaint(db.path, CANNOT_LOOK_UP) if db.unreadable else "",
@@ -1284,11 +1385,40 @@ def project_document(config: Config) -> dict[str, Any]:
             {
                 **project.to_json(),
                 "meetings": counts.get(project.id, 0),
+                "pending": pending.get(project.id, 0),
             }
             for project in db.ordered()
         ],
         "orphans": {pid: n for pid, n in sorted(counts.items()) if pid not in db.projects},
     }
+
+
+def _digest_pending(
+    meetings: list[Meeting], db: projects.ProjectsDB
+) -> dict[str, int]:
+    """Per project, how many of its meetings with notes are behind at least one of its docs.
+
+    Restricted to one project at a time, unlike :func:`referat.digest.is_synced`,
+    which asks about *all* of a meeting's tags: what somebody reading
+    `project list` wants to know is whether **this** project's sync is owed, and
+    a meeting can be current here and behind somewhere else.
+    """
+    pending: dict[str, int] = {}
+    for meeting in meetings:
+        sha = digest.notes_sha256(meeting.dir / paths.NOTES_MD)
+        if not sha:
+            continue
+        for pid in meeting.tags:
+            project = db.projects.get(pid)
+            if project is None or not project.docs:
+                continue
+            behind = any(
+                (meeting.digest.get(doc.gdoc_id) or {}).get("notes_sha256") != sha
+                for doc in project.docs
+            )
+            if behind:
+                pending[pid] = pending.get(pid, 0) + 1
+    return pending
 
 
 def run_project_list(config: Config, as_json: bool = False) -> int:
@@ -1412,7 +1542,11 @@ def create_project(config: Config, name: str) -> tuple[projects.Project | None, 
 
 
 def run_project(config: Config, args: argparse.Namespace) -> int:
-    """`referat project <verb>`. Every verb here is a JSON read and a JSON write.
+    """`referat project <verb>`. All but three are a JSON read and a JSON write.
+
+    The three that are not are `link-doc`, `unlink-doc` and `sync`, which arrived
+    with the digests at build step 13 and are the only commands in Referat that
+    open a socket to anything but a model download.
 
     **Every mutating verb is one line of dispatch onto a guarded function**, and
     none of them opens `projects.json` for itself. That is phase 4's correction:
@@ -1424,7 +1558,7 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
     if args.verb is None:
         print(
             "referat project: pick a verb - add, rename, describe, glossary, "
-            "archive, unarchive, rm or list",
+            "archive, unarchive, rm, link-doc, unlink-doc, sync or list",
             file=sys.stderr,
         )
         return 2
@@ -1461,8 +1595,84 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
     if args.verb == "glossary":
         return run_project_glossary(config, args)
 
+    if args.verb == "link-doc":
+        return run_project_link_doc(config, args)
+
+    if args.verb == "unlink-doc":
+        return _report(
+            unlink_doc(config, args.project_id, args.gdoc_id), "project unlink-doc"
+        )
+
+    if args.verb == "sync":
+        return _report(
+            sync_project(config, args.project_id, prune=args.prune, dry_run=args.dry_run),
+            "project sync",
+        )
+
     print(f"referat project: unknown verb {args.verb}", file=sys.stderr)
     return 2
+
+
+def run_project_link_doc(config: Config, args: argparse.Namespace) -> int:
+    """`referat project link-doc <id>` — the create-or-select question, asked here.
+
+    The question is at the prompt and the work is in :func:`link_doc`, which is
+    the same split `label.run_apply` and `label.name_speaker` make: a guarded
+    function that blocked on `input()` is one the command center could not call.
+    `--create`, `--doc` and `--search` are that question already answered, which
+    is what a picker will hand over.
+    """
+    if args.search:
+        candidates, complaint = doc_candidates(config, args.search)
+        if complaint:
+            print(f"referat project link-doc: {complaint}", file=sys.stderr)
+            return 1
+        if args.as_json:
+            print(json.dumps(candidates, indent=2))
+            return 0
+        if not candidates:
+            print(f"No Google Docs matching {args.search!r}.")
+            return 0
+        for number, doc in enumerate(candidates, 1):
+            print(f"{number:3}. {doc['name']}  ({doc['modified']}, {doc['owner']})")
+            print(f"     {doc['gdoc_id']}")
+        print("\nAttach one with: referat project link-doc <project-id> --doc <gdoc-id>")
+        return 0
+
+    gdoc_id = args.doc
+    if not gdoc_id and not args.create:
+        if not sys.stdin or not sys.stdin.isatty():
+            print(
+                "referat project link-doc: say --create, or --doc <gdoc-id>, or "
+                "--search <query> to find one. There is no terminal to ask at.",
+                file=sys.stderr,
+            )
+            return 2
+        answer = input("Create a new doc, or attach an existing one? [create/attach] ").strip()
+        if answer.lower().startswith("a"):
+            query = input("Search Drive for a document named: ").strip()
+            if not query:
+                print("Nothing to search for; nothing was written.")
+                return 1
+            candidates, complaint = doc_candidates(config, query)
+            if complaint:
+                print(f"referat project link-doc: {complaint}", file=sys.stderr)
+                return 1
+            if not candidates:
+                print(f"No Google Docs matching {query!r}; nothing was written.")
+                return 1
+            for number, doc in enumerate(candidates, 1):
+                print(f"{number:3}. {doc['name']}  ({doc['modified']}, {doc['owner']})")
+            chosen = input(f"Which one? [1-{len(candidates)}] ").strip()
+            if not chosen.isdigit() or not 1 <= int(chosen) <= len(candidates):
+                print("Not a number on that list; nothing was written.")
+                return 1
+            gdoc_id = candidates[int(chosen) - 1]["gdoc_id"]
+
+    return _report(
+        link_doc(config, args.project_id, gdoc_id=gdoc_id, title=args.title, sync=args.sync),
+        "project link-doc",
+    )
 
 
 def _report(outcome: Outcome, command: str) -> int:
@@ -1778,6 +1988,321 @@ def remove_project(config: Config, pid: str) -> Outcome:
             f"nothing else was touched. Remove them with: referat untag <id> {project.id}"
         )
     return Outcome(True, "\n".join(lines))
+
+
+# --- The digests (build step 13) --------------------------------------------
+
+
+def link_doc(
+    config: Config, pid: str, *, gdoc_id: str = "", title: str = "", sync: bool = True
+) -> Outcome:
+    """Attach a Google Doc to a project. The only implementation of linking one.
+
+    An empty `gdoc_id` means **create**: a new document titled
+    `<Project> Meeting Digest`, whose tab id is read back rather than assumed.
+    A non-empty one means **attach this document**, and that is the path with the
+    awkward step in it — see below.
+
+    **It asks no questions.** The create-or-select choice is
+    :func:`run_project_link_doc`'s, at a prompt, for the same reason
+    `label.name_speaker` never calls `input()`: the command center calls this
+    too, and a guarded function that blocks on a terminal is one a window cannot
+    use.
+
+    Linking ends by running a sync unless told not to, which is what makes
+    attaching an *existing* doc backfill every already-tagged meeting rather than
+    leaving somebody to remember a second command.
+    """
+    if (why := gdocs.available()):
+        return Outcome(False, why)
+    db, project, complaint = _open_project(config, pid)
+    if project is None or db is None:
+        return Outcome(False, complaint)
+
+    try:
+        if gdoc_id:
+            found, tab_complaint = _meetings_tab(config, gdoc_id)
+            if found is None:
+                return Outcome(False, tab_complaint)
+            tab_id, tab_name = found
+        else:
+            gdoc_id, tab_id, tab_name = gdocs.create_doc(
+                config, title or f"{project.name} Meeting Digest"
+            )
+    except gdocs.GoogleError as exc:
+        return Outcome(False, str(exc))
+
+    if any(doc.gdoc_id == gdoc_id for doc in project.docs):
+        return Outcome(True, f"{project.id} is already linked to {gdoc_id}; nothing was written")
+
+    project.docs.append(
+        projects.DocRef(
+            gdoc_id=gdoc_id,
+            tab_id=tab_id,
+            tab_name=tab_name,
+            linked_at=dt.datetime.now().isoformat(timespec="seconds"),
+        )
+    )
+    db.save()
+
+    lines = [
+        f"Linked {project.id} to {gdocs.doc_url(gdoc_id)}",
+        f"  tab: {tab_name or tab_id}",
+    ]
+    if sync:
+        outcome = sync_project(config, pid)
+        lines.append("")
+        lines.append(outcome.message)
+        return Outcome(outcome.ok, "\n".join(lines))
+    return Outcome(True, "\n".join(lines))
+
+
+def _meetings_tab(config: Config, gdoc_id: str) -> tuple[tuple[str, str] | None, str]:
+    """The `Meetings` tab of an existing document, or the instruction to go and add one.
+
+    **Tabs cannot be created through the Docs API** — there is no `createTab`
+    request — so this is the one step in step 13 that a person has to do in a
+    browser. The refusal writes nothing, names the URL, and gives the literal
+    command to run afterwards, so the re-check is *running the same command
+    again* rather than a wizard holding state while somebody is away.
+
+    Deliberately no fallback to the document's first tab. That is exactly the
+    "silently targets the first tab" failure with a friendly face on it: a
+    meeting written into somebody's unrelated notes, with nothing to notice.
+    """
+    document = gdocs.get_document(config, gdoc_id)
+    tab = gdocs.find_tab(document, title=gdocs.MEETINGS_TAB)
+    if tab is not None:
+        properties = tab.get("tabProperties") or {}
+        return (properties.get("tabId", ""), properties.get("title", "")), ""
+    return None, (
+        f"that document has no tab called {gdocs.MEETINGS_TAB!r}, and the Docs API cannot "
+        f"create one.\n"
+        f"  Open {gdocs.doc_url(gdoc_id)}, add a tab named exactly {gdocs.MEETINGS_TAB}, "
+        f"then run:\n"
+        f"    referat project link-doc <project-id> --doc {gdoc_id}\n"
+        f"Nothing was written."
+    )
+
+
+def unlink_doc(config: Config, pid: str, gdoc_id: str) -> Outcome:
+    """Detach one doc from a project. The only implementation of that.
+
+    **Unlinking is not deleting**, and the message says so because it is the half
+    somebody would assume the other way: the document is exactly as it was, every
+    block still in it, and this only stops Referat writing there.
+
+    The `digest` entries in the affected meetings' `meta.json` are left alone
+    too, deliberately — so re-linking the same document later finds those blocks
+    already current instead of re-rendering every one of them.
+    """
+    if (why := gdocs.available()):
+        return Outcome(False, why)
+    db, project, complaint = _open_project(config, pid)
+    if project is None or db is None:
+        return Outcome(False, complaint)
+
+    remaining = [doc for doc in project.docs if doc.gdoc_id != gdoc_id]
+    if len(remaining) == len(project.docs):
+        known = ", ".join(doc.gdoc_id for doc in project.docs) or "none"
+        return Outcome(False, f"{project.id} is not linked to {gdoc_id} (linked: {known})")
+
+    project.docs[:] = remaining
+    db.save()
+    return Outcome(
+        True,
+        f"Unlinked {project.id} from {gdoc_id}. The document is untouched — every block "
+        f"Referat wrote is still in it — and this only stops it being written to again.",
+    )
+
+
+def sync_project(
+    config: Config,
+    pid: str,
+    *,
+    prune: bool = False,
+    dry_run: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> Outcome:
+    """Reconcile every doc of one project against the meetings tagged with it.
+
+    Not an append. For each doc: one `documents.get`, a scan of the anchors
+    already in the tab, and a plan of what is missing, what is stale and what is
+    orphaned — then the plan applied **back to front**, one `batchUpdate` per
+    block, so the indices from that single read stay valid for the whole pass.
+    :func:`referat.digest.plan` asserts that ordering where it produces it.
+
+    `meta.json` is written **as each block lands**, not once at the end, so an
+    interrupted sync resumes cheaply instead of re-rendering a document that is
+    already correct. The status flip is re-checked after every write because a
+    meeting carrying two projects only becomes `synced` when the *other*
+    project's docs are current too, which may already be true.
+
+    `progress` exists because this is a network round trip per block and the
+    command center may not run one on the GUI thread. Whatever it is handed goes
+    through `ui.shell.Bridge` — the rule this project paid for three heap
+    corruptions to learn.
+    """
+    if (why := gdocs.available()):
+        return Outcome(False, why)
+    project, complaint = _read_project(config, pid)
+    if project is None:
+        return Outcome(False, complaint)
+    if not project.docs:
+        return Outcome(
+            False,
+            f"{project.id} is not linked to any Google Doc. "
+            f"Link one with: referat project link-doc {project.id}",
+        )
+
+    say = progress or (lambda _message: None)
+    meetings = [m for m in load_meetings(config) if pid in m.tags]
+    wanted = {
+        m.id: sha
+        for m in meetings
+        if (sha := digest.notes_sha256(m.dir / paths.NOTES_MD))
+    }
+    by_id = {m.id: m for m in meetings}
+    db = projects.ProjectsDB.load(config)
+
+    lines: list[str] = []
+    ok = True
+    for doc in project.docs:
+        say(f"reading {doc.gdoc_id}")
+        try:
+            content, body_end = gdocs.read_tab(config, doc.gdoc_id, doc.tab_id)
+        except gdocs.GoogleError as exc:
+            lines.append(f"{doc.gdoc_id}: {exc}")
+            ok = False
+            continue
+
+        anchors = digest.scan_anchors(content, body_end)
+        stored = {
+            m.id: (m.digest.get(doc.gdoc_id) or {}).get("notes_sha256", "")
+            for m in meetings
+        }
+        plan = digest.plan(anchors, wanted, stored, body_end, prune=prune)
+        lines.append(_sync_report(project, doc, plan, dry_run=dry_run))
+        if dry_run or not plan.ops:
+            continue
+
+        written = 0
+        for op in plan.ops:
+            meeting = by_id.get(op.meeting_id)
+            if op.kind == digest.DELETE:
+                say(f"removing {op.meeting_id}")
+                try:
+                    gdocs.apply(
+                        config,
+                        doc.gdoc_id,
+                        [
+                            {
+                                "deleteContentRange": {
+                                    "range": {
+                                        "tabId": doc.tab_id,
+                                        "startIndex": op.at,
+                                        "endIndex": op.end,
+                                    }
+                                }
+                            }
+                        ],
+                    )
+                except gdocs.GoogleError as exc:
+                    lines.append(f"  stopped: {exc}")
+                    ok = False
+                    break
+                written += 1
+                continue
+
+            if meeting is None:  # pragma: no cover - plan only names wanted meetings
+                continue
+            say(f"writing {op.meeting_id}")
+            try:
+                block = digest.block_for(meeting)
+            except (digest.DigestError, OSError) as exc:
+                # One unrenderable note may not cost a whole project's digest.
+                lines.append(f"  skipped {op.meeting_id}: {exc}")
+                ok = False
+                continue
+            try:
+                gdocs.apply(
+                    config,
+                    doc.gdoc_id,
+                    digest.requests_for(
+                        block,
+                        tab_id=doc.tab_id,
+                        at=op.at,
+                        delete_to=op.end if op.kind == digest.REPLACE else None,
+                    ),
+                )
+            except gdocs.GoogleError as exc:
+                # Stop this document rather than carrying on against indices
+                # that may have moved. `batchUpdate` is atomic, so nothing is
+                # half-written and the next sync sees the same work to do.
+                lines.append(f"  stopped at {op.meeting_id}: {exc}")
+                ok = False
+                break
+
+            digest.record(meeting, doc.gdoc_id, doc.tab_id, wanted[meeting.id])
+            meeting.save()
+            if (
+                meeting.status is MeetingStatus.NOTES_WRITTEN
+                and digest.is_synced(meeting, db)
+            ):
+                meeting.status = MeetingStatus.SYNCED
+                meeting.save()
+            written += 1
+
+        lines.append(f"  {written} block{'s' if written != 1 else ''} written")
+
+    return Outcome(ok, "\n".join(lines))
+
+
+def _sync_report(
+    project: projects.Project, doc: projects.DocRef, plan: digest.Plan, *, dry_run: bool
+) -> str:
+    """What one document's plan says, in the words somebody reads.
+
+    The orphans are named rather than counted, with the `--prune` that would
+    remove them, because they are the thing somebody would otherwise not see —
+    the same reasoning :func:`remove_project` uses for the tags it leaves behind.
+    """
+    inserts = sum(1 for op in plan.ops if op.kind == digest.INSERT)
+    replaces = sum(1 for op in plan.ops if op.kind == digest.REPLACE)
+    deletes = sum(1 for op in plan.ops if op.kind == digest.DELETE)
+    head = f"{doc.tab_name or doc.tab_id} in {gdocs.doc_url(doc.gdoc_id)}"
+    verb = "would add" if dry_run else "adding"
+    parts = [f"{verb} {inserts}", f"re-rendering {replaces}"]
+    if deletes:
+        parts.append(f"removing {deletes}")
+    lines = [f"{head}\n  {', '.join(parts)}"]
+    if plan.orphans:
+        names = ", ".join(sorted(plan.orphans))
+        lines.append(
+            f"  {len(plan.orphans)} block(s) for meetings no longer tagged {project.id}: {names}\n"
+            f"  Left in place — the document may be shared and somebody may have written "
+            f"around them. Remove with: referat project sync {project.id} --prune"
+        )
+    return "\n".join(lines)
+
+
+def doc_candidates(config: Config, query: str) -> tuple[list[dict[str, str]], str]:
+    """Google Docs matching a name, for a picker. A value and a complaint, never an `Outcome`.
+
+    The :func:`create_project` shape rather than the :class:`Outcome` one,
+    because this reads and does not write: an empty list and a failure are two
+    different things and a flag beside the list would say the same fact twice.
+
+    It is what `referat project link-doc --search --json` prints, so the command
+    center's picker reads a document rather than growing a second Drive query —
+    the rule every `--json` in this file is built on.
+    """
+    if (why := gdocs.available()):
+        return [], why
+    try:
+        return gdocs.search_docs(config, query), ""
+    except gdocs.GoogleError as exc:
+        return [], str(exc)
 
 
 def apply_tags(

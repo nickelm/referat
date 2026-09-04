@@ -564,14 +564,14 @@ which reads its documents by calling the same functions rather than by spawning:
 `devices`, `hotwords`, `people`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
 `project <verb>`, `tag`, `untag`, `state`,
 `promote <id>`,
-`reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `delete <id>`. All of them are built except
-`project link-doc`, `project unlink-doc` and `project sync`, which wait for the
-digests at step 13 — and which are deliberately absent from the parser rather
-than present and answering "not built yet".
+`reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `delete <id>`. **All of
+them are built**, `project link-doc`, `project unlink-doc` and `project sync`
+included since step 13 — they were deliberately absent from the parser until
+then rather than present and answering "not built yet".
 
 The project verbs are `add`, `rename`, `describe`, `glossary`, `archive`,
-`unarchive`, `rm` and `list`, and **each mutating one is a line of dispatch onto
-a guarded function** — `create_project`, `rename_project`, `set_description`,
+`unarchive`, `rm`, `link-doc`, `unlink-doc`, `sync` and `list`, and **each
+mutating one is a line of dispatch onto a guarded function** — `create_project`, `rename_project`, `set_description`,
 `set_glossary`, `set_archived`, `remove_project` — which the command center's
 projects page calls too. `archive` and `unarchive` are **one** guarded function
 taking a direction rather than two, which is what `apply_tags` and
@@ -1473,7 +1473,8 @@ functions the CLI calls — `cli.list_document`, `cli.show_document`,
 `cli.select_actions`, `cli.owner_counts`, `cli.is_mine`, `cli.set_action_done`,
 `cli.dismiss_action`, `cli.edit_action`, `cli.prune_actions`,
 `cli.delete_meeting`, `cli.delete_warning`, `cli.promote_meeting`,
-`cli.promote_warning`, `audio_state`,
+`cli.promote_warning`, `cli.link_doc`, `cli.unlink_doc`, `cli.sync_project`,
+`cli.doc_candidates`, `audio_state`,
 `meeting.format_duration`, `index.meeting_title`, `voices.unknown_speakers`,
 `label.label_document`, `label.name_speaker`, `label.forget_person` — and spawning a subprocess of its
 own CLI would buy nothing
@@ -1571,12 +1572,16 @@ honours the `.obsolete` file and resolves at spawn time.
 
 ## Per-project digests (build step 13)
 
-Also unbuilt, and gated on step 10 rather than merely on 1-9. Its other gate,
-**step 14**, is done: the projects file, the tag model and the lifecycle field
-this step consumes all exist, and what remains here is the Google half — the
-`digest` extra, `gdocs.py`, `digest.py`, the two `*-doc` verbs and `sync`. A
-digest block is a meeting's `notes.md` translated into a Google Doc, and there is
-no `notes.md` until `/cleanup` exists.
+**Built on 2026-09-04**, and it had been the one genuinely lagging build step:
+forty unchecked boxes and both gates met since 2026-09-01. A digest block is a
+meeting's `notes.md` translated into a Google Doc. `referat/digest.py` is the
+translator and the diff, `referat/gdocs.py` is the client, and
+`referat/markdown.py` is the subset both it and `ui/richtext.py` read.
+
+**The consent has not been given yet**, so nothing has been written into a real
+document: the network half renders and passes an offline simulator rather than
+having run. Said plainly rather than left, the way step 23 said it about its two
+buttons.
 
 **A project is a label, not a container.** It is a thread of work spanning many
 meetings — the thing `/cleanup` already writes `[[Wikilinks]]` for — and a
@@ -1592,6 +1597,68 @@ The docs are the shareable artifact; the meetings folder stays local.
 only by carrying a tag whose project is linked to it. There is no per-meeting doc
 picker and there should not be one — it would be a second way for a meeting to
 reach a doc, and the first thing to disagree with the tags.
+
+**Auth binds no socket, and that was a rules question rather than a technical
+one.** The standard desktop OAuth flow is `InstalledAppFlow.run_local_server`,
+which starts an HTTP server on loopback to catch the redirect — and Conventions
+forbid exactly that, with the test stated as *whether something binds a socket*.
+Google's out-of-band flow was shut off in 2022, so `gdocs._consent` builds the
+consent URL, opens it, and reads back the address the browser fails to load; the
+code is in its query string. Ten lines instead of one, and no exception spent on
+a rule this codebase has been careful about. It bought a second property worth
+keeping: the flow needs a terminal, so **the command center can never
+authenticate**, and a window that popped a browser consent from the thread that
+owns the recorder is structurally impossible rather than merely avoided.
+
+Two scopes and no more: `documents`, and `drive.metadata.readonly` for the *select
+existing doc* search, which returns names and ids and no file content.
+**`drive.file` is not sufficient** and was refused rather than chosen — it sees
+only files this application created, so on a fresh install the picker would find
+nothing at all. `[paths].google_client_secret_file` and `google_token_file`
+follow the `hf_token_file` precedent, and the difference between them is worth
+keeping: the first describes the *application* and the second is a credential of
+yours, which is why deleting the second is how you sign out.
+
+**`referat/markdown.py` exists because two things render a `notes.md` and they
+must not disagree.** A person pastes part of one into a Google Doc and
+`project sync` pushes the whole of one into the same kind of doc; if those ever
+answered a question differently — whether a `[[Wikilink]]` keeps its brackets,
+whether a relative link stays a link — the same note would arrive in the same
+document looking like two notes depending on how it got there. `ui/richtext.py`
+imports PySide6 at module scope and lives in the one sub-package, so `digest.py`
+could not reach it without inverting the layering. The *grammar* moved to a flat
+module; each renderer kept its own walk over it, because HTML nests and Docs
+styles flat ranges and flattening them into shared tokens would have changed what
+a paste produces. **What stops them drifting is a check rather than an
+abstraction**: `scripts/digest_report.py` renders every real note through both
+and compares, and the extraction was verified byte-identical over all fourteen.
+
+**Three things the design did not foresee.** `insertText` **inherits** the style
+at the insertion point, so every batch resets what it just inserted before
+styling any of it — without that, a block inserted before an existing anchor
+arrives small and gray. The **acceptance check is per paragraph** against the
+kind `blocks` assigned it, not a flat scan: `HEADING_RE` matches one to three
+hashes, so a `####` line is documented to fall through to a paragraph carrying
+its own hashes, and a flat "no leading `#`" would turn that documented behaviour
+into an error. And **`synced` needed a way back**: `cli.set_notes_written`
+accepts it and drops to `notes_written`, which is the one edge in the lifecycle
+that runs backwards, written from the function that *knows* the notes just
+changed rather than derived later from a sha, since that would be inferring a
+lifecycle from the filesystem.
+
+**The note's own `#` H1 is dropped from the block** — the Heading 3 date line
+carries that exact string already, from the same `index.meeting_title` that
+`referat index` uses, so every block would otherwise announce its title twice.
+The byline's relative `[transcript.md](transcript.md)` renders as plain words and
+is otherwise **left alone**: dropping the clause would be `digest.py` editing
+somebody's prose, which is a larger thing than an odd-looking line.
+
+**`tabId` is checked mechanically**, in `gdocs._require_tab_ids`, at the one
+place every write passes through — a request without one silently targets the
+first tab, which is a meeting written into somebody's unrelated notes with no
+error to notice. `find_tab` recurses `childTabs` for the same class of reason: a
+nested `Meetings` tab missed by a flat scan does not produce an error, it
+produces a *second* `Meetings` tab.
 
 `<meetings_dir>/projects.json` holds the project list and the link state, owned
 by `referat/projects.py` since step 14 — deliberately not by `config.py`, whose
@@ -1779,6 +1846,17 @@ recorded beside the verdict, so a transcript suppressed under old thresholds is
 distinguishable from one suppressed under new. Nothing about it is written into
 `transcript.md`: that file is prose about what was said, and this is the pipeline
 saying what it did.
+
+`digest` is what has been pushed into which Google Doc, **keyed by `gdoc_id`**,
+each entry `{tab_id, notes_sha256, written_at}`. Keyed by doc rather than being
+one flat object because a meeting fans out across every doc of every project it
+carries and can be current in one and stale in another, which one object could
+not say. `notes_sha256` is what makes reconciliation cheap: a sync needs
+`meta.json` plus one `documents.get` per doc and never re-reads the doc's prose
+to work out what changed. `digest.is_synced` is the predicate behind the `synced`
+state, derived on every read and stored nowhere — an orphaned tag contributes no
+docs and is vacuously satisfied, and an **archived** project's docs count exactly
+as a live one's, because hiding is presentation and never a constraint.
 
 The `transcription` block gains `interrupted` — `{at, why, after_seconds}` —
 when a run was abandoned rather than finished, and a clean run drops it again by
@@ -2057,7 +2135,11 @@ disappeared, and nothing disappears here.
   and is refused there on its merits, so the base install never carries it. It
   replaced `pystray` and `pillow`, which are gone — the exception is a
   substitution rather than an addition, and the base install got one dependency
-  smaller in count while getting larger on disk.
+  smaller in count while getting larger on disk. Step 13's **`digest`** extra is
+  the second optional one after `transcribe`: tens of megabytes rather than three
+  gigabytes, needed by exactly three verbs, and it adds two unsigned native files
+  that sit **off the recording path**, so a Smart App Control block there costs a
+  digest push and nothing else.
 - **Nothing is inferred from a transcript.** No keyword rules, no guessing which
   project a meeting belongs to, nothing tagged at the end of the pipeline. That is
   what keeps the untagged meetings a queue somebody works through rather than a
@@ -2107,7 +2189,11 @@ disappeared, and nothing disappears here.
   a socket, not whether something renders HTML — which is why a VS Code webview
   was always on the right side of the line, and why the command center is too.
   Anything a person needs to look at or click is a tray menu item, something in
-  the command center, or Markdown rendered in an editor.
+  the command center, or Markdown rendered in an editor. **Step 13 honoured this
+  rather than taking an exception to it**: Google's desktop OAuth flow wants a
+  loopback HTTP server, so Referat uses a paste flow that binds nothing — see the
+  digests section. The rule cost ten lines and bought the property that no window
+  can ever ask for consent.
 - **No Anthropic API key, ever.** All LLM work goes through the official
   `claude` binary under the user's Claude Code subscription login. No module in
   this project may call the Anthropic API directly, no key belongs in

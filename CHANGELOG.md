@@ -2,6 +2,161 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-04 (seventh) — The digests, and the notes reach a Google Doc
+
+Build step 13, which had been the one genuinely lagging build step: forty
+unchecked boxes, nothing built, and both its gates — step 10's scaffold and step
+14's projects file — met since 2026-09-01. `README.md` had named it as what came
+next for three days. It blocks step 17 and step 20's phase 7, and its only real
+blocker was the auth question, which was settled here: **a desktop OAuth client**,
+because Drive search has to see your own Drive for *select existing doc* to be
+worth anything, and a service account's search sees only what has been shared
+with a robot.
+
+Six sessions of finished work were committed first — steps 21, 22, 23 and three
+repair sessions had been sitting uncommitted in a Dropbox folder.
+
+### Auth binds no socket, and that was a rules question rather than a technical one
+
+The standard desktop flow is `InstalledAppFlow.run_local_server`, which starts an
+HTTP server on loopback to catch the redirect. Conventions forbid exactly that —
+*any localhost server ... anything binding a port*, with the test stated as
+whether something binds a socket — and Google's out-of-band flow was shut off in
+2022. So `gdocs._consent` builds the consent URL, opens it, and reads back the
+address the browser fails to load: the code is in its query string. Ten lines
+instead of one, and no exception spent on a rule this codebase has been careful
+about.
+
+It bought a second property worth keeping. The flow needs a terminal, so **the
+command center can never authenticate**. A window that popped a browser consent
+would be a network round trip started from the thread that owns the recorder;
+phase 7's failure mode is now a sentence saying to run one command at a prompt.
+
+### The subset had to move before anything could be built on it
+
+`referat/ui/richtext.py` has said since the day it was written that it is *the
+manual half of step 13* — it answers the same questions, so that a note pasted
+into a Google Doc and a note pushed into one read the same. But it imports
+PySide6 at module scope and lives in the one sub-package, so `digest.py` could
+not reach it without inverting the layering and putting Qt behind a network push.
+
+`referat/markdown.py` is the grammar, extracted: the four patterns, the inline
+alternation whose order is load-bearing, and `blocks`. Each renderer kept its own
+walk over it, because they nest differently — HTML nests, so `richtext` produces
+`<b>a <i>b</i> c</b>`, while Docs styles ranges over one flat string — and
+flattening them into a shared token list would have changed what a paste
+produces. What stops the two drifting is not a shared function but a check:
+`scripts/digest_report.py` renders every real note through both and compares the
+plain text. Verified byte-identical over all fourteen notes before and after the
+move.
+
+### The translator is pure, because the dangerous half is arithmetic
+
+`referat/digest.py` imports nothing from Google. One `insertText` for a block's
+whole text, then style requests over spans recorded while building it, which stay
+valid precisely because styling moves no indices. Offsets are UTF-16 code units
+throughout — Docs indexes that way, so an emoji is two where Python says one and
+every range after it would land a place early.
+
+Three things the specification did not say, found while building it:
+
+**A style reset is not optional.** `insertText` inherits the character and
+paragraph style at the insertion point, so a block inserted immediately before an
+existing anchor would arrive small and gray, and one inserted after a heading
+would arrive as a heading. The batch now resets everything it just inserted
+before styling any of it.
+
+**The acceptance check had to be per paragraph.** As written it was *no `**`, no
+leading `#`, no leading `- `, no `](`, no `[[`* over the block's text — and
+applied flat it fires on a documented behaviour: `markdown.HEADING_RE` matches
+one to three hashes, so a `####` line falls through to a paragraph *carrying its
+own hashes*, which is the raw-characters rule doing what it says. It is now
+checked against the kind each paragraph was given, and a plain paragraph starting
+with `#` is explicitly not a bug.
+
+**`synced` needed a way back.** A meeting reaches it when every doc of every
+project it carries holds the current notes; re-running `/cleanup` rewrites that
+file and the state stops being true. `cli.set_notes_written` now accepts `synced`
+and drops it back to `notes_written` — the one edge in the lifecycle that runs
+backwards, written from the function that *knows* the notes just changed, because
+working it out later by comparing a sha would be inferring a lifecycle from the
+filesystem.
+
+### Reverse document order, tested rather than intended
+
+`TODO.md` calls applying block operations in the wrong order the single most
+likely thing in this step to be gotten wrong, and the symptom would be a document
+quietly corrupted rather than an error. So `digest.plan` sorts on
+`(at, meeting_id)` descending and **asserts** it there — the `meeting_id` half is
+not decoration, because two missing meetings can land at the same index and
+applying the later-sorting one first is what leaves them in date order.
+
+`scripts/digest_report.py` applies the plan against a twenty-line simulator of
+`insertText` and `deleteContentRange`, across twelve cases: insert into an empty
+tab, before the first block, after the last, between two, two at one index, two
+at the end, re-render the first, re-render the last, re-render both, an orphan
+left alone, an orphan pruned, and all of it in one pass. Its first version failed
+six of them and every failure was the fixture's — the fake `documents.get` and
+the simulated document were building their text separately, so the indices did
+not describe the string they were applied to. One `block_text` now serves both,
+which is what makes a miss there mean something.
+
+### `tabId` is checked mechanically
+
+A `batchUpdate` request carrying no `tabId` silently targets the document's first
+tab — writing a meeting into somebody's unrelated notes, with no error to notice.
+`gdocs._require_tab_ids` refuses a whole batch in which anything is not located by
+a tab, at the one place every write passes through, rather than leaving each call
+site to remember. `find_tab` recurses `childTabs` for the same class of reason: a
+nested `Meetings` tab missed by a flat scan does not produce an error, it produces
+a *second* `Meetings` tab.
+
+Tabs cannot be created through the API — there is no `createTab` request — so
+attaching an existing document without one is refused, with the URL to go and add
+it at and the literal command to run afterwards. Deliberately no fallback to the
+first tab, which would be the silent-first-tab failure with a friendly face on it.
+
+### Two rendering decisions, and only one of them was taken
+
+The note's own `#` H1 is **dropped** from the block: the Heading 3 date line above
+it already carries that exact string, from the same `index.meeting_title` that
+`referat index` uses, so every block would otherwise announce its title twice.
+
+The byline's relative `[transcript.md](transcript.md)` renders as the plain words
+`transcript.md` and is otherwise **left alone**, which reverses what the plan
+recommended. Dropping the clause would be `digest.py` editing somebody's prose,
+and that is a larger thing than a slightly odd line — the transcript does not
+leave this machine, so a reader of a shared doc learns from it that one exists,
+which is true.
+
+### What was measured
+
+Fourteen notes render, 35 to 57 paragraphs and 35 to 104 style spans each, all
+passing the acceptance check and all with zero stray asterisks — including
+`2026-09-02_1059`, which wraps a bold run inside an italic one. The shared
+grammar renders that whole run italic rather than leaving markup behind, and
+`richtext` does the same, so the two agree; it is a fidelity limit of the subset
+rather than a leak, and it is left alone because changing the alternation would
+change what a paste produces.
+
+The `digest` extra adds exactly **two** native files, `google/_upb/_message.pyd`
+and `cryptography/hazmat/bindings/_rust.pyd`, both unsigned. Both are off the
+recording path — nothing between a WAV and a transcript imports either — so a
+Smart App Control block there costs a digest push and nothing else, which is the
+degradation the rule permits rather than the total failure an unsigned
+interpreter caused. Verified with the packages made unimportable: all three verbs
+refuse with the install sentence, and `project list`, `tag`, `untag` and `state`
+are untouched.
+
+### Not done, and said rather than left
+
+Nothing has been written into a real Google Doc yet. Consent has to be given once
+at a terminal and this session had none, so the whole network half — create,
+attach, backfill, re-render, orphan, prune — is code that type-checks, renders and
+passes an offline simulator rather than code that has run. That is the same
+honesty step 23 recorded about its two buttons, and the first
+`referat project link-doc` is the test.
+
 ## 2026-09-04 (sixth) — A repetition loop that ate twelve minutes
 
 **`2026-09-04_1001` came back missing twelve of its thirty-two minutes**, and the

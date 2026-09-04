@@ -3458,6 +3458,14 @@ I would like to be able to paste a link into the UI and not use the CLI."*
       diagnosed by rendering a `QListWidget` to a pixmap and counting light and
       dark pixels, since the palette itself was correct and said nothing was
       wrong.
+- [x] **And the correction was then made in the wrong place**, which is the part
+      worth keeping. Set on the `QApplication`, it reached the lists that do
+      *not* stripe — where the same style paints a soft grey selection and keeps
+      the text dark — and turned them white-on-light-grey. `referat/ui/lists.py`
+      is the fix: striping and the correction are one function, so a view cannot
+      have one without the other. **A measurement that only covers the broken
+      case is half a measurement**; the grid has four cells and only two were
+      checked the first time.
 - [ ] **Nobody has clicked these buttons in a running window.** They were driven
       offscreen — the page builds, the buttons enable and disable correctly, the
       dialog's lookup thread returns real tabs — but a `QApplication` under

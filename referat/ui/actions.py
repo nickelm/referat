@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
 
 from referat import actions as actions_model
 from referat import cli
-from referat.ui import icons, richtext
+from referat.ui import icons, lists, richtext
 
 KEY_ROLE = Qt.ItemDataRole.UserRole
 """The item key a row stands for, so nothing parses a rendered cell back."""
@@ -129,7 +129,7 @@ class ActionsPage(QWidget):
         self.tree.setColumnCount(len(COLUMNS))
         self.tree.setHeaderLabels(list(COLUMNS))
         self.tree.setRootIsDecorated(False)
-        self.tree.setAlternatingRowColors(True)
+        lists.stripe(self.tree)
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)

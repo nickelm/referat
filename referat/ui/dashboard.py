@@ -66,7 +66,7 @@ from PySide6.QtWidgets import (
 )
 
 from referat import cli
-from referat.ui import icons, viewer
+from referat.ui import icons, lists, viewer
 from referat.ui.rows import status_text, tags_text
 
 TARGET_ROLE = Qt.ItemDataRole.UserRole
@@ -372,7 +372,7 @@ class DashboardPage(QWidget):
         self.recent.setColumnCount(len(RECENT_COLUMNS))
         self.recent.setHeaderLabels(list(RECENT_COLUMNS))
         self.recent.setRootIsDecorated(False)
-        self.recent.setAlternatingRowColors(True)
+        lists.stripe(self.recent)
         self.recent.setUniformRowHeights(True)
         self.recent.itemActivated.connect(self._on_recent_activated)
         header = self.recent.header()
@@ -390,7 +390,7 @@ class DashboardPage(QWidget):
         mine_mark = QLabel()
         mine_mark.setPixmap(icons.glyph("check", ink).pixmap(HEADING_ICON, HEADING_ICON))
         self.mine = QListWidget()
-        self.mine.setAlternatingRowColors(True)
+        lists.stripe(self.mine)
         self.mine.itemActivated.connect(self._on_action_activated)
         mine_row = QHBoxLayout()
         mine_row.setContentsMargins(0, 0, 0, 0)
@@ -432,7 +432,7 @@ class DashboardPage(QWidget):
             mark.setToolTip(why)
             widget = QListWidget()
             widget.setToolTip(why)
-            widget.setAlternatingRowColors(True)
+            lists.stripe(widget)
             widget.itemActivated.connect(self._on_queue_activated)
             self._headings[key] = heading
             self._lists[key] = widget

@@ -61,7 +61,7 @@ from PySide6.QtWidgets import (
 
 from referat import cli, paths, progress
 from referat.state import State
-from referat.ui import icons, speakers, tags
+from referat.ui import icons, lists, speakers, tags
 from referat.ui.actions import ActionsPage
 from referat.ui.activity import ActivityPage
 from referat.ui.dashboard import DashboardPage
@@ -267,7 +267,7 @@ class CommandCenter(QMainWindow):
         self.meetings.setColumnCount(len(COLUMNS))
         self.meetings.setHeaderLabels(list(COLUMNS))
         self.meetings.setRootIsDecorated(False)
-        self.meetings.setAlternatingRowColors(True)
+        lists.stripe(self.meetings)
         self.meetings.setUniformRowHeights(True)
         # Title takes the slack and every other column asks for exactly what it
         # needs, so the six of them span the window instead of overflowing it.

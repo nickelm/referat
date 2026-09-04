@@ -2,6 +2,43 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-04 (thirteenth) — The selection fix, in the right place
+
+Yesterday's fix for unreadable selected rows was correct about the bug and wrong
+about the scope, and it broke the lists it was not meant to touch: the projects
+list and the people lists went white-on-light-grey and invisible.
+
+**The grid has four cells and only two of them were measured.** Selected-row
+text, by whether the view stripes and whether the correction is applied:
+
+    striping   fix    background   dark px   light px
+    on         off    #0067c0          491          0     unreadable
+    on         on     #0067c0            0        291     correct
+    off        off    #f5f5f5           72       3275     correct
+    off        on     #f5f5f5            0       3865     invisible
+
+The bottom two rows were never taken. Qt's `windows11` style only paints the
+strong blue selection when `alternatingRowColors` is on; without it the same
+style paints a soft grey and keeps the text dark, which was already right — so
+forcing `highlighted-text` on the `QApplication` fixed nine views and broke every
+other one.
+
+`referat/ui/lists.py` is the correction in the right place: **striping and the
+fix are one function**, so a view cannot end up with one and not the other.
+`lists.stripe(view)` replaces nine `setAlternatingRowColors(True)` calls, and
+there are none of those left anywhere.
+
+Audited by rendering every list on every page and counting pixels: projects,
+docs, hotwords, people, voiceprints, dashboard recent, dashboard action items,
+actions tree and meetings — five striped, two not, all readable.
+
+That audit turned up one more thing on its own. The doc rows carried a link
+glyph painted in `windowText`, which on a selected blue row was black on blue.
+It is gone, for a reason `icons.py` already records: **a list's rows do not
+repeat their heading's glyph**, because the same picture down every row is the
+one thing on a page carrying no information. The row reads `Title (tab)` and
+needs nothing else.
+
 ## 2026-09-04 (twelfth) — A digest that keeps itself current
 
 Asked as *"do I have to manually sync from project to Google Docs? What is the

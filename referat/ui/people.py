@@ -56,7 +56,7 @@ from PySide6.QtWidgets import (
 
 from referat import cli, label
 from referat.config import Config
-from referat.ui import icons
+from referat.ui import icons, lists
 
 log = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ class PeoplePage(QWidget):
         self.prints.setHeaderLabels(["Filed from", "Cluster", "Added"])
         self.prints.setRootIsDecorated(False)
         self.prints.setUniformRowHeights(True)
-        self.prints.setAlternatingRowColors(True)
+        lists.stripe(self.prints)
         self.prints.itemActivated.connect(self._on_print_activated)
 
         self.appearances = QListWidget()

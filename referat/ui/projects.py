@@ -85,7 +85,7 @@ from referat import cli, gdocs, progress
 from referat.config import Config
 from referat.projects import clean_terms
 from referat.ui import docs as docs_dialog
-from referat.ui import icons
+from referat.ui import icons, lists
 
 log = logging.getLogger(__name__)
 
@@ -261,7 +261,7 @@ class ProjectsPage(QWidget):
         # rather than given a share of the pane.
         self.docs = QListWidget()
         self.docs.setMaximumHeight(88)
-        self.docs.setAlternatingRowColors(True)
+        lists.stripe(self.docs)
         self.docs.currentItemChanged.connect(lambda *_: self._refresh_doc_buttons())
         self.docs.itemDoubleClicked.connect(self._on_open_doc)
 
@@ -348,7 +348,7 @@ class ProjectsPage(QWidget):
         self.hotwords.setHeaderLabels(["Hotword", "Source"])
         self.hotwords.setRootIsDecorated(False)
         self.hotwords.setUniformRowHeights(True)
-        self.hotwords.setAlternatingRowColors(True)
+        lists.stripe(self.hotwords)
         self.hotword_summary = QLabel()
         self.hotword_summary.setWordWrap(True)
         self.hotword_note = QLabel()
@@ -910,9 +910,12 @@ class ProjectsPage(QWidget):
             # afternoon and every row read as a fragment of a name.
             tab = doc["tab_name"] or doc["tab_id"] or "(no tab recorded)"
             name = doc["doc_title"] or doc["gdoc_id"]
-            item = QListWidgetItem(
-                icons.glyph("link", self._icon_color()), f"{name}  ({tab})"
-            )
+            # No glyph, for the reason `icons.py` already records: a list's rows
+            # do not repeat their heading's, because the same picture down every
+            # row is the one thing on a page carrying no information. It also
+            # cannot be got right -- an icon is painted once in `windowText` and
+            # a selected row here is dark blue, so the glyph went black on blue.
+            item = QListWidgetItem(f"{name}  ({tab})")
             item.setData(ID_ROLE, doc["gdoc_id"])
             item.setToolTip(
                 f"{name}\ntab {tab}  [{doc['tab_id']}]\n{doc['gdoc_id']}\n\n"

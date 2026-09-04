@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 )
 
 from referat import paths
+from referat.ui import lists
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ class ActivityPage(QWidget):
         self.jobs.setHeaderLabels(["Job", "Meeting", "Doing", "Progress"])
         self.jobs.setRootIsDecorated(False)
         self.jobs.setUniformRowHeights(True)
-        self.jobs.setAlternatingRowColors(True)
+        lists.stripe(self.jobs)
         self.jobs.setMaximumHeight(160)
 
         self.summary = QLabel(IDLE)

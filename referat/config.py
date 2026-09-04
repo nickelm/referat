@@ -44,6 +44,31 @@ class AudioConfig:
 class PathsConfig:
     meetings_dir: Path = Path("~/Meetings")
     hf_token_file: Path = Path("~/.referat/hf_token")
+    google_client_secret_file: Path = Path("~/.referat/google_client_secret.json")
+    """The OAuth *client* downloaded from the Google Cloud console, for the digests.
+
+    Read only by `referat project link-doc` and `project sync`, and only when the
+    `digest` extra is installed. It identifies the **application** rather than the
+    person: it is what tells Google that the thing asking for consent is Referat.
+
+    A path and not a credential, exactly as `[cleanup].claude_binary` is a path
+    and not an API key. It lives outside the repository by default because that
+    is where the download belongs, not because the repository would leak it --
+    `.gitignore` names it anyway, since the browser puts it in `Downloads` and
+    the repository root is where somebody would drop it.
+    """
+    google_token_file: Path = Path("~/.referat/google_token.json")
+    """Where the refresh token is cached once consent has been given.
+
+    This one *is* a credential: it grants write access to your Google Docs and
+    metadata read across your Drive, until you revoke it. Deleting this file is
+    how you sign out, and re-running `referat project link-doc` is how you sign
+    back in. Written by `gdocs.credentials` and by nothing else.
+
+    Separate from :attr:`google_client_secret_file` because the two have
+    different lifetimes and different owners: the client is downloaded once and
+    describes the application, the token is minted per person and expires.
+    """
     staging_dir: Path | None = None
     r"""Where a meeting is recorded and transcribed. Unset means
     `%LOCALAPPDATA%\Referat\recording`.
@@ -271,6 +296,22 @@ class Config:
         the override exists.
         """
         return paths.voices_dir(self.paths.meetings_dir, self.paths.voices_dir)
+
+    def google_client_secret_file(self) -> Path:
+        """Where the OAuth client the digests authenticate with is.
+
+        A resolver rather than a bare attribute read for the reason
+        :meth:`voices_dir` is one: `_coerce` expands `~` on a value that came out
+        of `config.toml` and cannot touch a dataclass default, so a key left
+        commented out reaches a caller as the literal string `~/.referat/...`.
+        Every path in this file that something opens wants expanding at exactly
+        one place, and this is that place for these two.
+        """
+        return self.paths.google_client_secret_file.expanduser()
+
+    def google_token_file(self) -> Path:
+        """Where the cached refresh token is. See :meth:`google_client_secret_file`."""
+        return self.paths.google_token_file.expanduser()
 
     def staging_dir(self) -> Path:
         """Where meetings are recorded and transcribed, before their audio is gone.

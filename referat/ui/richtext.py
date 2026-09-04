@@ -47,84 +47,26 @@ import re
 from PySide6.QtCore import QMimeData
 from PySide6.QtGui import QGuiApplication
 
-HEADING_RE = re.compile(r"^(#{1,3}) +(.+)$")
-"""An ATX heading, one to three deep.
+# Aliased, because three functions in this file take a parameter called
+# `markdown` and a module of that name would be shadowed inside every one
+# of them.
+from referat import markdown as md
 
-`####` deliberately does not match — the hashes run past the three the subset
-allows, the ` ` this pattern requires is not there, and the line falls through to
-a paragraph carrying its own hashes. That is the *raw characters* rule doing
-what it says rather than a heading level quietly being rounded down.
-"""
-
-BULLET_RE = re.compile(r"^[-*] +(.+)$")
-"""One list item, at the left margin and nowhere else.
-
-Anchored with no leading whitespace on purpose. The notes wrap a long bullet onto
-following **indented** lines — the meetings folder's `CLAUDE.md` says so, and the
-action-item parser depends on it — so an indented `- ` is a continuation of the
-item above rather than a nested list, and nesting is outside the subset anyway.
-"""
-
-TASK_RE = re.compile(r"^\[([ xX])\] +(.*)$")
-"""A task-list item, `- [ ]` or `- [x]`, as :func:`referat.cli.actions_markdown`
-writes one.
-
-Outside the subset `/cleanup` may write and inside the one this renders,
-deliberately: the action items page copies through here too, a task list is the
-only thing that page produces, and `[ ]` left as two literal characters in a
-Google Doc is the sort of small wrongness nobody reports and everybody notices.
-The box becomes the character a document would have used.
-"""
-
-BOXES = {" ": "☐", "x": "☑", "X": "☑"}
-"""Ballot box, and ballot box with check. Plain characters rather than a real
-list style, because a Docs paste has no checkbox to become.
-
-**Not a contradiction of :func:`referat.cli.actions_markdown`'s plain-ASCII
-rule**, which exists because that string goes onto a clipboard and down a pipe
-into a console whose code page renders an em dash as a replacement character.
-These two characters are in the *HTML* flavour only — the one that declares
-UTF-8 and is going into a document — and the Markdown flavour is still the
-`- [ ]` that function wrote.
-"""
-
-LINK_SCHEME_RE = re.compile(r"^(?:https?|mailto):", re.IGNORECASE)
-"""What makes a link destination worth keeping as a link.
-
-`notes.md` carries `[transcript.md](transcript.md)` on its second line, and a
-relative path is a link to nothing once the note is inside a Google Doc — it
-would resolve against the doc's own host and dead-end there. So a destination
-with no scheme is rendered as its text alone. A visible dead link is worse than
-plain words, and this is the same judgement `link_timestamps` makes in the
-viewer for `referat:` targets.
-"""
-
-INLINE_RE = re.compile(
-    r"(?P<escape>\\(?P<escaped>[\\`*_{}\[\]()#+\-.!]))"
-    r"|(?P<code>`(?P<code_text>[^`]+)`)"
-    r"|(?P<bold>\*\*(?P<bold_text>.+?)\*\*)"
-    r"|(?P<wiki>\[\[(?P<wiki_text>[^\[\]]+)\]\])"
-    r"|(?P<link>\[(?P<link_text>[^\[\]]*)\]\(<?(?P<link_url>[^)>]*)>?\))"
-    r"|(?P<italic>\*(?P<italic_text>[^*]+)\*)"
-)
-"""Every inline form in one alternation, scanned once left to right.
-
-Order is load-bearing and each place in it is an argument:
-
-* **escape** first, so a `\\*` Qt wrote when reconstructing a selection is one
-  literal asterisk and never the start of emphasis.
-* **code** before everything else that can appear inside it, because the inside
-  of a code span is characters and not markup.
-* **bold** before **italic**, or `**text**` is read as an empty italic followed
-  by another one.
-* **wiki** before **link**, since `[[Name]]` shares its opening bracket with a
-  link and the two have to be told apart by the second one.
-
-Scanning once rather than substituting six patterns in turn is what keeps a
-match's *contents* from being re-scanned by accident; the two that genuinely
-nest — bold and italic — recurse explicitly, which is how `**[[Anna]]** — ...`
-comes out as a bold name rather than a bold `[[Anna]]`.
-"""
+# The grammar moved to `referat/markdown.py` at build step 13, so that
+# `referat/digest.py` could read the same subset without importing a GUI
+# toolkit to do it. Re-exported under their old names because
+# `referat/ui/viewer.py` maps a selection back onto the source through
+# `richtext.blocks` and `richtext.join_blocks`, and *what a copy out of this
+# UI does* is one decision that stays described in one file.
+HEADING_RE = md.HEADING_RE
+BULLET_RE = md.BULLET_RE
+TASK_RE = md.TASK_RE
+BOXES = md.BOXES
+LINK_SCHEME_RE = md.LINK_SCHEME_RE
+INLINE_RE = md.INLINE_RE
+HEADING, PARAGRAPH, ITEM = md.HEADING, md.PARAGRAPH, md.ITEM
+blocks = md.blocks
+join_blocks = md.join_blocks
 
 DOCUMENT = '<html><head><meta charset="utf-8"></head><body>{body}</body></html>'
 """The wrapper. A charset, because a note is full of `·` and em dashes.
@@ -167,91 +109,6 @@ def markdown_html(markdown: str) -> str:
     """
     return DOCUMENT.format(body=_body(markdown))
 
-
-HEADING, PARAGRAPH, ITEM = "heading", "paragraph", "item"
-"""The three kinds of block this subset has. Not an enum: they are three strings
-compared in two functions, and the flat-module rule in `CLAUDE.md` is a rule
-about not building machinery nobody asked for."""
-
-
-def blocks(markdown: str) -> list[tuple[str, str]]:
-    """A document as its renderable blocks: one heading, paragraph or list item each.
-
-    Each is `(kind, source)`, and the source is the Markdown for that block alone
-    — a heading with its hashes, an item with its `- `, a paragraph with its
-    wrapped lines joined by a space. So the list can be rendered
-    (:func:`markdown_html`) *or* sliced and joined back into Markdown
-    (:func:`join_blocks`), which is what a copy of a selection out of the command
-    center does.
-
-    **One block here is one `QTextBlock` after `setMarkdown`, and that
-    correspondence is the point.** Qt gives a heading one block, a paragraph one
-    block however many source lines it wrapped over, and each list item its own —
-    exactly the split this makes. That is what lets a selection be mapped back
-    onto the *source* rather than reconstructed from the rendering, which matters
-    because Qt's Markdown writer drops `**bold**` and `*italic*` on the way out.
-    The caller checks the two counts agree before trusting it, so a document this
-    misreads costs the mapping and not the copy.
-
-    A blank line closes whatever is open, which is the one structural rule
-    Markdown has. The continuation cases are what make this more than a `for`
-    loop: the notes wrap their prose *and* their bullets, and joining those back
-    is what keeps a wrapped action item one bullet rather than a bullet and a
-    stray paragraph.
-    """
-    out: list[tuple[str, str]] = []
-    paragraph: list[str] = []
-
-    def close_paragraph() -> None:
-        if paragraph:
-            out.append((PARAGRAPH, " ".join(paragraph)))
-            paragraph.clear()
-
-    open_list = False
-    for line in markdown.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            close_paragraph()
-            open_list = False
-            continue
-        heading = HEADING_RE.match(line)
-        if heading is not None:
-            close_paragraph()
-            open_list = False
-            out.append((HEADING, f"{heading.group(1)} {heading.group(2).strip()}"))
-            continue
-        bullet = BULLET_RE.match(line)
-        if bullet is not None:
-            close_paragraph()
-            open_list = True
-            out.append((ITEM, f"- {bullet.group(1).strip()}"))
-            continue
-        if open_list:
-            # An indented or otherwise plain line under an open list is the rest
-            # of that item, not a new paragraph inside the list.
-            kind, text = out[-1]
-            out[-1] = (kind, f"{text} {stripped}")
-            continue
-        paragraph.append(stripped)
-    close_paragraph()
-    return out
-
-
-def join_blocks(parts: list[tuple[str, str]]) -> str:
-    """Blocks back into one Markdown document. The inverse of :func:`blocks`.
-
-    Two consecutive items are joined by a single newline and everything else by a
-    blank line, which is what keeps a slice of five bullets one list rather than
-    five paragraphs that happen to start with a dash.
-    """
-    out = ""
-    previous = ""
-    for kind, text in parts:
-        if out:
-            out += "\n" if kind == ITEM and previous == ITEM else "\n\n"
-        out += text
-        previous = kind
-    return out
 
 
 def _body(markdown: str) -> str:

@@ -37,6 +37,26 @@ transcribe = [
     "pyannote.audio>=4.0",
 ]
 
+# Build step 13's per-project digests: pushing a meeting's notes.md into the
+# Google Docs its projects are linked to. Tens of megabytes of mostly pure
+# Python, against the transcribe stack's three gigabytes -- but still optional,
+# because it is needed by exactly three verbs.
+#
+#   referat project link-doc | unlink-doc | sync
+#
+# Everything else about projects is a JSON read and a JSON write and must keep
+# working without this installed: project add|rename|describe|glossary|archive|
+# unarchive|rm|list, tag, untag and state. referat/gdocs.py is therefore
+# importable in the base install and does every google import inside a function
+# body, the way referat/rerun.py defers the transcribe extra.
+#
+#   uv sync --extra digest
+digest = [
+    "google-api-python-client>=2.120",
+    "google-auth-oauthlib>=1.2",
+    "google-auth-httplib2>=0.2",
+]
+
 [project.scripts]
 referat = "referat.cli:main"
 

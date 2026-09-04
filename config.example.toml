@@ -45,6 +45,19 @@ meetings_dir = "~/Meetings"
 # staging_dir = "~/.referat/recording"
 # Plain text file containing a Hugging Face token, needed only for diarization.
 hf_token_file = "~/.referat/hf_token"
+# The two files build step 13's Google Docs digests need, and nothing else reads.
+# Both are only ever touched by `referat project link-doc` and `project sync`,
+# and only when the optional `digest` extra is installed.
+#
+# The first is the OAuth *client* downloaded from the Google Cloud console
+# (Credentials -> Create credentials -> OAuth client ID -> Desktop app). It says
+# which application is asking for consent; it is not a credential of yours.
+# google_client_secret_file = "~/.referat/google_client_secret.json"
+#
+# The second is where the refresh token is cached after you consent once. That
+# one IS a credential: it grants write access to your Google Docs and metadata
+# read across your Drive until you revoke it. Delete the file to sign out.
+# google_token_file = "~/.referat/google_token.json"
 # Where the known-voices database lives. Leave it unset and it sits in
 # `<meetings_dir>/.voices/`, which is right as long as the meetings folder is not
 # synced anywhere. Set it when the meetings folder is inside Dropbox, OneDrive or

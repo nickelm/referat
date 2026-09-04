@@ -1,9 +1,13 @@
 # Local configuration (created from config.example.toml on first run)
 config.toml
 
-# Secrets
+# Secrets. The defaults for all of these live in ~/.referat and never in the
+# repository -- they are named here because a browser download lands in
+# Downloads and the repository root is where somebody would drop it.
 hf_token
 *.token
+google_client_secret*.json
+google_token.json
 
 # Python
 __pycache__/

@@ -185,6 +185,30 @@ class Meeting:
     way back to the number: `referat label --forget <name>` has to know which
     label to revert, and a `referat rerun` re-diarizes and renumbers from scratch.
     """
+    digest: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """What has been pushed into which Google Doc, and from which bytes of the notes.
+
+    Keyed by **`gdoc_id`**, each entry `{tab_id, notes_sha256, written_at}`.
+    Build step 13 writes it; nothing before that reads it, and an absent key is
+    the ordinary state of every meeting written before the digests existed.
+
+    **Keyed by doc rather than being one flat object**, because a meeting fans
+    out: it is written into every doc of every project it carries, so it can be
+    current in one and stale in another, and one flat object could not say that.
+
+    `notes_sha256` is what makes reconciliation cheap and is the whole reason
+    this is a record rather than a flag. A sync needs `meta.json` plus one
+    `documents.get` per doc and never has to re-read the doc's prose to work out
+    what changed: a block whose stored sha still matches the `notes.md` on disk
+    is current, and one whose sha has moved is re-rendered in place. It is the
+    same move `transcription.debleed` makes -- write down what was done, so the
+    next pass can tell what is left to do.
+
+    See :meth:`referat.digest.is_synced`, which is the predicate behind the
+    `synced` lifecycle state, and note that it counts an **archived** project's
+    docs exactly as it counts a live one's: hiding is presentation and never a
+    constraint.
+    """
     referat_version: str = __version__
 
     # --- Files in the folder ------------------------------------------------
@@ -282,6 +306,11 @@ class Meeting:
                 str(c) for c in (raw.get("missing_channels") or []) if str(c).strip()
             ],
             tags=[str(t) for t in (raw.get("tags") or []) if str(t).strip()],
+            digest={
+                str(k): dict(v)
+                for k, v in (raw.get("digest") or {}).items()
+                if isinstance(v, dict)
+            },
             speaker_names={
                 str(k): str(v) for k, v in (raw.get("speaker_names") or {}).items()
             },
@@ -303,6 +332,7 @@ class Meeting:
             "missing_channels": self.missing_channels,
             "transcription": self.transcription,
             "tags": self.tags,
+            "digest": self.digest,
             "speaker_names": self.speaker_names,
             "referat_version": self.referat_version,
         }

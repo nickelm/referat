@@ -1939,6 +1939,16 @@ def set_notes_written(config: Config, meeting_id: str) -> Outcome:
     `/cleanup` on a meeting that already has notes is an ordinary thing to do,
     and the second run must not report a failure for a state that is exactly
     what the caller wanted.
+
+    **`synced` drops back here, and that is the one edge in the lifecycle that
+    runs backwards.** A meeting reaches `synced` when every doc of every project
+    it carries holds the current `notes.md`; re-running `/cleanup` rewrites that
+    file, so the docs now hold something older and the state has stopped being
+    true. Written from here rather than worked out later because this is the one
+    function that *knows* the notes just changed -- deciding it by comparing a
+    sha at read time would be inferring a lifecycle from the filesystem, which
+    every surface is forbidden to do. Build step 13 is what made it reachable:
+    before the digests there was nothing after `notes_written` to come back from.
     """
     meeting, why = resolve_meeting(config, meeting_id)
     if meeting is None:
@@ -1949,11 +1959,17 @@ def set_notes_written(config: Config, meeting_id: str) -> Outcome:
         # `notes.md`, which is where the title comes from.
         index.write_index(config)
         return Outcome(True, f"{meeting.id} is already {meeting.status}")
-    if meeting.status is not MeetingStatus.TRANSCRIBED:
+    if meeting.status not in (MeetingStatus.TRANSCRIBED, MeetingStatus.SYNCED):
         return Outcome(
             False,
             f"{meeting.id} is {meeting.status}, and {NOTES_WRITTEN_VERB} is only "
-            f"reachable from {MeetingStatus.TRANSCRIBED}",
+            f"reachable from {MeetingStatus.TRANSCRIBED} and {MeetingStatus.SYNCED}",
+        )
+    if meeting.status is MeetingStatus.SYNCED:
+        log.info(
+            "%s: notes rewritten, so it is no longer synced with its docs; "
+            "`referat project sync` is what makes it current again",
+            meeting.id,
         )
 
     meeting.status = MeetingStatus.NOTES_WRITTEN

@@ -142,6 +142,19 @@ def apply_name(config: Config, meeting: Meeting, speaker: str, name: str) -> boo
         return False
 
     db = voices.VoicesDB.load(config)
+    if db.unreadable:
+        # An unreadable database loads as *nobody is known*, so the save below
+        # would replace every voiceprint on this machine with this one. Naming
+        # somebody is not worth that, and unlike a transcript it can be done
+        # again in a minute once the file is sorted out.
+        log.error(
+            "not naming %s in %s: %s could not be read, and saving over it would "
+            "replace every voiceprint on this machine",
+            speaker,
+            meeting.id,
+            db.path,
+        )
+        return False
     db.add(name, embedding, meeting.id, speaker)
     db.save()
 
@@ -207,6 +220,12 @@ def forget(config: Config, name: str) -> tuple[int, int]:
     already one-way — see the `--forget` item under "Surfaced later".
     """
     db = voices.VoicesDB.load(config)
+    if db.unreadable:
+        raise voices.VoicesError(
+            f"{db.path} exists but could not be read, so it holds nobody as far as this "
+            f"process can tell -- and saving over it would replace every voiceprint on "
+            f"this machine. Nothing was deleted. Fix or move that file first."
+        )
     deleted = db.forget(name)
     db.save()
 
@@ -674,6 +693,16 @@ def forget_person(config: Config, name: str) -> tuple[bool, str]:
     neither is asking it twice.
     """
     db = voices.VoicesDB.load(config)
+    if db.unreadable:
+        # Checked before the name, and the order matters for the same reason it
+        # does in `cli._open_project`: with nothing loaded, every name looks
+        # unknown, so the honest complaint about the file would come out as a
+        # complaint about a typo nobody made.
+        return False, (
+            f"{db.path} exists but could not be read, so nobody can be looked up and "
+            f"writing would replace every voiceprint on this machine. Nothing was "
+            f"deleted. Fix or move that file first."
+        )
     if name not in db.people:
         return False, f"{name} is not in the known-voices database"
 
@@ -685,7 +714,18 @@ def forget_person(config: Config, name: str) -> tuple[bool, str]:
 
 def run_forget(config: Config, name: str, assume_yes: bool = False) -> int:
     """`referat label --forget <name>` — the confirmation, and one line of dispatch."""
-    if name not in voices.VoicesDB.load(config).people:
+    db = voices.VoicesDB.load(config)
+    if db.unreadable:
+        # Before the name check, or an unreadable file -- which loads as nobody
+        # being known -- would come out as "that name is not in the database",
+        # sending somebody to look for a typo they did not make.
+        print(
+            f"referat label: {db.path} exists but could not be read, so nobody can be "
+            f"looked up in it. Nothing was deleted.",
+            file=sys.stderr,
+        )
+        return 1
+    if name not in db.people:
         # Asked before the confirmation rather than after it, so a mistyped name
         # is a refusal rather than a question about deleting somebody who does not
         # exist. `forget_person` checks it again because it is its rule, not this
@@ -729,6 +769,14 @@ def run_drop_voiceprint(
         return 1
 
     db = voices.VoicesDB.load(config)
+    if db.unreadable:
+        print(
+            f"referat label: {db.path} exists but could not be read, so no voiceprint "
+            f"can be found in it and writing would replace every one on this machine. "
+            f"Nothing was deleted.",
+            file=sys.stderr,
+        )
+        return 1
     doomed = {
         name: sum(1 for p in prints if p.meeting == meeting.id and p.speaker == speaker)
         for name, prints in db.people.items()

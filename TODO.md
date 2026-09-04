@@ -4902,6 +4902,25 @@ Diagnosed from `2026-09-03_1459`, whose mic diarization took **6527.8s against
       `diarize.diarize` to record *why* it failed distinctly enough that
       `referat list` could suggest a rerun, rather than to fight scipy
 
+- [x] **Fixed on 2026-09-04, and it was worse than this box said.** The box named
+      `label.apply_name`; the dangerous caller is `voices.bootstrap_owner`, which
+      runs **inside the transcription pipeline** on a background thread with
+      nobody watching — so the failure was not "somebody names a speaker and
+      loses the database", it was "a meeting transcribes overnight and the
+      database is gone by morning". `VoicesDB.unreadable` now mirrors
+      `ProjectsDB`'s, five write paths refuse, and `save` refuses as a backstop
+      so a check forgotten later cannot cost the file either.
+      **And the guard alone was not enough**, which is the part this box did not
+      reach: it stops a *wrong* write and does nothing about a correct one, and
+      the reason there was no way back is a rule this project is right about —
+      `.voices/` is excluded from sync and from backup because it is biometric
+      data about people who never asked to be in a database. So `save` now copies
+      the current file into `<voices_dir>/backups/` first, fifteen kept, **inside
+      the voices folder**, where they inherit that same exclusion. Anywhere else
+      would have solved the recovery problem by breaking the privacy one.
+      `scripts/voices_guard_fixture.py` proves both, and proves it did not touch
+      the real database while doing so.
+      Original note follows.
 - [ ] **The known-voices database has no unreadable-file guard.**
       `VoicesDB.load` returns an empty database when `voices.json` will not parse,
       exactly as `ProjectsDB.load` does — and then `label.apply_name` calls

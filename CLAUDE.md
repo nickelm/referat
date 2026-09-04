@@ -2202,7 +2202,17 @@ disappeared, and nothing disappears here.
   handles no credential.
 - **Voiceprints never leave the machine.** The known-voices database is not
   synced, not backed up, not readable by the `/cleanup` pass, and never sent
-  anywhere. Deleting a person deletes them.
+  anywhere. Deleting a person deletes them. **That protection is also why it
+  needed its own backups**, added on 2026-09-04: excluded from sync and from
+  every backup means a bad write has nothing to restore from, so `VoicesDB.save`
+  keeps the last fifteen copies in `<voices_dir>/backups/` — inside the folder,
+  where they inherit the same exclusion, and never anywhere a sync client can
+  see. It also carries the `unreadable` flag `ProjectsDB` and `ActionsDB` have
+  had since step 14: an unparseable file loads as *nobody is known*, which is
+  right for reading and would make the next save replace everybody with one
+  entry. Five write paths refuse and `save` refuses as a backstop, because the
+  worst caller was never a person at a prompt — `bootstrap_owner` runs inside
+  the transcription pipeline with nobody watching.
 - **Recording robustness beats everything else.** A crash, sleep, or bug must
   never lose captured audio. Stream to disk, flush often, write metadata
   atomically (`paths.write_json_atomic`). When in doubt, flush.

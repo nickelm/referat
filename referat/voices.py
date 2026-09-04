@@ -61,6 +61,90 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+BACKUPS_DIR = "backups"
+BACKUPS_KEPT = 15
+"""How many previous versions of `voices.json` are kept beside it.
+
+Fifteen because the file is small — about 190 KB with nine people in it, so the
+whole history costs a few megabytes — and because the failure this exists for is
+*silent*: a database replaced by a bad write is not noticed when it happens, it
+is noticed weeks later when somebody Referat used to recognise comes back as
+`SPEAKER_02`. A depth of one would be useless for that; a depth of fifteen spans
+however many labelling sessions it takes to notice.
+
+They live **inside** the voices folder on purpose, and that is the whole reason
+this is safe to do at all. `.voices/` is kept out of the sync client by
+`[paths].voices_dir` pointing somewhere local, so a copy made here inherits that
+protection. Writing backups anywhere else — a temp folder, the meetings folder,
+anywhere a sync client can see — would take biometric data of people who never
+asked to be in a database and put it exactly where the whole design says it must
+never go.
+"""
+
+
+class VoicesError(Exception):
+    """A write to the known-voices database that must not happen.
+
+    The only exception this module raises, and it is raised in exactly one
+    situation: a save over a database that failed to parse. Everything else here
+    degrades — a missing token, a missing file, an embedding pyannote did not
+    return — because a diarization problem may cost speaker names and never a
+    transcript. This one cannot degrade, because degrading *is* the data loss.
+    """
+
+
+def _back_up(path: Path) -> None:
+    """Copy the current `voices.json` aside before it is overwritten. Never raises.
+
+    Never raises because a failure to back up must not become a failure to
+    *name somebody* — the operation somebody actually asked for is still valid,
+    and refusing it because a copy could not be made would be the tail wagging
+    the dog. It is logged instead, at warning level, which is where the evidence
+    goes.
+
+    A missing file is not an error and is the ordinary state before the first
+    `referat label`; there is nothing to preserve.
+    """
+    if not path.exists():
+        return
+    folder = path.parent / BACKUPS_DIR
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = folder / f"{path.stem}-{stamp}{path.suffix}"
+        # Copied byte for byte rather than re-serialized from this object: the
+        # point is to preserve what is *on disk*, including a file this process
+        # could not parse and is about to be stopped from overwriting anyway.
+        target.write_bytes(path.read_bytes())
+        _rotate(folder, path.stem)
+    except OSError:
+        log.warning("could not back up %s before overwriting it", path, exc_info=True)
+
+
+def _rotate(folder: Path, stem: str) -> None:
+    """Keep the newest :data:`BACKUPS_KEPT` copies and delete the rest.
+
+    Sorted by name rather than by mtime, which works because the stamp is
+    `%Y%m%d-%H%M%S` and so sorts chronologically as text — the same property
+    meeting ids have, and relied on for the same reason: a file's mtime is a
+    fact about the filesystem and can be changed by a copy, while the name is a
+    fact about when the backup was taken.
+    """
+    copies = sorted(folder.glob(f"{stem}-*.json"))
+    for stale in copies[:-BACKUPS_KEPT]:
+        try:
+            stale.unlink()
+        except OSError:
+            log.debug("could not remove the old backup %s", stale, exc_info=True)
+
+
+def latest_backup(config: Config) -> Path | None:
+    """The most recent backup of the database, or `None`. What a refusal points at."""
+    folder = config.voices_dir() / BACKUPS_DIR
+    copies = sorted(folder.glob(f"{Path(paths.VOICES_JSON).stem}-*.json"))
+    return copies[-1] if copies else None
+
 """`voices.json`'s own version, so a later shape can be migrated rather than guessed."""
 
 SPEAKER_RE = re.compile(r"^speaker_\d+$", re.IGNORECASE)
@@ -165,6 +249,27 @@ class VoicesDB:
 
     path: Path
     people: dict[str, list[Voiceprint]] = field(default_factory=dict)
+    unreadable: bool = False
+    """The file is there but would not parse, so this object is empty by accident.
+
+    **The same flag `ProjectsDB` and `ActionsDB` carry, and the stakes here are
+    the highest of the three.** An empty database and an unreadable one look
+    identical from the outside: reading degrades to *nobody is known*, which is
+    right, because a broken file may never cost a transcript. Writing is the
+    opposite — :meth:`save` rewrites this file whole, so a save over a database
+    that failed to parse replaces every voiceprint on this machine with whatever
+    one entry happened to be added.
+
+    That is not recoverable by retyping. A voiceprint is an embedding computed
+    from audio that has since been deleted, and `.voices/` is deliberately
+    excluded from sync and from backup, so there is no copy anywhere. The most
+    dangerous caller is not a person at a prompt: :func:`bootstrap_owner` runs
+    **inside the transcription pipeline**, loads, adds one embedding and saves,
+    with nobody watching.
+
+    A missing file is not unreadable — that is the ordinary state before the
+    first `referat label`.
+    """
 
     @classmethod
     def load(cls, config: Config) -> VoicesDB:
@@ -185,9 +290,11 @@ class VoicesDB:
             return db
         except (OSError, json.JSONDecodeError):
             log.warning("cannot read the known-voices database at %s", path, exc_info=True)
+            db.unreadable = True
             return db
         if not isinstance(raw, dict):
             log.warning("ignoring malformed %s", path)
+            db.unreadable = True
             return db
 
         for name, entries in (raw.get("people") or {}).items():
@@ -204,8 +311,31 @@ class VoicesDB:
         return db
 
     def save(self) -> None:
-        """Write the database atomically, seeding the folder and its warning first."""
+        """Write the database atomically, keeping a copy of what was there before.
+
+        **Refuses outright when :attr:`unreadable`**, rather than trusting every
+        caller to have checked. Callers do check — that is where the message a
+        person reads comes from — but this is the one file in Referat that cannot
+        be reconstructed by hand if a check is ever forgotten, so the refusal
+        lives at the write as well. :class:`VoicesError` is deliberately loud:
+        there is no sensible way to carry on, and carrying on is the failure.
+
+        The backup is taken **before** the write, from the bytes actually on
+        disk, and is the answer to the fact that `.voices/` is excluded from
+        sync and from backup on purpose. That exclusion protects people who
+        never asked to be in a database; it also means a bad write has nothing
+        to restore from, and `paths.write_json_atomic` protects against a *torn*
+        write and not against a wrong one.
+        """
+        if self.unreadable:
+            raise VoicesError(
+                f"{self.path} exists but could not be read, so writing now would replace "
+                f"every voiceprint on this machine with what is in memory. Fix or move "
+                f"that file first; a copy of the last good one may be in "
+                f"{self.path.parent / BACKUPS_DIR}."
+            )
         ensure_voices_dir(self.path.parent)
+        _back_up(self.path)
         payload: dict[str, object] = {
             "version": SCHEMA_VERSION,
             "people": {
@@ -826,6 +956,21 @@ def _bootstrap_owner(
         return False
 
     db = VoicesDB.load(config)
+    if db.unreadable:
+        # **The most dangerous caller in the codebase, and the reason the flag
+        # above exists.** This runs on a transcription thread with nobody
+        # watching: an unreadable database loads as *nobody is known*, and the
+        # save two lines down would replace every voiceprint on this machine
+        # with this one embedding. Nothing here is worth that -- an owner
+        # voiceprint is a convenience the next meeting would have created
+        # anyway. Refused, loudly, and the transcript is unaffected.
+        log.error(
+            "%s: not adding an owner voiceprint -- %s could not be read, and saving "
+            "over it would replace every voiceprint on this machine",
+            meeting.id,
+            db.path,
+        )
+        return False
     db.add(owner, cluster.embedding, meeting.id, cluster.label)
     db.save()
     log.info("added an owner voiceprint for %s from %s of %s", owner, cluster.label, meeting.id)

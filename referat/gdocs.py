@@ -32,6 +32,7 @@ Phase 7's failure mode is a sentence saying to run one command from a prompt.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import webbrowser
 from typing import TYPE_CHECKING, Any
@@ -73,6 +74,60 @@ docstring for why nothing is listening.
 
 DOC_URL = "https://docs.google.com/document/d/{}/edit"
 MEETINGS_TAB = "Meetings"
+
+DOC_ID_RE = re.compile(r"/document/d/([A-Za-z0-9_-]+)")
+BARE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
+
+
+def parse_doc_ref(text: str) -> tuple[str, str]:
+    """A share link or a bare id, as `(gdoc_id, tab_id)`. `("", "")` if it is neither.
+
+    **Nobody has a document id to hand; everybody has the link.** It is what the
+    Share button copies and what the address bar holds, so requiring the
+    forty-four characters out of the middle of it was asking a person to do a
+    parser's job.
+
+    The tab comes free with it. A Docs URL carries `?tab=t.xxx` whenever the
+    document has more than one and you are looking at one of them — so copying
+    the link while standing on the tab you want says which tab you want, and the
+    caller never has to ask. That is worth more here than anywhere else, because
+    the alternative is naming a tab whose title you have to spell exactly.
+
+    Accepts a bare id too, since `--doc` took one before this existed and a
+    document id is unambiguous at that length.
+    """
+    text = text.strip()
+    if not text:
+        return "", ""
+    if (match := DOC_ID_RE.search(text)) is not None:
+        parsed = urlparse(text)
+        tab = (parse_qs(parsed.query).get("tab") or [""])[0]
+        # A fragment can carry it too: .../edit#tab=t.0
+        if not tab and parsed.fragment.startswith("tab="):
+            tab = parsed.fragment[4:]
+        return match.group(1), tab.strip()
+    if BARE_ID_RE.match(text):
+        return text, ""
+    return "", ""
+
+
+def tab_titles(document: dict[str, Any]) -> list[tuple[str, str, int]]:
+    """Every tab in the document as `(title, tab_id, depth)`, in document order.
+
+    What a refusal lists. Naming the tab you meant is only reasonable if
+    something tells you what the tabs are called, and a document with ten of
+    them — which is a real one here — is exactly where guessing fails.
+    """
+    out: list[tuple[str, str, int]] = []
+
+    def walk(tabs: list[dict[str, Any]], depth: int) -> None:
+        for tab in tabs or []:
+            properties = tab.get("tabProperties") or {}
+            out.append((properties.get("title", ""), properties.get("tabId", ""), depth))
+            walk(tab.get("childTabs") or [], depth + 1)
+
+    walk(document.get("tabs") or [], 0)
+    return out
 
 
 class GoogleError(Exception):
@@ -132,20 +187,52 @@ def credentials(config: Config) -> Any:
 
     if creds is not None and creds.valid:
         return creds
+    reason = ""
     if creds is not None and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-        except Exception:  # noqa: BLE001 - any refresh failure means ask again
+        except Exception as exc:  # noqa: BLE001 - any refresh failure means ask again
             log.warning("refreshing the Google token failed; asking for consent", exc_info=True)
+            reason = _refresh_reason(exc)
         else:
             _store(creds, token_path)
             return creds
 
-    return _consent(config, token_path)
+    return _consent(config, token_path, reason)
 
 
-def _consent(config: Config, token_path: Any) -> Any:
-    """The paste flow. Binds nothing, and needs a terminal by design."""
+def _refresh_reason(exc: Exception) -> str:
+    """Why the stored token stopped working, said in terms of what to change.
+
+    **`invalid_grant` almost always means one thing here**, and it is worth
+    naming rather than leaving somebody to conclude that this asks every time.
+    Google expires the refresh tokens of an OAuth app whose publishing status is
+    still *Testing* after seven days -- so a setup that worked on Monday asks
+    again the following Tuesday, and again the Tuesday after that, and looks
+    exactly like a bug in Referat. It is one setting in the console.
+
+    The other causes are named too, because the fix for each is somewhere else
+    entirely and a wrong guess wastes an afternoon.
+    """
+    detail = str(exc)
+    if "invalid_grant" not in detail:
+        return f"the stored token stopped working ({detail})."
+    return (
+        "the stored token was rejected. The usual cause is that the OAuth app is still "
+        "in TESTING in the Google Cloud console, where Google expires refresh tokens "
+        "after seven days -- set its publishing status to 'In production' and this stops "
+        "happening. Otherwise: access was revoked at myaccount.google.com, the OAuth "
+        "client was deleted, or this machine's clock is wrong."
+    )
+
+
+def _consent(config: Config, token_path: Any, reason: str = "") -> Any:
+    """The paste flow. Binds nothing, and needs a terminal by design.
+
+    `reason` is why a stored token is not being used, so a *second* consent
+    explains itself. Being asked twice with no explanation is how somebody
+    concludes they are going to be asked forever.
+    """
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     secret = config.google_client_secret_file()
@@ -170,6 +257,8 @@ def _consent(config: Config, token_path: Any) -> Any:
     url, _ = flow.authorization_url(access_type="offline", prompt="consent")
 
     print("\nReferat needs your permission to write its digests into Google Docs.")
+    if reason:
+        print(f"\nYou have consented before, and {reason}")
     print("\nOpening your browser. If it does not open, paste this in yourself:\n")
     print(f"  {url}\n")
     print("Approve it. The browser will then fail to load a page at localhost --")

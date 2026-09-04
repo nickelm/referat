@@ -747,7 +747,19 @@ def _add_project_parser(subcommands: argparse._SubParsersAction) -> None:
         "--create", action="store_true", help="make a new document without asking"
     )
     link_doc_parser.add_argument(
-        "--doc", metavar="GDOC_ID", default="", help="attach this document, without asking"
+        "--doc",
+        metavar="LINK_OR_ID",
+        default="",
+        help="attach this document without asking. Paste the share link or the "
+        "address bar; a `?tab=` in it is taken as --tab. A bare id works too",
+    )
+    link_doc_parser.add_argument(
+        "--tab",
+        metavar="TITLE_OR_ID",
+        default="",
+        help="which tab of that document to write into, by title or by id. "
+        "Without it Referat looks for a tab called Meetings and, finding none, "
+        "lists the tabs there are rather than guessing at one",
     )
     link_doc_parser.add_argument(
         "--search", metavar="QUERY", default="", help="list matching documents and stop"
@@ -1618,13 +1630,19 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
 
 
 def run_project_link_doc(config: Config, args: argparse.Namespace) -> int:
-    """`referat project link-doc <id>` — the create-or-select question, asked here.
+    """`referat project link-doc <id>` — the create-or-attach question, asked here.
 
     The question is at the prompt and the work is in :func:`link_doc`, which is
     the same split `label.run_apply` and `label.name_speaker` make: a guarded
     function that blocked on `input()` is one the command center could not call.
     `--create`, `--doc` and `--search` are that question already answered, which
     is what a picker will hand over.
+
+    **Pasting a link is offered before searching Drive**, and that ordering is
+    the whole of what changed on 2026-09-04. A Drive search by name is a way to
+    *find* a document you half remember; a link is what you already have in the
+    clipboard when you are looking at the one you want, and it carries the tab
+    with it.
     """
     if args.search:
         candidates, complaint = doc_candidates(config, args.search)
@@ -1634,49 +1652,68 @@ def run_project_link_doc(config: Config, args: argparse.Namespace) -> int:
         if args.as_json:
             print(json.dumps(candidates, indent=2))
             return 0
-        if not candidates:
-            print(f"No Google Docs matching {args.search!r}.")
-            return 0
-        for number, doc in enumerate(candidates, 1):
-            print(f"{number:3}. {doc['name']}  ({doc['modified']}, {doc['owner']})")
-            print(f"     {doc['gdoc_id']}")
-        print("\nAttach one with: referat project link-doc <project-id> --doc <gdoc-id>")
+        _print_candidates(candidates, args.search)
         return 0
 
     gdoc_id = args.doc
     if not gdoc_id and not args.create:
         if not sys.stdin or not sys.stdin.isatty():
             print(
-                "referat project link-doc: say --create, or --doc <gdoc-id>, or "
+                "referat project link-doc: say --create, or --doc <link>, or "
                 "--search <query> to find one. There is no terminal to ask at.",
                 file=sys.stderr,
             )
             return 2
-        answer = input("Create a new doc, or attach an existing one? [create/attach] ").strip()
-        if answer.lower().startswith("a"):
-            query = input("Search Drive for a document named: ").strip()
-            if not query:
-                print("Nothing to search for; nothing was written.")
-                return 1
-            candidates, complaint = doc_candidates(config, query)
-            if complaint:
-                print(f"referat project link-doc: {complaint}", file=sys.stderr)
-                return 1
-            if not candidates:
-                print(f"No Google Docs matching {query!r}; nothing was written.")
-                return 1
-            for number, doc in enumerate(candidates, 1):
-                print(f"{number:3}. {doc['name']}  ({doc['modified']}, {doc['owner']})")
-            chosen = input(f"Which one? [1-{len(candidates)}] ").strip()
-            if not chosen.isdigit() or not 1 <= int(chosen) <= len(candidates):
-                print("Not a number on that list; nothing was written.")
-                return 1
-            gdoc_id = candidates[int(chosen) - 1]["gdoc_id"]
+        answer = input(
+            "Create a new doc, or attach an existing one? [create/attach] "
+        ).strip().lower()
+        if answer.startswith("a"):
+            gdoc_id = input("Paste the document's link (or press enter to search): ").strip()
+            if not gdoc_id:
+                query = input("Search Drive for a document named: ").strip()
+                if not query:
+                    print("Nothing to go on; nothing was written.")
+                    return 1
+                candidates, complaint = doc_candidates(config, query)
+                if complaint:
+                    print(f"referat project link-doc: {complaint}", file=sys.stderr)
+                    return 1
+                if not candidates:
+                    print(f"No Google Docs matching {query!r}; nothing was written.")
+                    return 1
+                _print_candidates(candidates, query, command=False)
+                chosen = input(f"Which one? [1-{len(candidates)}] ").strip()
+                if not chosen.isdigit() or not 1 <= int(chosen) <= len(candidates):
+                    print("Not a number on that list; nothing was written.")
+                    return 1
+                gdoc_id = candidates[int(chosen) - 1]["gdoc_id"]
 
     return _report(
-        link_doc(config, args.project_id, gdoc_id=gdoc_id, title=args.title, sync=args.sync),
+        link_doc(
+            config,
+            args.project_id,
+            gdoc_id=gdoc_id,
+            tab=args.tab,
+            title=args.title,
+            sync=args.sync,
+        ),
         "project link-doc",
     )
+
+
+def _print_candidates(
+    candidates: list[dict[str, str]], query: str, *, command: bool = True
+) -> None:
+    """Drive search results, numbered. One renderer, because there are two callers."""
+    if not candidates:
+        print(f"No Google Docs matching {query!r}.")
+        return
+    for number, doc in enumerate(candidates, 1):
+        print(f"{number:3}. {doc['name']}  ({doc['modified']}, {doc['owner']})")
+        if command:
+            print(f"     {doc['gdoc_id']}")
+    if command:
+        print("\nAttach one with: referat project link-doc <project-id> --doc <link-or-id>")
 
 
 def _report(outcome: Outcome, command: str) -> int:
@@ -1998,7 +2035,13 @@ def remove_project(config: Config, pid: str) -> Outcome:
 
 
 def link_doc(
-    config: Config, pid: str, *, gdoc_id: str = "", title: str = "", sync: bool = True
+    config: Config,
+    pid: str,
+    *,
+    gdoc_id: str = "",
+    tab: str = "",
+    title: str = "",
+    sync: bool = True,
 ) -> Outcome:
     """Attach a Google Doc to a project. The only implementation of linking one.
 
@@ -2025,7 +2068,19 @@ def link_doc(
 
     try:
         if gdoc_id:
-            found, tab_complaint = _meetings_tab(config, gdoc_id)
+            # A share link, a link with `?tab=` on it, or a bare id. Standing on
+            # the tab you want and copying the address is the shortest correct
+            # way to say both things at once, so a tab in the link wins when the
+            # caller did not pass one explicitly.
+            parsed_id, parsed_tab = gdocs.parse_doc_ref(gdoc_id)
+            if not parsed_id:
+                return Outcome(
+                    False,
+                    f"{gdoc_id!r} is not a Google Doc link or id. Paste the address bar, "
+                    f"or the Share button's link, or the id out of the middle of one.",
+                )
+            gdoc_id = parsed_id
+            found, tab_complaint = _resolve_tab(config, gdoc_id, tab or parsed_tab)
             if found is None:
                 return Outcome(False, tab_complaint)
             tab_id, tab_name = found
@@ -2061,31 +2116,63 @@ def link_doc(
     return Outcome(True, "\n".join(lines))
 
 
-def _meetings_tab(config: Config, gdoc_id: str) -> tuple[tuple[str, str] | None, str]:
-    """The `Meetings` tab of an existing document, or the instruction to go and add one.
+def _resolve_tab(config: Config, gdoc_id: str, wanted: str) -> tuple[tuple[str, str] | None, str]:
+    """Which tab of an existing document a project's digest goes into.
 
-    **Tabs cannot be created through the Docs API** — there is no `createTab`
-    request — so this is the one step in step 13 that a person has to do in a
-    browser. The refusal writes nothing, names the URL, and gives the literal
-    command to run afterwards, so the re-check is *running the same command
-    again* rather than a wizard holding state while somebody is away.
+    `wanted` is a tab id (`t.0`, or the one a share link carried) or a tab
+    **title**, and an empty string means *look for one called `Meetings`*.
 
-    Deliberately no fallback to the document's first tab. That is exactly the
-    "silently targets the first tab" failure with a friendly face on it: a
-    meeting written into somebody's unrelated notes, with nothing to notice.
+    **The `Meetings` convention stopped being the rule on 2026-09-04**, the day
+    this met real documents. It assumed a document Referat could have to itself,
+    and the documents here are the opposite: somebody's meeting notes, already
+    tabbed and already named for their contents — `Fall 2026`, `Meeting Notes`,
+    one with ten tabs — and not one called `Meetings`. Insisting would have meant
+    hand-editing every document before Referat could touch it, to add a tab
+    duplicating one that was already there. So `Meetings` is now a *default* to
+    look for and `--tab` is how you say otherwise.
+
+    **What has not moved is that the tab is chosen and never guessed.** There is
+    still no fallback to the document's first tab, not even when there is only
+    one: a single-tab document is not an ambiguity about *which* tab, it is a
+    question about whether you want a digest written into the middle of a hundred
+    and thirty thousand characters of your own prose, and that is a question with
+    an owner. A refusal lists what the tabs actually are, because naming one is
+    only reasonable if something tells you what they are called.
     """
     document = gdocs.get_document(config, gdoc_id)
-    tab = gdocs.find_tab(document, title=gdocs.MEETINGS_TAB)
-    if tab is not None:
-        properties = tab.get("tabProperties") or {}
-        return (properties.get("tabId", ""), properties.get("title", "")), ""
+    tabs = gdocs.tab_titles(document)
+
+    if wanted:
+        for title, tab_id, _ in tabs:
+            if wanted == tab_id or wanted.strip().casefold() == title.strip().casefold():
+                return (tab_id, title), ""
+        return None, (
+            f"that document has no tab {wanted!r}.\n{_tab_list(tabs)}\n"
+            f"Name one with: referat project link-doc <project-id> "
+            f"--doc {gdoc_id} --tab \"<title or id>\""
+        )
+
+    for title, tab_id, _ in tabs:
+        if title.strip() == gdocs.MEETINGS_TAB:
+            return (tab_id, title), ""
+
     return None, (
-        f"that document has no tab called {gdocs.MEETINGS_TAB!r}, and the Docs API cannot "
-        f"create one.\n"
-        f"  Open {gdocs.doc_url(gdoc_id)}, add a tab named exactly {gdocs.MEETINGS_TAB}, "
-        f"then run:\n"
-        f"    referat project link-doc <project-id> --doc {gdoc_id}\n"
+        f"that document has no tab called {gdocs.MEETINGS_TAB!r}, so there is nothing to "
+        f"write into without being told which tab you mean.\n{_tab_list(tabs)}\n"
+        f"Pick one with --tab, or add a tab named {gdocs.MEETINGS_TAB} in Docs and run this "
+        f"again. The Docs API cannot create a tab, which is why this is a browser job.\n"
+        f"  {gdocs.doc_url(gdoc_id)}\n"
+        f"  referat project link-doc <project-id> --doc {gdoc_id} --tab \"<title or id>\"\n"
         f"Nothing was written."
+    )
+
+
+def _tab_list(tabs: list[tuple[str, str, int]]) -> str:
+    """The document's tabs, indented by nesting, for a refusal to quote."""
+    if not tabs:
+        return "  (the document reports no tabs at all)"
+    return "\n".join(
+        f"  {'  ' * depth}- {title or '(untitled)'}   [{tab_id}]" for title, tab_id, depth in tabs
     )
 
 

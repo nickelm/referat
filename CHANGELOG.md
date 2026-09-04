@@ -2,6 +2,97 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-04 (eighth) — A digest you can keep in a document you write in
+
+Four pieces of feedback from the first real use of the digests, and one of them
+was a design error rather than a missing feature.
+
+### Blocks are bracketed now, because real documents are mostly prose
+
+`referat project link-doc` was written to require a tab named `Meetings`, on the
+assumption of a document Referat could have to itself. The documents it was
+pointed at are the opposite: existing meeting notes, already tabbed, already
+named for their contents — `Fall 2026`, `Meeting Notes`, one with ten tabs — and
+a hundred and thirty thousand characters of somebody's prose in one of them. Not
+one called `Meetings`.
+
+That made the block format wrong rather than merely inconvenient. A block ran
+from its own anchor to the *next* one, so the last block in a tab owned
+everything down to the end of it, and anything written underneath a digest was
+deleted on the next re-render. `TODO.md` had this as a thing to watch "the first
+time somebody actually annotates a digest"; the first real document settled it
+before that.
+
+So a block is now `[referat:<id>]` ... `[/referat:<id>]`, and a sync replaces
+only what is between a matching pair. A block with no closing anchor counts as
+**stale whatever its sha says**, so the one already written upgraded itself on
+the next sync rather than needing a migration — verified against the live
+document, which went from `closed=False` to `closed=True` and then wrote nothing
+on a second sync.
+
+The fixture grew the cases that matter: prose under a re-rendered block, prose
+under the *last* block, an insert landing between blocks rather than inside
+somebody's paragraph, and a legacy block re-rendering into a closed one.
+
+### The tab is chosen, and choosing it got easy
+
+`--tab` names any tab by title or by id, and `--doc` now takes a **share link** —
+the address bar or the Share button — because nobody has a forty-four character
+document id to hand and everybody has the link. The `?tab=` a Docs URL carries
+answers both questions at once, so opening the document, clicking the tab you
+want and copying the address is the whole of it.
+
+What did not move: there is still no fallback to the document's first tab, not
+even when there is only one. A single-tab document is not an ambiguity about
+*which* tab, it is a question about whether a digest belongs in the middle of
+somebody's prose. A refusal lists the tabs that exist with their ids, since
+naming one is only reasonable if something says what they are called.
+
+### Being asked for consent twice now explains itself
+
+The worry was reasonable and the answer is no, with one caveat worth naming.
+Refresh works silently — a Drive search an hour after consent needed no prompt.
+But `invalid_grant` here almost always means the OAuth app was left in *Testing*,
+where Google expires refresh tokens after seven days, which looks exactly like
+Referat asking every week. A second consent now says so, and names the other
+causes — revoked access, a deleted client, a wrong clock — because the fix for
+each is somewhere else.
+
+### The known-voices database can no longer be lost to one bad byte
+
+`TODO.md` has carried this since step 14 and it was worse than the box said. It
+named `label.apply_name`; the dangerous caller is `voices.bootstrap_owner`, which
+runs **inside the transcription pipeline** on a background thread. So the failure
+was never "somebody names a speaker and loses the database" — it was "a meeting
+transcribes overnight and twenty-eight people are gone by morning", with no
+exception and nobody watching. `load` degrades to empty when the file will not
+parse, which is right; `save` rewrites it whole. Together that is one unparseable
+byte plus one save.
+
+Two answers, because the guard is only half. `unreadable` mirrors `ProjectsDB`'s
+flag, five write paths refuse, and `save` refuses as a backstop so a check
+forgotten later cannot cost the file either. And **backups**, because a guard
+stops a wrong write and does nothing about a correct one — the reason there was
+nothing to restore from being a rule this project is right about: `.voices/` is
+kept out of the sync client and every backup because it is biometric data about
+people who never asked to be in a database. `save` now keeps the last fifteen
+copies in `<voices_dir>/backups/`, **inside** that folder, where they inherit the
+same exclusion. Anywhere else would have solved the recovery problem by breaking
+the privacy one.
+
+`scripts/voices_guard_fixture.py` checks all of it against a throwaway copy and
+asserts at the end that the real database was untouched. A first backup of the
+live one was taken by hand: 28 people, 193,891 bytes.
+
+### Verified against the real thing
+
+The whole network half, which yesterday was code that passed an offline
+simulator. Consent at a terminal, `link-doc --create`, backfill, and the block
+came out right — anchor, Heading 3 date line, Heading 4 sections, real bullets,
+bold names with the brackets gone, no raw Markdown. A second sync wrote nothing.
+A re-render replaced in place. The meeting reached `synced`. Still unexercised:
+`--prune` against a real block, and attaching a document that already has prose.
+
 ## 2026-09-04 (seventh) — The digests, and the notes reach a Google Doc
 
 Build step 13, which had been the one genuinely lagging build step: forty

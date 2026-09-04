@@ -1533,22 +1533,34 @@ nothing of the sort. Step 13 stays gated, twice over now.
       Both are off the recording path, so a Smart App Control block costs a
       digest push and nothing else, which is the degradation the rule permits.
       Re-run the sweep after an upgrade, as with PySide6
-- [ ] **Nothing has been written into a real Google Doc.** Consent needs a
-      terminal and the session that built this had none, so create, attach,
-      backfill, re-render, orphan and prune are code that renders and passes an
-      offline simulator rather than code that has run. The first
-      `referat project link-doc` is the test, and the walkthrough is in
-      `CHANGELOG.md` and `SETUP.md` section 13
+- [x] **Run against a real document on 2026-09-04.** Consent given at a terminal,
+      `link-doc --create` made the doc and backfilled it, and the block came out
+      right: anchor, Heading 3 date line, Heading 4 sections, real bullets, no
+      raw Markdown. A second sync wrote nothing, a re-render replaced in place,
+      and the meeting reached `synced`. Auth refreshes silently — a Drive search
+      the next hour needed no prompt. What is still unexercised is `--prune`
+      against a real block, and attaching a document that already has prose in it
 
 ### Left open
 
 - [ ] **`--prune` has never removed a real block.** It is the one operation here
       that destroys somebody's prose, and it is the least exercised
-- [ ] **A block runs to the next anchor, so anything written *underneath* one in
-      the doc belongs to it and is replaced with it.** That is the honest reading
-      of what a block is, and the alternative — stopping at some heuristic end —
-      leaves orphaned prose behind after a re-render. Worth watching the first
-      time somebody actually annotates a digest
+- [x] **Closed the same day, because it stopped being hypothetical immediately.**
+      The box said to watch this the first time somebody annotated a digest; the
+      first real documents settled it before that, being somebody's meeting notes
+      with tabs already named for their contents and a hundred and thirty
+      thousand characters of prose in one of them. A block now runs
+      `[referat:<id>]` ... `[/referat:<id>]` and a sync replaces only what is
+      between a matching pair. The alternative the box dismissed — a heuristic
+      end — is still dismissed; a written terminator is not a heuristic. An
+      unclosed block counts as **stale whatever its sha says**, so the old format
+      upgrades itself on one sync rather than needing a migration
+- [x] **The `Meetings` tab requirement went with it.** It assumed a document
+      Referat could have to itself. `--tab` names any tab by title or by id, and
+      `--doc` takes a share link whose `?tab=` says which one you were looking
+      at. Still no fallback to the first tab, not even in a single-tab document:
+      that is not an ambiguity about which tab, it is a question about whether a
+      digest belongs in the middle of somebody's prose
 - [ ] **A rename of a person goes stale in a pushed doc**, which is step 20c's
       problem and has no story here. Report it, never reach into the doc — the
       same rule as an orphaned anchor

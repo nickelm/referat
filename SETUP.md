@@ -929,29 +929,57 @@ the address bar (it looks like `http://localhost/?code=4/0Ab...&scope=...`) and
 paste it at the prompt. The code is in it.
 
 The refresh token is cached in `~/.referat/google_token.json`. Delete that file
-to sign out. Because the flow needs a terminal, **the command center can never
+to sign out.
+
+**You should not be asked again.** Referat refreshes the access token silently
+from then on. If it *does* ask a second time it says why, and the usual cause is
+step 5 above: an OAuth app left in **Testing** has its refresh tokens expired by
+Google every seven days, which looks exactly like Referat asking every week. Set
+the publishing status to *In production* and it stops. The other causes -- access
+revoked at myaccount.google.com, the client deleted, a badly wrong system clock
+-- are named in the message too. Because the flow needs a terminal, **the command center can never
 ask for consent** — do this once at a prompt and every later sync, from the
 window included, uses the stored token.
 
-### 13d. Linking, and the tab
+### 13d. Linking, and which tab
 
 ```powershell
 # create a new doc titled "<Project> Meeting Digest", and backfill it
 referat project link-doc my-project --create
 
-# or find an existing one
+# attach one you already have -- paste the share link or the address bar
+referat project link-doc my-project --doc "https://docs.google.com/document/d/<id>/edit?tab=t.0"
+
+# or find it by name first
 referat project link-doc my-project --search "Weekly notes"
-referat project link-doc my-project --doc <gdoc-id>
 ```
 
-Attaching an **existing** document has one awkward step, and it is the API's
-fault rather than Referat's: the document must have a tab named exactly
-`Meetings`, and **the Docs API cannot create a tab** — there is no request type
-for it. If it has none, Referat writes nothing, gives you the document's URL, and
-tells you the command to re-run once you have added the tab by hand (in Docs, the
-tab sidebar → *Add tab*, then rename it). There is deliberately no fallback to
-the document's first tab: that would be a meeting written into whatever you
-happened to have there, with no error to notice.
+**Paste the link, not the id.** `--doc` takes the Share button's link, the
+address bar, or a bare document id. If the address carries `?tab=t.something` --
+which it does whenever the document has more than one tab and you are looking at
+one of them -- that tab is the one Referat will use. So the shortest correct way
+to link an existing document is to open it, click the tab you want, and copy the
+address.
+
+Otherwise say which tab with `--tab`, by title or by id:
+
+```powershell
+referat project link-doc my-project --doc "<link>" --tab "Meeting Notes"
+```
+
+With neither, Referat looks for a tab named `Meetings` and, finding none, **lists
+the tabs the document actually has** with their ids and stops without writing
+anything. It will not fall back to the first tab -- not even when there is only
+one. A single-tab document is not an ambiguity about *which* tab; it is a
+question about whether you want a digest written into the middle of your own
+prose, and that is a question with an owner.
+
+**You can write in the same tab.** Each block is bracketed by a small gray
+`[referat:<id>]` ... `[/referat:<id>]` pair, and Referat only ever replaces what
+is between a matching pair. Anything you write above, below or between blocks is
+yours and stays. Do not delete one of those markers: a block missing its closing
+marker falls back to the older rule -- it owns everything down to the next block
+-- and the next sync re-renders it to put the marker back.
 
 Linking ends by running a sync, which is what makes attaching an existing
 document backfill every meeting already tagged.

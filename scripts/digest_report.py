@@ -253,30 +253,49 @@ def block_text(meeting_id: str) -> str:
     to -- and every failure it reported was the fixture's. One function, called
     by both, is what makes a miss here mean something.
     """
-    return digest.ANCHOR_TEMPLATE.format(meeting_id) + "\nxxx\n"
+    return (
+        digest.ANCHOR_TEMPLATE.format(meeting_id)
+        + "\nxxx\n"
+        + digest.END_TEMPLATE.format(meeting_id)
+        + "\n"
+    )
 
 
-def tab(ids: list[str]) -> tuple[list[dict], str, int]:
+def tab(ids: list[str], *, prose: str = "", legacy: bool = False) -> tuple[list[dict], str, int]:
     """A fake `documents.get` body, the document it describes, and its `body_end`.
 
-    Two paragraphs per block, the way a real one has: the anchor, then content.
+    `prose` is a paragraph of somebody else's writing put **after every block**,
+    which is the case the closing anchor exists for and which no fixture had
+    until real documents turned out to be mostly prose.
+
+    `legacy` writes blocks with no closing anchor, the way they were written
+    before 2026-09-04, so the fallback is exercised rather than assumed.
+
     Indices are 1-based, as the API's are.
     """
     content: list[dict] = []
     document = ""
     index = 1
+
+    def emit(part: str) -> None:
+        nonlocal index, document
+        content.append(
+            {
+                "startIndex": index,
+                "endIndex": index + len(part),
+                "paragraph": {"elements": [{"textRun": {"content": part}}]},
+            }
+        )
+        index += len(part)
+        document += part
+
     for meeting_id in ids:
-        anchor = digest.ANCHOR_TEMPLATE.format(meeting_id) + "\n"
-        for part in (anchor, "xxx\n"):
-            content.append(
-                {
-                    "startIndex": index,
-                    "endIndex": index + len(part),
-                    "paragraph": {"elements": [{"textRun": {"content": part}}]},
-                }
-            )
-            index += len(part)
-        document += anchor + "xxx\n"
+        emit(digest.ANCHOR_TEMPLATE.format(meeting_id) + "\n")
+        emit("xxx\n")
+        if not legacy:
+            emit(digest.END_TEMPLATE.format(meeting_id) + "\n")
+        if prose:
+            emit(prose)
     return content, document, index
 
 
@@ -358,6 +377,61 @@ def check_reconciler() -> None:
         [ids[0], ids[1], ids[2]],
         prune=True,
     )
+
+    # --- The cases the closing anchor exists for ---------------------------
+    #
+    # These are not edge cases. The documents this was pointed at on the day it
+    # shipped are somebody's meeting notes with tabs already named for their
+    # contents -- 130,000 characters of prose in one of them -- so "a block with
+    # writing underneath it" is the normal case and a tab Referat owns outright
+    # is the exception.
+    def run_prose(name, existing, wanted_ids, current_ids, expected, *, legacy=False):
+        prose = "somebody wrote this\n"
+        content, document, body_end = tab(existing, prose=prose, legacy=legacy)
+        anchors = digest.scan_anchors(content, body_end)
+        wanted = {i: "sha-new" for i in wanted_ids}
+        stored = {i: ("sha-new" if i in current_ids else "sha-old") for i in existing}
+        plan = digest.plan(anchors, wanted, stored, body_end, prune=False)
+        got = simulate(document, plan.ops)
+        kept = got.count(prose)
+        ok = got == expected(prose) and kept == len(existing)
+        print(f"  {'ok  ' if ok else 'MISS'} {name}: {kept}/{len(existing)} prose paragraph(s) survived")
+        if not ok:
+            fail(f"{name}: got {got!r}")
+
+    run_prose(
+        "prose under a re-rendered block survives",
+        [ids[0], ids[1]],
+        [ids[0], ids[1]],
+        [ids[1]],
+        lambda pr: block_text(ids[0]) + pr + block_text(ids[1]) + pr,
+    )
+    run_prose(
+        "prose under the LAST block survives a re-render",
+        [ids[0], ids[1]],
+        [ids[0], ids[1]],
+        [ids[0]],
+        lambda pr: block_text(ids[0]) + pr + block_text(ids[1]) + pr,
+    )
+    run_prose(
+        "an insert lands between blocks, not inside somebody's paragraph",
+        [ids[0], ids[3]],
+        [ids[0], ids[1], ids[3]],
+        [ids[0], ids[3]],
+        lambda pr: block_text(ids[0]) + pr + block_text(ids[1]) + block_text(ids[3]) + pr,
+    )
+
+    # A block written before the closing anchor existed. It has no pair, so it
+    # falls back to the old rule -- which means it DOES still own the prose under
+    # it, once, until that re-render replaces it with a properly closed block.
+    content, document, body_end = tab([ids[0]], prose="old prose\n", legacy=True)
+    anchors = digest.scan_anchors(content, body_end)
+    plan = digest.plan(anchors, {ids[0]: "new"}, {ids[0]: "old"}, body_end)
+    got = simulate(document, plan.ops)
+    ok = got.startswith(block_text(ids[0])) and digest.END_TEMPLATE.format(ids[0]) in got
+    print(f"  {'ok  ' if ok else 'MISS'} a legacy block re-renders into a closed one")
+    if not ok:
+        fail(f"legacy re-render: got {got!r}")
 
     # A block with no `digest` entry at all counts as stale rather than current:
     # it means another copy of Referat wrote the doc, or the meta.json was lost.

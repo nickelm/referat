@@ -1708,6 +1708,32 @@ nothing and are rendered as orphans rather than hidden, because a tag silently
 disappearing off three meetings is how you lose track of what a meeting was
 about.
 
+**A block is bracketed, and that is what lets it live in a document somebody
+writes in.** Each one runs `[referat:<id>]` ... `[/referat:<id>]`, both small and
+gray, and a sync only ever replaces what is between a matching pair. The closing
+anchor was added on 2026-09-04, the day this met real documents, and it is worth
+saying why the original design was wrong rather than merely amending it: a block
+that ran from its own anchor to the *next* one meant the last block in a tab
+owned everything down to the end of it, so anything a person wrote underneath a
+digest was deleted on the next re-render. That is survivable only in a tab
+Referat owns outright — and the documents here are the opposite, being somebody's
+meeting notes, already tabbed, already named for their contents, with a hundred
+and thirty thousand characters of prose in one of them. A block with no closing
+anchor is therefore treated as **stale whatever its sha says**, so one sync
+upgrades it and the old format converges rather than needing a migration.
+
+**The `Meetings` tab is a default and not a requirement.** It assumed a document
+Referat could have to itself; the real ones are called `Fall 2026` and
+`Meeting Notes` and one has ten tabs, none of them `Meetings`. So `--tab` names
+any tab by title or by id, and `--doc` takes a **share link** — the address bar
+or the Share button, whose `?tab=` says which tab you were looking at, which is
+the shortest correct way to answer both questions at once. What has **not** moved
+is that the tab is chosen and never guessed: there is still no fallback to the
+first tab, not even in a single-tab document, because that is not an ambiguity
+about which tab but a question about whether a digest belongs in the middle of
+somebody's prose. A refusal lists the tabs that exist, since naming one is only
+reasonable if something says what they are called.
+
 **Linking is create-or-select, and the tab is the awkward half.** `referat
 project link-doc <id>` *appends* a doc reference and `unlink-doc <id> <gdoc_id>`
 removes one, since a project may carry several. *Create new

@@ -84,13 +84,33 @@ def u16(text: str) -> int:
 
 # --- The anchor -------------------------------------------------------------
 
+_ID = r"(\d{4}-\d{2}-\d{2}_\d{4}(?:_\d+)?)"
+
 ANCHOR_TEMPLATE = "[referat:{}]"
-ANCHOR_RE = re.compile(r"^\[referat:(\d{4}-\d{2}-\d{2}_\d{4}(?:_\d+)?)\]$")
-"""What a block is found by, written and read.
+END_TEMPLATE = "[/referat:{}]"
+ANCHOR_RE = re.compile(rf"^\[referat:{_ID}\]$")
+END_RE = re.compile(rf"^\[/referat:{_ID}\]$")
+"""What a block is found by, written and read. **A pair, since 2026-09-04.**
 
 The id pattern carries the `_2` / `_3` collision suffix `paths.new_meeting_dir`
 mints, because a meeting that collided is a meeting like any other and an anchor
 this pattern refused to read would be a block the reconciler re-appended forever.
+
+**The closing anchor is what makes a block safe to put in a document somebody
+writes in**, and it was added the first day this met real documents. Without it
+a block runs from its own anchor to the *next* one — or, for the last block, to
+the end of the tab — so anything a person wrote underneath it belonged to it and
+was deleted on the next re-render. That is survivable in a tab Referat owns
+outright and unacceptable anywhere else, and "anywhere else" turned out to be
+the normal case: the existing docs here are a hundred and thirty thousand
+characters of somebody's prose with tabs already named for their contents, and
+none of them called `Meetings`.
+
+With a pair, a block is exactly `[referat:id] ... [/referat:id]` and everything
+between two blocks belongs to whoever wrote it. A block written before this
+existed has no closing anchor, and :func:`scan_anchors` falls back to the old
+rule for it — one re-render then writes the pair, so the old format converges
+rather than needing a migration.
 """
 
 ANCHOR_GRAY = {"color": {"rgbColor": {"red": 0.55, "green": 0.55, "blue": 0.55}}}
@@ -294,6 +314,10 @@ def render_block(meeting_id: str, date: str, title: str, notes_md: str) -> Block
             line, line_spans = _inline(source)
             add(line, PARAGRAPH, line_spans)
 
+    closing = END_TEMPLATE.format(meeting_id)
+    start = add(closing, ANCHOR)
+    spans.append(Span(start, start + u16(closing), "anchor"))
+
     return Block(meeting_id, "".join(chunks), spans, paras)
 
 
@@ -493,6 +517,16 @@ class Anchor:
     meeting_id: str
     start: int
     end: int = 0
+    closed: bool = True
+    """Whether a matching `[/referat:id]` was found, so the extent is exact.
+
+    `False` means the block predates the closing anchor and its `end` is the
+    old guess -- the next anchor, or the end of the tab. That is a block which
+    still owns whatever is written under it, so :func:`plan` treats it as stale
+    whatever its sha says: one re-render replaces it with a closed one and the
+    hazard is gone. Self-healing rather than a migration, which is the same
+    move `MeetingStatus` makes for the legacy `stopped` and `done` values.
+    """
 
 
 def scan_anchors(content: list[dict[str, Any]], body_end: int) -> list[Anchor]:
@@ -507,7 +541,8 @@ def scan_anchors(content: list[dict[str, Any]], body_end: int) -> list[Anchor]:
     reading of what a block is: the alternative, stopping at some heuristic end,
     would leave orphaned prose behind after a re-render.
     """
-    found: list[Anchor] = []
+    opens: list[tuple[str, int]] = []
+    closes: list[tuple[str, int, int]] = []
     for element in content:
         paragraph = element.get("paragraph")
         if not isinstance(paragraph, dict):
@@ -516,15 +551,40 @@ def scan_anchors(content: list[dict[str, Any]], body_end: int) -> list[Anchor]:
             run.get("textRun", {}).get("content", "")
             for run in paragraph.get("elements", [])
             if isinstance(run, dict)
+        ).strip()
+        start = int(element.get("startIndex", 0))
+        end = int(element.get("endIndex", 0))
+        if (match := ANCHOR_RE.match(text)) is not None:
+            opens.append((match.group(1), start))
+        elif (match := END_RE.match(text)) is not None:
+            closes.append((match.group(1), start, end))
+
+    opens.sort(key=lambda o: o[1])
+    out: list[Anchor] = []
+    for position, (meeting_id, start) in enumerate(opens):
+        # The fallback, and the only thing this used to do: a block runs to the
+        # next one, or to the end of the tab.
+        limit = opens[position + 1][1] if position + 1 < len(opens) else body_end
+        closing = next(
+            (
+                end
+                for cid, cstart, end in closes
+                if cid == meeting_id and start < cstart < limit
+            ),
+            None,
         )
-        match = ANCHOR_RE.match(text.strip())
-        if match is not None:
-            found.append(Anchor(match.group(1), int(element.get("startIndex", 0))))
-    found.sort(key=lambda a: a.start)
-    return [
-        Anchor(a.meeting_id, a.start, found[i + 1].start if i + 1 < len(found) else body_end)
-        for i, a in enumerate(found)
-    ]
+        # Clamped, because a closing anchor that is the tab's last paragraph
+        # reports an `endIndex` one past `body_end`, and the segment's final
+        # newline can be neither deleted nor written after.
+        out.append(
+            Anchor(
+                meeting_id,
+                start,
+                min(closing, body_end) if closing else limit,
+                closed=closing is not None,
+            )
+        )
+    return out
 
 
 # --- The diff ---------------------------------------------------------------
@@ -570,10 +630,13 @@ def plan(
     * **missing** -- no anchor for a wanted meeting. Insert it in date order,
       which is id order: `YYYY-MM-DD_HHMM` sorts chronologically by
       construction, so nothing here parses a date.
-    * **stale** -- the shas differ, or nothing was stored at all. Re-render in
-      place. A missing `stored` entry counts as stale rather than as current,
-      because it means the doc was written by another copy of Referat or the
-      `meta.json` was lost, and re-rendering is the answer that converges.
+    * **stale** -- the shas differ, or nothing was stored at all, or the block
+      has no closing anchor. Re-render in place. A missing `stored` entry counts
+      as stale rather than as current, because it means the doc was written by
+      another copy of Referat or the `meta.json` was lost, and re-rendering is
+      the answer that converges. An **unclosed** block counts as stale for a
+      sharper reason: until it is replaced it still owns whatever somebody wrote
+      under it, so upgrading it is the fix rather than a tidy-up.
     * **orphan** -- an anchor for a meeting that no longer carries this tag.
       **Reported and left alone.** The doc may be shared and somebody may have
       written around that block, so removing it is an explicit `--prune` rather
@@ -597,7 +660,7 @@ def plan(
         if anchor is None:
             following = [a.start for a in anchors if a.meeting_id > meeting_id]
             ops.append(Op(INSERT, meeting_id, min(following) if following else body_end))
-        elif stored.get(meeting_id) != wanted[meeting_id]:
+        elif stored.get(meeting_id) != wanted[meeting_id] or not anchor.closed:
             ops.append(Op(REPLACE, meeting_id, anchor.start, anchor.end))
 
     for anchor in anchors:

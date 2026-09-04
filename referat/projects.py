@@ -6,8 +6,8 @@ than a project called "untagged" — so nothing has to be tagged, and nothing is
 ever tagged on anybody's behalf.
 
 `<meetings_dir>/projects.json` holds the list, beside `.voices/` and the
-generated `INDEX.md`, so the meetings folder stays self-describing and the VS
-Code extension finds it from the one path it already has.
+generated `INDEX.md`, so the meetings folder stays self-describing: everything
+about a meeting is reachable from the one path anything already has.
 
 **JSON, and owned here rather than by :mod:`referat.config`.** `config.py`
 promises that Referat parses TOML and never writes it back, so hand edits and
@@ -28,18 +28,27 @@ resolve to nothing and every surface renders them as orphans rather than hiding
 them, because a tag quietly vanishing off three meetings is how you lose track of
 what a meeting was about.
 
+**Archiving is the answer to a project that is finished rather than a mistake**,
+and it is a *presentation* decision and the whole of it. `archived_at` hides a
+project from the surfaces that offer one — the tag picker above all — and changes
+nothing else: the entry stays here, every meeting keeps its tag, that tag still
+resolves through :meth:`ProjectsDB.name_map`, the `glossary` still feeds the
+hotword list, and `referat tag` will still add it. Deleting is what loses
+something; archiving is what does not, which is why it is a button and a delete
+is a modal.
+
 Light on purpose — JSON and string handling, no optional extra. `project add`,
-`rename`, `rm`, `describe`, `glossary` and `list`, and the `tag` / `untag` verbs
-in :mod:`referat.cli`, are a JSON read and a JSON write; only build step 13's
-`link-doc` and `sync` will need the `digest` extra.
+`rename`, `rm`, `describe`, `glossary`, `archive`, `unarchive` and `list`, and
+the `tag` / `untag` verbs in :mod:`referat.cli`, are a JSON read and a JSON
+write; only build step 13's `link-doc` and `sync` will need the `digest` extra.
 
 **The mutations here are primitives and the CLI owns the operations.** `add`,
-`rename`, `remove`, `describe` and `set_glossary` each change one field of an
-in-memory object and save nothing; what makes a change *correct* — the
-unreadable-file guard, the name rules, the unknown-id refusal and the single
+`rename`, `remove`, `describe`, `set_glossary` and `set_archived` each change one
+field of an in-memory object and save nothing; what makes a change *correct* —
+the unreadable-file guard, the name rules, the unknown-id refusal and the single
 save — lives in :mod:`referat.cli`, and every surface goes through it. A window
 reaching past that into these methods would be the second implementation of all
-four.
+five.
 """
 
 from __future__ import annotations
@@ -63,7 +72,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
-"""`projects.json`'s own version, so a later shape can be migrated rather than guessed."""
+"""`projects.json`'s own version, so a later shape can be migrated rather than guessed.
+
+Build step 21 added `archived_at` and deliberately **did not** move it. There was
+nothing to migrate: :meth:`Project.from_json` defaults a missing key, so a file
+written before that step loads with every project active — which is true of it.
+Bumping this would have asserted a migration that does not exist, and nothing
+reads the value back anyway. Move it when a key changes *meaning*, not when one
+is added.
+"""
 
 UNTAGGED = "untagged"
 """The computed state of an empty tag list, and therefore not available as a name.
@@ -197,6 +214,27 @@ class Project:
     the order it was designed in.
     """
     created_at: str = ""
+    archived_at: str = ""
+    """When work on this thread of work stopped, or `""` while it has not.
+
+    **Archiving hides this project and changes nothing else.** It stays in this
+    file, every meeting keeps its tag, that tag still resolves to this name
+    through :meth:`ProjectsDB.name_map`, this `glossary` still feeds
+    :func:`referat.hotwords.collect`, and `referat tag` will still add it. What
+    changes is that the tag picker stops offering it and the projects page gives
+    it a section of its own.
+
+    A timestamp rather than an `archived: bool`, because `""` is already this
+    file's falsy absence — `created_at`, `description`, `DocRef.tab_id` — so
+    `bool(project.archived_at)` is the predicate and there is no second field to
+    disagree with the first. A flag *beside* a date would be two places saying
+    one thing, and a flag *instead* of one throws away the fact worth keeping.
+    """
+
+    @property
+    def archived(self) -> bool:
+        """Whether this project has been archived. The one place emptiness is read."""
+        return bool(self.archived_at)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -206,6 +244,7 @@ class Project:
             "glossary": list(self.glossary),
             "description": self.description,
             "created_at": self.created_at,
+            "archived_at": self.archived_at,
         }
 
     @classmethod
@@ -232,6 +271,7 @@ class Project:
             glossary=glossary,
             description=str(raw.get("description", "")),
             created_at=str(raw.get("created_at", "")),
+            archived_at=str(raw.get("archived_at", "")),
         )
 
 
@@ -305,10 +345,25 @@ class ProjectsDB:
         """`{id: display name}` — the join a tag chip needs, and nothing more.
 
         `referat project list --json` and `referat list --json` both hand this out
-        from this one loader, so the sidebar can render a tag's name without a
-        second subprocess and the two cannot come to disagree about it.
+        from this one loader, so a surface holding either document renders a
+        tag's name the same way and the two cannot come to disagree about it.
         """
         return {p.id: p.name for p in self.ordered()}
+
+    def archived_ids(self) -> set[str]:
+        """The projects that have been archived — the set a picker subtracts.
+
+        **Archivedness travels beside the name map and never inside it.** It is
+        tempting to make :meth:`name_map` skip these and let every surface hide
+        them for free; it would be a bug, and a quiet one. `cli.tags_cell` and
+        `referat.ui.rows.tags_text` both render an id *missing* from that map
+        with a trailing `?`, because that is what an orphan is — so narrowing it
+        would turn every archived project's tags into orphans in `referat list`,
+        in `list --json`, in the meetings list, on the dashboard and on the
+        people page, all at once. Archiving hides a project from
+        the places that *offer* one. It may never unname a tag.
+        """
+        return {p.id for p in self.projects.values() if p.archived}
 
     def display(self, pid: str) -> str:
         """A project's name, or the bare id when nothing resolves it — that is an orphan."""
@@ -377,6 +432,27 @@ class ProjectsDB:
         if project is None:
             return None
         project.glossary = clean_terms(terms)
+        return project
+
+    def set_archived(self, pid: str, archived: bool) -> Project | None:
+        """Archive or unarchive, or None when there is no such project.
+
+        **A second archive does not move the date.** `archived_at` is when work
+        on this thread stopped, so re-running the command must not rewrite that
+        history -- the same reason `referat rerun` stopped clearing
+        `speaker_names`. Unarchiving clears it outright, because a project that
+        is live has no date on which it stopped.
+
+        The clock is here beside :meth:`add`'s `created_at` rather than passed
+        in, so this file mints its own times in one place.
+        """
+        project = self.projects.get(pid)
+        if project is None:
+            return None
+        if not archived:
+            project.archived_at = ""
+        elif not project.archived_at:
+            project.archived_at = dt.datetime.now().isoformat(timespec="seconds")
         return project
 
 

@@ -14,10 +14,18 @@ and how to rebuild the dashboard over all of it.
 
 **The CLI owns every mutation, and is the only implementation of any of it.**
 The projects file, the tag logic, the lifecycle vocabulary and the rules about
-what a name may be live in Python exactly once. The VS Code extension shells out
-to these commands because it is TypeScript and has no other way in; the tray
-imports the same functions, because it is already a Python process inside this
-package. The rule is one implementation, not one process boundary.
+what a name may be live in Python exactly once. The tray and the command center
+import the same functions, because they are already a Python process inside this
+package. The rule is one implementation, not one process boundary — which is
+worth saying in both directions, since a later reader could "fix" it either way.
+
+**The `--json` documents outlived their first reader and stay.** Every one of
+them was written for the VS Code extension, which shelled out to these commands
+because it was TypeScript and had no other way in; it was deleted at build step
+23. They stay because they are the shape a surface and the CLI agree on, and a
+document you can print is a document you can test — and because they are now what
+`referat show`, `referat transcript` and `referat people` hand *anybody* who asks
+in a script.
 
 **Light by default.** Only `rerun` needs the `transcribe` extra, and it imports
 it inside :func:`referat.rerun.run`, so `list` and `status` answer instantly
@@ -41,7 +49,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from referat import __version__, actions, build_info, index, paths, projects, status, voices
 from referat.config import Config, ConfigError, load_config
@@ -52,6 +60,11 @@ from referat.meeting import (
     load_meetings,
     resolve_meeting,
 )
+
+if TYPE_CHECKING:
+    # Only for the annotation on `_inactive`. The runtime import stays inside
+    # `people_document`, where it has always been.
+    from referat import people as people_mod
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         dest="as_json",
-        help="emit the same meetings as JSON, for the VS Code extension",
+        help="emit the same meetings as JSON",
     )
 
     show = subcommands.add_parser(
@@ -173,7 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         dest="as_json",
-        help="emit the same answer as JSON, for the VS Code extension's status bar",
+        help="emit the same answer as JSON",
     )
 
     subcommands.add_parser(
@@ -412,10 +425,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="delete this person from the known-voices database and revert their "
         "labels to SPEAKER_NN in every transcript",
     )
-    # The three flags below are what the VS Code extension's labeling webview
-    # drives. They exist because the prompt above cannot be driven from a
-    # subprocess: it reads `input()`, and `--forget`'s confirmation answers *no*
-    # on EOF, so a caller with no terminal is told "Nothing was deleted."
+    # The three flags below were built for the VS Code extension's labeling
+    # webview and outlived it. They exist because the prompt above cannot be
+    # driven from a subprocess: it reads `input()`, and `--forget`'s confirmation
+    # answers *no* on EOF, so a caller with no terminal is told "Nothing was
+    # deleted." The command center calls `label.name_speaker` directly and needs
+    # none of them; anything scripting this from outside Python still does.
     label.add_argument(
         "--json",
         action="store_true",
@@ -671,12 +686,39 @@ def _add_project_parser(subcommands: argparse._SubParsersAction) -> None:
     )
     glossary.add_argument("--clear", action="store_true", help="empty the glossary")
 
+    archive = verbs.add_parser(
+        "archive",
+        help="hide a finished project from the tag picker, keeping every tag it has",
+        description=(
+            "Archiving is a presentation decision and the whole of it. The project "
+            "stays in projects.json, every meeting keeps its tag and that tag still "
+            "resolves to this name, and the glossary still feeds the hotword list "
+            "Whisper is handed. What changes is that the tag picker stops offering "
+            "it and the projects page gives it a section of its own. `referat tag` "
+            "will still add it: an archived project is not an orphan, and a late "
+            "meeting belonging to a finished thread of work is exactly the case. "
+            "This is the answer to a project that is finished; `project rm` is the "
+            "answer to one that was a mistake, and it orphans every tag it had."
+        ),
+    )
+    archive.add_argument("project_id")
+
+    unarchive = verbs.add_parser(
+        "unarchive",
+        help="put an archived project back among the live ones",
+        description=(
+            "Clears `archived_at` and nothing else. Nothing was lost by archiving, "
+            "so nothing has to be restored."
+        ),
+    )
+    unarchive.add_argument("project_id")
+
     listing = verbs.add_parser("list", help="every project, and how many meetings carry it")
     listing.add_argument(
         "--json",
         action="store_true",
         dest="as_json",
-        help="emit the same projects as JSON, for the VS Code extension",
+        help="emit the same projects as JSON",
     )
 
 
@@ -755,16 +797,18 @@ def render_table(
 
 
 def list_document(config: Config) -> dict[str, Any]:
-    """Every meeting, as the JSON the VS Code extension reads.
+    """Every meeting, as one document. The listing every surface is built on.
 
-    The extension needs six things it would otherwise have to work out for
-    itself: the two roots, the duration formatter, `audio_state`, the title rule,
-    the staged/promoted distinction, and which speakers are still numbers. All
-    six already exist exactly once in Python and are shared by three or more
-    callers *so that they cannot disagree* — so the extension is given the
-    answers rather than the ingredients. A second implementation in TypeScript
-    would be a seventh reader of `meta.json` with its own opinions about all of
-    them.
+    Written for the VS Code extension at step 11 and now the command center's,
+    which reads it once per refresh and hands it to the meetings list, the
+    dashboard's three queues and the actions tab. It carries six things a caller
+    would otherwise work out for itself: the two roots, the duration formatter,
+    `audio_state`, the title rule, the staged/promoted distinction, and which
+    speakers are still numbers. All six already exist exactly once in Python and
+    are shared by three or more callers *so that they cannot disagree* — so a
+    surface is given the answers rather than the ingredients. A second
+    implementation anywhere would be a seventh reader of `meta.json` with its own
+    opinions about all of them.
 
     Deliberately not sorted here: this is `referat list`'s document, so it keeps
     `list`'s oldest-first order, and the dashboard that wants newest-first
@@ -772,10 +816,10 @@ def list_document(config: Config) -> dict[str, Any]:
 
     The top-level `projects` block is the seventh thing, added at step 14: the map
     from a tag id to what a person reads. It comes out of the same
-    `ProjectsDB.name_map` that `referat project list --json` hands out, so this
-    one subprocess feeds the whole sidebar and the join between a tag and its name
-    cannot drift either. An id in a meeting's `tags` that is missing from this map
-    is an orphan, and that absence is the extension's cue to render it as one.
+    `ProjectsDB.name_map` that `referat project list --json` hands out, so the
+    join between a tag and its name cannot drift either. An id in a meeting's
+    `tags` that is missing from this map is an orphan, and that absence is a
+    surface's cue to render it as one.
     """
     meetings = load_meetings(config)
     return {
@@ -1113,7 +1157,7 @@ def transcript_document(config: Config, meeting: Meeting) -> dict[str, Any]:
     `REMOTE` are channel labels and `SPEAKER_NN` is a number. Phase 5 needs it so
     the command center can turn a name in the label column into a link to that
     person without a second copy of that rule in the UI, which is the same reason
-    `unnamed` is computed here rather than in the sidebar.
+    `unnamed` is computed here rather than in any surface.
     """
     from referat.transcribe import parse_transcript
 
@@ -1199,7 +1243,7 @@ def run_transcript(config: Config, meeting_id: str, as_json: bool = False) -> in
     return 0
 
 
-PROJECT_HEADERS = ("ID", "NAME", "MEETINGS", "DOCS")
+PROJECT_HEADERS = ("ID", "NAME", "MEETINGS", "DOCS", "ARCHIVED")
 PROJECT_RIGHT_ALIGNED = (2, 3)
 
 
@@ -1207,8 +1251,8 @@ def project_document(config: Config) -> dict[str, Any]:
     """`referat project list --json`: every project, and how much hangs off it.
 
     `names` is :meth:`referat.projects.ProjectsDB.name_map`, the very map
-    :func:`list_document` embeds — so the sidebar's tag chips resolve identically
-    whichever of the two documents it happens to be holding.
+    :func:`list_document` embeds — so a tag chip resolves identically whichever
+    of the two documents its surface happens to be holding.
 
     `orphans` is the other half of the same question: ids that meetings still
     carry and no project answers to. They are counted here rather than left for
@@ -1221,6 +1265,14 @@ def project_document(config: Config) -> dict[str, Any]:
     of this document had to guess between them; phase 4's projects page is the
     first that must not, since it offers to *create* a project into a file whose
     contents it cannot see. Empty when the file is fine.
+
+    **Each project is spread from its own `to_json`, so a new field arrives here
+    for free** — `archived_at` did, at build step 21, with no change to this
+    function. That is a property worth relying on rather than an accident: the
+    dataclass is the schema, and a document that re-listed the keys would be a
+    second place to forget one. It is also why there is no top-level `archived`
+    list beside `names`: the only reader iterates `projects`, and a second copy
+    of the same fact is a second thing that can disagree.
     """
     db = projects.ProjectsDB.load(config)
     counts = projects.tag_counts(load_meetings(config))
@@ -1259,11 +1311,33 @@ def run_project_list(config: Config, as_json: bool = False) -> int:
         return 0
 
     rows = [
-        (p["id"], p["name"], str(p["meetings"]), str(len(p["docs"])) if p["docs"] else "-")
+        (
+            p["id"],
+            p["name"],
+            str(p["meetings"]),
+            str(len(p["docs"])) if p["docs"] else "-",
+            # The date rather than a tick, and the same date-or-dash shape DOCS
+            # already has one column along. A tick column would be the one thing
+            # on a page carrying no information; when a project stopped is worth
+            # the width, and it is the only place that date is ever printed.
+            p["archived_at"][:10] or "-",
+        )
         for p in entries
     ]
     print(render_table(rows, PROJECT_HEADERS, PROJECT_RIGHT_ALIGNED))
     print(f"\n{len(rows)} project{'s' if len(rows) != 1 else ''}")
+
+    archived = [p for p in entries if p["archived_at"]]
+    if archived:
+        # Listed in the table rather than hidden behind this line: `project list`
+        # is the inventory, and it is where somebody comes to see what the file
+        # actually holds. The line says the one consequence the column cannot.
+        print(
+            f"{len(archived)} archived project{'s' if len(archived) != 1 else ''}, "
+            f"not offered by the tag picker; their tags still resolve and their "
+            f"glossaries still feed the hotword list. Bring one back with: "
+            f"referat project unarchive <id>"
+        )
 
     orphans = document["orphans"]
     if orphans:
@@ -1278,8 +1352,8 @@ def run_project_list(config: Config, as_json: bool = False) -> int:
     return 0
 
 
-def project_names(config: Config) -> tuple[dict[str, str], str]:
-    """Every project id and what it is called, or the complaint that stopped it.
+def project_names(config: Config) -> tuple[dict[str, str], set[str], str]:
+    """Every project id, what it is called, which are archived, or the complaint.
 
     The tag picker's whole reading vocabulary. It needs the map **fresh every
     time it opens** — the sidebar's picker took it from a cached listing and
@@ -1294,11 +1368,17 @@ def project_names(config: Config) -> tuple[dict[str, str], str]:
     The complaint is :data:`CANNOT_TAG`, because that is what this is: with no
     names loaded every tag would render as an orphan, which is a worse thing to
     show than a refusal.
+
+    The archived ids come back **beside** the map rather than subtracted from it,
+    for the reason :meth:`referat.projects.ProjectsDB.archived_ids` gives: a
+    picker hides an archived project it is *offering*, and still has to render
+    one the meeting already **carries** under its real name. A narrowed map would
+    make that row an orphan, which is a lie about a project that exists.
     """
     db = projects.ProjectsDB.load(config)
     if db.unreadable:
-        return {}, _unreadable_complaint(db.path, CANNOT_TAG)
-    return db.name_map(), ""
+        return {}, set(), _unreadable_complaint(db.path, CANNOT_TAG)
+    return db.name_map(), db.archived_ids(), ""
 
 
 def create_project(config: Config, name: str) -> tuple[projects.Project | None, str]:
@@ -1339,12 +1419,12 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
     `rename` and `rm` used to load the database here, check it here and save it
     here, so the command center's projects page would have had to grow a second
     copy of all three to do the same thing. The verbs now say what to print and
-    nothing else — an :class:`Outcome`'s message, prefixed with the command,
-    which is exactly what the sidebar's `mutate` gives the extension.
+    nothing else — an :class:`Outcome`'s message, prefixed with the command.
     """
     if args.verb is None:
         print(
-            "referat project: pick a verb - add, rename, describe, glossary, rm or list",
+            "referat project: pick a verb - add, rename, describe, glossary, "
+            "archive, unarchive, rm or list",
             file=sys.stderr,
         )
         return 2
@@ -1365,6 +1445,12 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
 
     if args.verb == "rename":
         return _report(rename_project(config, args.project_id, args.name), "project rename")
+
+    if args.verb == "archive":
+        return _report(set_archived(config, args.project_id, True), "project archive")
+
+    if args.verb == "unarchive":
+        return _report(set_archived(config, args.project_id, False), "project unarchive")
 
     if args.verb == "rm":
         return _report(remove_project(config, args.project_id), "project rm")
@@ -1471,10 +1557,11 @@ def _read_project(config: Config, pid: str) -> tuple[projects.Project | None, st
 class Outcome:
     """What a mutation did, in the words of whoever owns the rule.
 
-    The in-process form of what `cli.ts`'s `mutate` gives the VS Code extension:
-    a refusal reaches the user as the sentence the rule's owner wrote, never as
-    something the caller paraphrased. The extension gets it as the CLI's stderr;
-    the command center gets it as this.
+    A refusal reaches the user as the sentence the rule's owner wrote, never as
+    something the caller paraphrased. The deleted VS Code extension got that
+    guarantee by reading the CLI's stderr and could get it no other way; the
+    command center gets it as this, and the guarantee is the part that mattered
+    rather than the mechanism.
 
     **`message` is unprefixed and the caller adds its own.** Not a style
     preference — the prefix is direction-dependent. `referat tag` says `referat
@@ -1616,6 +1703,54 @@ def set_glossary(config: Config, pid: str, terms: Sequence[str]) -> Outcome:
     )
 
 
+def set_archived(config: Config, pid: str, archived: bool) -> Outcome:
+    """Archive or unarchive a project. The only implementation of both directions.
+
+    **One guarded function taking a direction, not two.** The other five project
+    operations are five different things that do not pair; this one is a single
+    flag, and the settled shape for that is already in this file twice —
+    :func:`apply_tags` takes `add` and `remove` together with `run_tag` and
+    `run_untag` as thin wrappers, and :func:`set_action_done` and
+    :func:`dismiss_action` are boolean-direction guarded functions. Two functions
+    here would be two copies of the same open, mutate, save and report differing
+    in one boolean and one sentence.
+
+    **Archiving hides and never removes**, which is the whole design and is what
+    the message has to say: the tags stay on their meetings and still resolve to
+    this name, the glossary still feeds the hotword list, and `referat tag` will
+    still add it. What stops is the *offering*. Deliberately no meeting count
+    beside that, unlike :func:`remove_project`: that costs a `load_meetings` scan
+    of both roots, which a delete pays for because it is irreversible and the
+    orphans are the one thing somebody would not otherwise see. Nothing here is
+    lost, so nothing has to be counted.
+
+    Both no-ops come back `ok` **having written nothing** — the case
+    :class:`Outcome` exists to describe. The already-archived message names the
+    date, which is what makes a no-op distinguishable from a write at a prompt,
+    the same reason :func:`_tag_lines` says both halves of an idempotent change.
+    """
+    db, project, complaint = _open_project(config, pid)
+    if project is None or db is None:
+        return Outcome(False, complaint)
+    if archived and project.archived:
+        return Outcome(True, f"{project.id} was already archived, on {project.archived_at}")
+    if not archived and not project.archived:
+        return Outcome(True, f"{project.id} is not archived")
+
+    db.set_archived(pid, archived)
+    db.save()
+    if not archived:
+        return Outcome(True, f"{project.id} ({project.name}) is active again")
+    return Outcome(
+        True,
+        f"Archived {project.id} ({project.name}).\n"
+        f"Every meeting keeps its tag and it still resolves to that name, and the "
+        f"glossary still feeds the hotword list; `referat tag` will still add it. "
+        f"What changes is that the tag picker stops offering it. "
+        f"Bring it back with: referat project unarchive {project.id}",
+    )
+
+
 def remove_project(config: Config, pid: str) -> Outcome:
     """Delete a project, and say what it left behind. The only implementation of that.
 
@@ -1679,8 +1814,21 @@ def apply_tags(
     lists — the picker cannot produce one, since its two sets are disjoint by
     construction — and if one ever arrived it would be added and then removed,
     which is what the arguments literally ask for.
+
+    **An archived project is still tagged, deliberately, and this says so.** The
+    refusal above is written narrowly on purpose, and an archived id *does*
+    answer to a project — it is not an orphan, so refusing it would widen that
+    guard past the reason written beside it. It is *a missing tag must never cost
+    a name* said one entity along: an archived project must never cost a tag, and
+    a late meeting belonging to a finished thread of work is exactly the case
+    that would otherwise take three writes. Hiding is what a surface does; a verb
+    does not inherit it. The note lives here rather than in `run_tag`, because a
+    `run_*` holding a rule is a `run_*` a second surface cannot use — and it
+    costs no extra read, being computed inside the `if add:` block where the
+    database is already open, so a pure removal still never opens the file.
     """
     add, remove = list(add), list(remove)
+    archived: set[str] = set()
     if add:
         db = projects.ProjectsDB.load(config)
         if db.unreadable:
@@ -1691,6 +1839,7 @@ def apply_tags(
             # orphan, and the one way to make one on purpose should be deleting a
             # project rather than mistyping at a prompt.
             return Outcome(False, _unknown_complaint(db, unknown))
+        archived = db.archived_ids()
 
     meeting, why = resolve_meeting(config, meeting_id)
     if meeting is None:
@@ -1700,11 +1849,20 @@ def apply_tags(
     removed = projects.remove_tags(meeting, remove) if remove else []
     if added or removed:
         meeting.save()
+    # Keyed on what actually changed rather than on what was asked for, so
+    # re-tagging an already-tagged archived project says nothing new.
+    newly_archived = [pid for pid in added if pid in archived]
     lines = [
         *_tag_lines(meeting.id, added, add, "tagged", "already tagged"),
         *_tag_lines(meeting.id, removed, remove, "untagged", "was not tagged"),
-        f"tags: {', '.join(meeting.tags) if meeting.tags else 'none (untagged)'}",
     ]
+    if newly_archived:
+        lines.append(
+            f"{meeting.id}: {', '.join(newly_archived)} archived - the tag "
+            f"resolves and stays; the tag picker does not offer it"
+        )
+    # Printed once and last, whatever happened above.
+    lines.append(f"tags: {', '.join(meeting.tags) if meeting.tags else 'none (untagged)'}")
     return Outcome(True, "\n".join(lines))
 
 
@@ -1809,7 +1967,56 @@ def set_notes_written(config: Config, meeting_id: str) -> Outcome:
 # --- referat promote --------------------------------------------------------
 
 
-def run_promote(config: Config, meeting_id: str, *, release_audio: bool) -> int:
+def promote_warning(config: Config, meeting: Meeting) -> str:
+    """What somebody is told *before* the audio goes, as one block of prose.
+
+    The counterpart of :func:`delete_warning`, added at build step 23 when the
+    command center grew the off-ramp the sidebar had, and the same exception for
+    the same reason: it is spoken *before* the command runs, so there is no
+    outcome to quote. Said here rather than in the modal so the prompt's refusal
+    and the window's question cannot come to describe one irreversible act
+    differently.
+
+    What it has to say that :func:`delete_warning` does not is that this is
+    irreversible in a way deleting a whole meeting is not. Deleting takes the
+    transcript with the audio; this **keeps** the transcript and destroys the
+    only material it could ever be re-derived from — which matters most for
+    exactly the meeting this button is normally pressed on, one whose transcript
+    the quality gate was not confident in.
+    """
+    kept = [p for p in (meeting.mic_path, meeting.system_path) if p.exists()]
+    lines = [f"{meeting.dir}  ->  {config.paths.meetings_dir}"]
+    if kept:
+        megabytes = sum(p.stat().st_size for p in kept) / 1e6
+        names = ", ".join(p.name for p in kept)
+        lines.append(
+            f"{names} ({megabytes:.1f} MB) will be deleted permanently. No WAV may "
+            f"ever enter the meetings folder, so releasing the audio is what "
+            f"promoting costs."
+        )
+        lines.append(
+            "transcript.md is all that will be left, and there will be nothing to "
+            "re-transcribe from. This cannot be undone."
+        )
+    else:
+        lines.append(
+            "No audio left to delete - this only moves the folder, which is the "
+            "retry for a promotion that failed to move it the first time."
+        )
+    if meeting.status is MeetingStatus.GATE_FAILED:
+        lines.append(
+            "The quality gate was not confident in this transcript. Promoting is "
+            "accepting it, so the meeting becomes `transcribed`."
+        )
+    elif meeting.transcription.get("audio_kept"):
+        lines.append(
+            "This audio was kept on request rather than by a failed gate - "
+            "[transcription].keep_audio - so a rerun would simply keep it again."
+        )
+    return "\n".join(lines)
+
+
+def promote_meeting(config: Config, meeting_id: str, *, release_audio: bool) -> Outcome:
     """`referat promote <id> [--release-audio]` — the off-ramp out of staging.
 
     A meeting is recorded in the staging folder and moves into the meetings
@@ -1830,14 +2037,22 @@ def run_promote(config: Config, meeting_id: str, *, release_audio: bool) -> int:
     thing in doubt — :attr:`referat.meeting.MeetingStatus.GATE_FAILED` is about
     the audio not having been trusted enough to delete, and this is somebody
     deciding otherwise.
+
+    **The only implementation**, since build step 23. It was `run_promote`'s
+    whole body until the command center needed the same off-ramp the sidebar had,
+    which is the ninth time a rule turned out to be sitting inside a `run_*` that
+    a second surface could not reach. `release_audio` stays a direction on one
+    function rather than becoming two, exactly as :func:`set_archived` and
+    :func:`apply_tags` are one each: the bare form is the same operation with the
+    deletion refused, and two copies would be two guards that could drift.
     """
-    meeting = _resolve_meeting(config, meeting_id, "promote")
+    meeting, why = resolve_meeting(config, meeting_id)
     if meeting is None:
-        return 1
+        return Outcome(False, why)
 
     if meeting.dir.parent == config.paths.meetings_dir:
-        print(f"{meeting.id} is already in {config.paths.meetings_dir}")
-        return 0
+        # Not a failure: this is the state the caller was asking for.
+        return Outcome(True, f"{meeting.id} is already in {config.paths.meetings_dir}")
 
     kept = [p for p in (meeting.mic_path, meeting.system_path) if p.exists()]
     if kept and not release_audio:
@@ -1851,16 +2066,16 @@ def run_promote(config: Config, meeting_id: str, *, release_audio: bool) -> int:
             if meeting.transcription.get("audio_kept")
             else f" - or `referat rerun {meeting.id}` to try for a transcript the gate accepts"
         )
-        print(
-            f"referat promote: {meeting.id} still holds {names} ({megabytes:.1f} MB), "
+        return Outcome(
+            False,
+            f"{meeting.id} still holds {names} ({megabytes:.1f} MB), "
             f"and audio may never enter {config.paths.meetings_dir}.\n"
-            f"                 pass --release-audio to delete "
+            f"pass --release-audio to delete "
             f"{'them' if len(kept) != 1 else 'it'} and promote anyway - the "
             f"transcript is all that would be left{retry}",
-            file=sys.stderr,
         )
-        return 1
 
+    said = []
     if kept:
         # Imported inside the branch, as `rerun` imports its own module: this is
         # the one place a light verb reaches into the transcription module, and
@@ -1871,33 +2086,39 @@ def run_promote(config: Config, meeting_id: str, *, release_audio: bool) -> int:
 
         freed = delete_audio(meeting)
         if freed < 0:
-            print(
-                f"referat promote: could not delete {meeting.id}'s audio; "
-                f"it stays in {meeting.dir.parent}",
-                file=sys.stderr,
+            return Outcome(
+                False,
+                f"could not delete {meeting.id}'s audio; it stays in {meeting.dir.parent}",
             )
-            return 1
-        print(f"deleted {', '.join(p.name for p in kept)} ({freed / 1e6:.1f} MB)")
+        said.append(f"deleted {', '.join(p.name for p in kept)} ({freed / 1e6:.1f} MB)")
 
     if meeting.status is MeetingStatus.GATE_FAILED:
         meeting.status = MeetingStatus.TRANSCRIBED
         meeting.save()
 
-    from referat.transcribe import promote_meeting
+    # Aliased, because this module's own guarded function is called
+    # `promote_meeting` too and this is the primitive underneath it — the same
+    # relation `apply_name` has to `name_speaker`. The alias says which is which
+    # at the one call site rather than leaving a reader to work it out.
+    from referat.transcribe import promote_meeting as move_out_of_staging
 
-    if not promote_meeting(meeting, config):
-        # `promote_meeting` never raises and logs why; a meeting that could not
-        # be moved is still a finished meeting with a transcript in it.
-        print(
-            f"referat promote: could not move {meeting.id} into "
-            f"{config.paths.meetings_dir}; see the log",
-            file=sys.stderr,
+    if not move_out_of_staging(meeting, config):
+        # It never raises and logs why; a meeting that could not be moved is
+        # still a finished meeting with a transcript in it.
+        return Outcome(
+            False,
+            f"could not move {meeting.id} into {config.paths.meetings_dir}; see the log",
         )
-        return 1
 
     index.write_index(config)
-    print(f"{meeting.id}: {meeting.status}, moved into {config.paths.meetings_dir}")
-    return 0
+    said.append(f"{meeting.id}: {meeting.status}, moved into {config.paths.meetings_dir}")
+    return Outcome(True, "\n".join(said))
+
+
+def run_promote(config: Config, meeting_id: str, *, release_audio: bool) -> int:
+    """`referat promote <id> [--release-audio]`. The rule is :func:`promote_meeting`'s."""
+    outcome = promote_meeting(config, meeting_id, release_audio=release_audio)
+    return _report(outcome, "promote")
 
 
 # --- referat reflow ---------------------------------------------------------
@@ -2348,8 +2569,8 @@ def run_delete(config: Config, meeting_id: str, *, assume_yes: bool) -> int:
       `referat label --forget <name>` is what is.
 
     Refuses while the meeting is live. `--yes` is not a convenience: the prompt
-    reads `input()` and answers *no* on EOF, so a caller with no terminal - the
-    extension - cannot confirm without it. See the `--forget` flag it copies.
+    reads `input()` and answers *no* on EOF, so a caller with no terminal cannot
+    confirm without it. See the `--forget` flag it copies.
     """
     meeting = _resolve_meeting(config, meeting_id, "delete")
     if meeting is None:
@@ -2448,14 +2669,14 @@ def delete_meeting(config: Config, meeting_id: str) -> Outcome:
 
 
 def status_document() -> dict[str, Any]:
-    """`referat status --json`: what the tray is doing, as the extension reads it.
+    """`referat status --json`: what the tray is doing, as a document.
 
     The fourth JSON document, after `list`, `label` and `project list`, and added
-    for the same reason as the first three: the status bar renders what Python
+    for the same reason as the first three: a status bar renders what Python
     already worked out rather than parsing prose written for a person. In
     particular `elapsed` is :func:`referat.meeting.format_duration`'s output, so
-    the extension never grows a second duration formatter — the mistake this
-    project has been pulled back from twice.
+    nothing outside Python ever grew a second duration formatter — the mistake
+    this project has been pulled back from twice.
 
     `stale` is the interesting field. A status file whose pid is gone is the
     trace a crashed or killed tray leaves behind, and it is reported rather than
@@ -2734,6 +2955,46 @@ NO_PRINTS = (
     "again, or `--forget` takes the name out of the transcripts too"
 )
 
+ONLY_ARCHIVED = (
+    "every project they are tagged with has been archived. Derived on every read "
+    "and stored nowhere - unarchive one and they are current again"
+)
+
+
+def _inactive(person: people_mod.Person, archived: set[str]) -> bool:
+    """Every project they are tagged with is archived, and nothing is unaccounted for.
+
+    **Three ways to be active, and all three are the same principle**: an unknown
+    must never be read as an ending, because calling somebody finished when they
+    are not is the error that costs something.
+
+    Somebody with **no tags at all** is active — appearing only in untagged
+    meetings means no project, and no project is not a finished one. An
+    **orphaned** tag is not archived either, so a person whose only tag belongs to
+    a deleted project stays active: that says the project record is gone, not that
+    the work stopped. And somebody seen in an **untagged meeting** is active even
+    when every tag they do carry is archived, which is why
+    :attr:`referat.people.Person.in_untagged` exists — `tags` alone cannot tell
+    that person from one seen only in the archived project, since an untagged
+    meeting contributes no id to compare. That meeting is work nobody has
+    labelled yet, and the untagged queue is a queue precisely because it gets
+    drained later.
+
+    Derived on every read and stored nowhere. There is no `inactive` key in any
+    file and there must not be: it would be a fifth thing to keep in step with
+    `meta.json`'s tags, the voices database and the transcripts, and the first
+    one to disagree with them. It is computed here rather than in
+    :func:`referat.people.directory` for a harder reason than tidiness — that
+    module deliberately never opens `projects.json`, and `people.gallery` is
+    built on it, so archivedness introduced there would reach the speaker
+    dialog's scoping, which is the one place it must never go. `in_untagged` is
+    the other half and lives *there* for the mirror-image reason: it is a fact
+    about `meta.json` alone, so it costs that module no new file.
+    """
+    if person.in_untagged or not person.tags:
+        return False
+    return all(pid in archived for pid in person.tags)
+
 
 def people_document(config: Config) -> dict[str, Any]:
     """`referat people --json`: everybody Referat knows a name for.
@@ -2755,12 +3016,25 @@ def people_document(config: Config) -> dict[str, Any]:
     `owner` crosses as a string, as it does in
     :func:`referat.label.label_document`: what the owner is *called* is Python's
     to know, and whether that name leads a list is the surface's to decide.
+
+    `archived` and each person's `inactive` are build step 21's, and they are
+    both here rather than one of them: the flag says which section somebody
+    belongs in, and the list is what lets the page mark *which* of their projects
+    is the archived one — which is what explains the section. Neither is stored
+    anywhere; see :func:`_inactive` for the three ways to be active.
     """
     from referat import people
 
+    # One loader, two views. `archived` is exported beside the map as well as
+    # folded into each person's `inactive`, because the page marks which of
+    # somebody's projects are archived — which is what explains the section they
+    # are sitting in — and because a document you can print is one you can test.
+    db = projects.ProjectsDB.load(config)
+    archived = db.archived_ids()
     return {
         "owner": config.speakers.owner_name.strip(),
-        "projects": projects.ProjectsDB.load(config).name_map(),
+        "projects": db.name_map(),
+        "archived": sorted(archived),
         "people": [
             {
                 "name": person.name,
@@ -2770,6 +3044,7 @@ def people_document(config: Config) -> dict[str, Any]:
                 "filed_from": [asdict(f) for f in person.filed_from],
                 "appears_in": list(person.appears_in),
                 "tags": list(person.tags),
+                "inactive": _inactive(person, archived),
             }
             for person in people.directory(config)
         ],
@@ -2821,6 +3096,13 @@ def run_people(config: Config, as_json: bool = False) -> int:
         # Named rather than counted, for the reason the hotword cap's drop list is:
         # this is the only place the two files are compared.
         print(f"{', '.join(drifted)}: {NO_PRINTS}")
+
+    # A footer rather than a sixth column, and rather than a second marker in the
+    # PROJECTS cell: that cell already has one vocabulary — a trailing `?` for an
+    # orphan — and a second would blunt the one that means something.
+    inactive = [p["name"] for p in entries if p["inactive"]]
+    if inactive:
+        print(f"{', '.join(inactive)}: {ONLY_ARCHIVED}")
     return 0
 
 

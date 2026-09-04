@@ -108,8 +108,8 @@ a stable state — any other `.pyd` can go next.
 
 It is fatal here rather than inconvenient. `ctypes` is imported by `status.py`,
 `tray.py` and `power.py`, and `cli.py` imports `status`, so **every** `referat`
-subcommand dies at import — `referat --version` included, and so does the tray,
-and so does the VS Code extension, which drives the same interpreter.
+subcommand dies at import — `referat --version` included — and so does the tray,
+and with it the command center, which lives in the tray's process.
 
 **The fix is a signed interpreter.** Signature is precisely what Smart App
 Control discriminates on, and the python.org builds are Authenticode-signed by
@@ -204,7 +204,7 @@ build that works today is not a build you can depend on tomorrow, in either
 direction, and nothing local tells you which way it has gone. The venv stays on
 the signed interpreter. `uv` working again means you *may* use `uv sync` for a
 bulk dependency install if you like it better than pip — it does not mean the
-tray, the CLI or the extension should route through anything unsigned again.
+tray, the CLI or the window should route through anything unsigned again.
 
 ### Does a signed Python fix this for good?
 
@@ -221,9 +221,8 @@ answer. Measured after the migration, with `Get-AuthenticodeSignature`:
 
 So the critical path — everything that must import before `referat --version`
 can print — is now entirely signed, and that is what changed. What was fatal
-before was that the *interpreter* was unsigned: one revoked `.pyd` took the CLI,
-the tray and the extension with it, and no amount of care elsewhere could route
-around it.
+before was that the *interpreter* was unsigned: one revoked `.pyd` took the CLI
+and the tray with it, and no amount of care elsewhere could route around it.
 
 **There is no way to make the rest signed.** PyPI wheels are not Authenticode
 signed, will not be, and there is no per-file allow to grant them. Three honest
@@ -770,100 +769,80 @@ claude --version
 `claude install` is the other option, and it is the one that does want a PATH
 change: it installs into `~\.local\bin`, which is not on the PATH here.
 
-**Do not hardcode the path into the extension's own copy.** It carries a version
-number and the old directory is deleted on the next extension update — a path
-that worked while step 10 was being built was gone two days later, when it was
-committed.
+**Do not hardcode the path into the Claude Code extension's own copy.** It
+carries a version number and the old directory is deleted on the next update — a
+path that worked while step 10 was being built was gone two days later, when it
+was committed. `referat/notes.py` re-resolves it at every spawn and honours the
+`.obsolete` file VS Code writes beside those folders, which is why it survives an
+update that would break a stored path.
 
 ---
 
-## 12. The VS Code extension
+## 12. The command center
 
-**This extension is in maintenance.** Build step 20 made a command center — a
-desktop window the tray app opens from its own icon — the primary UI, and this
-extension is retired once that window reaches parity with it. The window's
-read-only half exists as of 2026-09-02: the meetings list, the transcript beside
-its notes, and recording controls. Tagging and speaker labeling are still only
-here, which is why nothing below has been removed and the install is still worth
-doing. When the window has those too, this section is replaced rather than
-added to.
+**The window is the UI.** The tray icon opens it — left-click, or *Open command
+center* on its menu — and closing it hides it back to the tray rather than
+quitting, because that process is the recorder. There is nothing to install: it
+is PySide6, it comes with the base dependencies, and it lives in the same process
+as the hotkeys.
 
-Build it and install it:
+It opens on a **dashboard**, because the question you open it to ask is whether
+anything is waiting for you rather than what happened in March. Recent meetings
+and your open action items on the left; on the right, today's day summary and
+three queues in the order the work is done in — meetings with no project,
+speakers nobody has named, meetings with no notes. Every row is a link that opens
+the meeting on the tab where the button that acts on it lives; nothing on the
+dashboard writes anything.
+
+The other tabs:
+
+| Tab | What it is for |
+| --- | --- |
+| **Meetings** | The inventory, with an *Untagged only* toggle and a search box, and the transcript beside its notes. A `[HH:MM:SS]` in the notes scrolls the transcript there; a speaker's name, and any `[[Wikilink]]`, opens that person. |
+| **Actions** | One owner's action items at a time, parsed out of the notes. Ticking, editing and dropping are recorded in `actions.json` and never in `notes.md`. |
+| **Projects** | Create, rename, describe, archive and delete a project, and edit its glossary — which is hotword management, so the merged list Whisper will be handed sits underneath, read-only, with whatever the 223-token cap dropped named. |
+| **People** | A person: their voiceprints, where each was filed from, the meetings their name appears in and the projects those carry. *Forget this person* is the one thing this page writes. |
+| **Activity** | What is running now, and the live rotating log. *Referat only* hides library chatter. |
+
+The buttons on the Meetings tab, left to right, are the order a meeting moves
+through: **Re-transcribe…** and **Promote…** act on the *audio* and are disabled
+for almost every meeting, because the audio is normally gone; then **Tags…**,
+**Speakers…**, **Generate notes…**, **Notes for all…**, and **Delete…** on its own
+at the end.
+
+**Re-transcribe…** runs the pipeline again from the WAVs a meeting kept. It runs
+on the tray's own transcription thread, so the progress appears in the status bar
+and on the Activity tab and nothing blocks; the current `transcript.md` stays
+until the new one is written whole. Diarization renumbers from scratch, so the
+speakers are looked up again in the known-voices database — a voice whose print
+no longer matches comes back a number.
+
+**Promote…** is the off-ramp for a meeting stuck in staging: one whose transcript
+the quality gate refused, or one `[transcription].keep_audio` kept on purpose.
+Either way it is irreversible and the modal says exactly what goes: the WAVs are
+deleted, the folder moves into `meetings_dir`, and `transcript.md` is all that is
+left — no WAV may ever be written into a synced folder, which is what makes
+releasing the audio the price of promoting. Use it when the transcript is good
+enough despite the gate; use *Re-transcribe…* when it is not. `referat promote
+<id> --release-audio` is the same thing at the prompt.
+
+Nothing here is a second implementation. Every page calls the same functions
+`referat list`, `referat show`, `referat label` and the rest call, so a refusal
+you see in a dialog is the sentence the CLI would have printed, word for word,
+and anything that looks wrong can be reproduced at a prompt.
+
+### There used to be a VS Code extension here
+
+`referat-vscode/` was the primary UI from build step 15 until step 20, and was
+**deleted at step 23** — the window can now re-transcribe a meeting and release a
+staged one's audio, which were the last two things the sidebar could do and it
+could not. If you are coming back to a machine that still has it installed:
 
 ```powershell
-cd referat-vscode
-npm install
-npm run package                                    # referat-vscode-0.2.0.vsix
-code --install-extension referat-vscode-0.2.0.vsix
+code --uninstall-extension niklas-elmqvist.referat-vscode
 ```
 
-`npm run package` compiles first — `vscode:prepublish` runs the bundler — so the
-`.vsix` can never be built around a stale `dist/extension.js`. It is nine files
-and about 21 KB: the bundle, `media/`, the manifest, the README and the LICENSE.
-`code --uninstall-extension niklas-elmqvist.referat-vscode` takes it off again.
-
-**Set `referat.repoRoot` after installing.** This is the one thing that changes
-when the extension stops being run from source. Left empty, it looks through the
-open workspace folders for the repository and, failing that, falls back to the
-checkout its own bundle sits inside — which is how F5 works in a development host
-opened on no folder at all. Installed from a `.vsix` that fallback lands in
-`~\.vscode\extensions\niklas-elmqvist.referat-vscode-0.2.0` and finds no
-`pyproject.toml`, so a window without the repository open reports the repository
-missing until the setting is filled in. The window opened on the *meetings*
-folder is exactly that window, and it is the normal one.
-
-Restart VS Code and there is a **Referat** icon in the activity bar: your meetings,
-newest first, one row each with its title, duration, project tags and lifecycle
-state, and buttons for *Transcript*, *Notes*, *Generate notes*, *Re-transcribe*
-and *Tags…*. A meeting with speakers nobody has named yet has a **Speakers**
-button that expands in place, plays their snippets and takes a name. **Untagged
-only** at the top leaves the meetings that still need a project, and the view's
-**Projects** button creates, renames and deletes them.
-
-A meeting whose transcript the quality gate refused shows `gate_failed` and an
-**Accept & delete audio** button. That one is irreversible and says so in a
-modal: `mic.wav` and `system.wav` are deleted for good and the meeting moves into
-the meetings folder, because no WAV may ever be written there. Use it when the
-transcript is good enough despite the gate; use *Re-transcribe* when it is not.
-
-A status bar item on the left says what the tray is doing. It appears once you
-have opened the sidebar in that window, and it does not count up second by
-second — it re-reads `referat status` when the tray writes its status file, and
-every 30 seconds otherwise.
-
-Two settings, both optional:
-
-| Setting | Leave it empty and… |
-| --- | --- |
-| `referat.repoRoot` | it looks through the open workspace folders for the one holding `pyproject.toml` and `referat/cli.py`, then at the checkout its own bundle sits inside. **Installed from a `.vsix` that second half cannot answer**, so set it in any window that does not have the repository open. |
-| `referat.claudeBinary` | it asks VS Code where it installed the Claude Code extension and uses the binary inside it, falling back to `PATH`. **On this machine `claude` is not on `PATH` at all** — `where claude` finds nothing — so the extension lookup is the one that actually answers. It happens fresh on every run, so an update that moves the binary cannot break it. |
-
-There is deliberately no meetings-folder setting: the extension reads
-`[paths].meetings_dir` out of the repository's `config.toml`, which is the same
-file the tray records against, so the two cannot disagree about where meetings
-live.
-
-Everything it shows comes from `referat list --json` and `referat status --json`,
-and every change it makes is a `referat` verb — `label --speaker --name`, `tag`,
-`untag`, `project`, `state`, `promote` — so if the sidebar looks wrong, run those
-commands yourself and you will see exactly what it saw. A refusal it shows you is
-the sentence the CLI printed, passed through unedited.
-**Referat > Show Output** has every command it ran, with its full command line.
-
-It runs them through the venv's own interpreter,
-`.venv\Scripts\python.exe -m referat.cli`, with the working directory at the
-repository — the fallback from section 2, for the same reason: `uv` does not run
-on this machine. So if the sidebar is empty and an error appears, the usual causes
-are a `referat.repoRoot` pointing somewhere that is not the repository, or a
-`.venv` that Dropbox has eaten again (section 2 has the repair).
-
-To work on the extension rather than use it, press **F5** in the repository:
-that starts an Extension Development Host running it from source, with esbuild
-watching and source maps on. The packaged build deliberately has none — a source
-map carries the whole TypeScript inside it, and the point of bundling was that
-the `.vsix` is one JavaScript file.
-
-Updating it is the same three commands with the version bumped in
-`referat-vscode/package.json` first. Nothing bumps it for you, and
-`code --install-extension` on an unchanged version number does reinstall, so the
-version is a label rather than a check.
+Nothing else has to be undone. It had two settings, `referat.repoRoot` and
+`referat.claudeBinary`, and both are inert once it is gone; there was never a
+meetings-folder setting, deliberately, because `[paths].meetings_dir` in
+`config.toml` is the one place that says where meetings live.

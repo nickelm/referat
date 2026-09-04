@@ -100,6 +100,20 @@ class Person:
     tags: list[str] = field(default_factory=list)
     in_database: bool = True
     is_owner: bool = False
+    in_untagged: bool = False
+    """Whether any meeting they are seen in carries no tags at all.
+
+    `tags` cannot say this: an untagged meeting contributes no id, so somebody
+    seen in one archived project and one untagged meeting has exactly the same
+    `tags` as somebody seen only in the archived one. They are not the same
+    person to a reader, and :func:`referat.cli._inactive` is what needs to tell
+    them apart — an untagged meeting is work nobody has *labelled* yet, which is
+    an unknown, and an unknown must never be read as an ending.
+
+    A meeting that has since been deleted does not count: it is absent from the
+    tag map entirely, and reading that absence as "no tags" would make deleting a
+    meeting quietly reactivate everybody who was in it.
+    """
 
 
 def directory(config: Config) -> list[Person]:
@@ -145,6 +159,10 @@ def directory(config: Config) -> list[Person]:
         person.is_owner = bool(owner) and person.name == owner
         seen = {f.meeting for f in person.filed_from} | set(person.appears_in)
         person.tags = sorted({tag for mid in seen for tag in tags_of.get(mid, ())})
+        # `mid in tags_of` first, deliberately: a meeting that no longer exists is
+        # missing from the map rather than empty in it, and treating the two the
+        # same would make a deletion read as an untagged meeting.
+        person.in_untagged = any(mid in tags_of and not tags_of[mid] for mid in seen)
 
     return [found[name] for name in sorted(found)]
 

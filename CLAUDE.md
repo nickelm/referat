@@ -18,8 +18,9 @@ A personal system-tray application that records meetings (in person and over
 Zoom/Teams), transcribes them offline with speaker diarization, and writes
 Markdown transcripts into a meetings folder. Its graphical surfaces are the tray
 icon and a **command center** the tray owns and opens — **no web server and no
-Electron, ever**, a rule stated exactly in Conventions — plus a VS Code extension
-that used to be the primary UI and is now in maintenance. There is **no automatic
+Electron, ever**, a rule stated exactly in Conventions. A VS Code extension was
+the primary UI from step 15 to step 20 and was deleted at step 23; there is one
+graphical surface again. There is **no automatic
 LLM cleanup pass**: notes are generated lazily by the user, through a `/cleanup`
 slash command run by Claude Code in the meetings folder — interactively, or
 headless via `claude -p` from the command center. Notes for a meeting tagged with
@@ -268,6 +269,66 @@ not zero. This is the same shape of lesson as the Smart App Control paragraphs
 below — a documented intention that the code did not deliver — and the general
 form is that *a comment claiming a resource was released is worth measuring once*.
 
+**The language is chosen per channel, out of a named set, and that set is the
+whole design.** `[transcription].languages` is one key with three meanings: one
+code pins it and asks Whisper nothing, two or more run a detection pass per
+channel and take the best *of these*, `[]` is bare autodetect. It is `["en",
+"sv"]` here since 2026-09-04, when the first Swedish meeting met a pipeline that
+had pinned English since step 1.
+
+**The restriction is applied to the ranking and not to the decoder**, because
+faster-whisper has no argument for "one of these" — `language` takes exactly one
+code. So `transcribe.detect_language` runs the pass for its
+`all_language_probs`, reads the allowed codes out of that ranking, and hands the
+winner back as a pin; Whisper is never told Norwegian was a candidate. That is
+worth the code because a language is chosen **once per channel** and every
+segment is decoded under it: Swedish sits among Norwegian, Danish, German and
+Dutch, so an unrestricted guess that lands one country over does not cost a word,
+it costs the half hour. A channel scoring `no` at 0.90 against `sv` at 0.05 is
+still transcribed as Swedish, which is the entire point of naming the set.
+
+Five windows spread across the channel rather than faster-whisper's one at the
+front, which is the wrong end of a meeting — somebody sitting down, and on an
+in-person loopback, silence. **Per channel and never per segment**: the
+microphone is the room and the loopback is the far end, while `multilingual=True`
+re-detects on every segment and turns one wrong guess per channel into one wrong
+guess anywhere. Every failure degrades to unrestricted autodetect, the rule
+diarization runs under. Unknown codes are dropped with a warning — Swedish is
+`sv` and not `se`, and a typo that quietly narrowed the set to nothing would come
+back as bare autodetect, which is this feature's own failure mode wearing the
+face of the fix. Membership is checked against the loaded model in
+`transcribe.py` and never in `config.py`, which must not import faster-whisper
+because `referat config` runs in the base install.
+
+**Each window is decoded without the previous one's text, and that is a
+correction rather than a default.** faster-whisper conditions every 30-second
+window on the text of the one before it; on 2026-09-04 that cost
+`2026-09-04_1001` **twelve of its thirty-two minutes**. Twenty-six lines of
+`Ljusen.` were handed forward as context, found plausible, and became *Tack för
+att du har tittat på den här videon!* -- YouTube subtitle boilerplate, Whisper's
+best-known Swedish hallucination -- repeated once every thirty seconds until
+00:24:50. **A repetition loop is not a bad window, it is a bad window feeding
+itself**, and `condition_on_previous_text` is the feed. The stretch decoded in
+isolation gives 2128 words of ordinary conversation, and it measures -33.8 dBFS
+against -34.0 for the rest of the meeting: not the silence case anybody would
+forgive, but two people talking, replaced with one sentence.
+
+Referat gives up less than most by turning it off. What conditioning buys is
+prose coherence across a window boundary, and a transcript here is diarized,
+per-segment, relabeled, merged with a second channel and read beside timestamps
+rather than as paragraphs; the vocabulary priming is already bought by the
+hotword list, which acts on **every** window rather than only after somebody has
+already said the word. It is not a knob, because there is no meeting for which
+the loop is the better outcome.
+
+**The quality gate is the backstop and was never the fix**, and it is the only
+reason this was found: `compression_ratio` 8.11 against a 2.4 ceiling refused the
+transcript, kept the audio and made the repair possible. It caught this one by
+luck of magnitude, though -- the gate compares the worst segment's repetition
+against a ceiling and never compares transcribed speech against `voiced_seconds`,
+so 1874s of segments over 1869s of voiced audio looked perfect while a third of
+it was one sentence.
+
 **Hotwords are the only correction that happens before the transcript exists.**
 Every transcription is handed one global list through faster-whisper's
 `hotwords`, so a name the model has been told about is heard right the first
@@ -495,9 +556,9 @@ not by whoever built it, so the audit is `Get-AuthenticodeSignature` over every
 re-running after a PySide6 upgrade, because nothing guarantees the next release
 is signed the way this one is.
 
-**CLI** (`referat`), for the user, for Claude Code and — since step 11 — for the
-VS Code extension, whose documents the command center reads by calling the same
-functions rather than by spawning: `config`, `list`, `show <id>`,
+**CLI** (`referat`), for the user, for Claude Code, and for the command center,
+which reads its documents by calling the same functions rather than by spawning:
+`config`, `list`, `show <id>`,
 `transcript <id>`, `rerun <id>`,
 `label <id>`, `status`,
 `devices`, `hotwords`, `people`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
@@ -508,10 +569,14 @@ functions rather than by spawning: `config`, `list`, `show <id>`,
 digests at step 13 — and which are deliberately absent from the parser rather
 than present and answering "not built yet".
 
-The project verbs are `add`, `rename`, `describe`, `glossary`, `rm` and `list`,
-and **each mutating one is a line of dispatch onto a guarded function** —
-`create_project`, `rename_project`, `set_description`, `set_glossary`,
-`remove_project` — which the command center's projects page calls too. `describe`
+The project verbs are `add`, `rename`, `describe`, `glossary`, `archive`,
+`unarchive`, `rm` and `list`, and **each mutating one is a line of dispatch onto
+a guarded function** — `create_project`, `rename_project`, `set_description`,
+`set_glossary`, `set_archived`, `remove_project` — which the command center's
+projects page calls too. `archive` and `unarchive` are **one** guarded function
+taking a direction rather than two, which is what `apply_tags` and
+`set_action_done` already are: two would be two copies of the same guard, mutate,
+save and report differing in one boolean. `describe`
 and `glossary` arrived at phase 4 as its prerequisite: the CLI owns every
 mutation, so nothing could edit a glossary from a window until something could
 edit one at all. `glossary --add` and `--remove` are ergonomics over a
@@ -591,21 +656,25 @@ files and prior versions on its servers for weeks — the same fact that put
 recording and transcription in a staging folder — while a staged one is; and the
 **voiceprints** the meeting contributed stay in `.voices/`, because deleting a
 meeting is not deleting a person and `label --forget <name>` is what is. `--yes`
-is not a convenience: the prompt reads `input()` and answers *no* on EOF, so the
-extension could not confirm without it, exactly as with `label --forget`.
+is not a convenience: the prompt reads `input()` and answers *no* on EOF, so a
+caller with no terminal cannot confirm without it, exactly as with `label
+--forget`.
 
 **The CLI owns every mutation, and is the only implementation of any of this.**
 The projects file, the tag logic, the lifecycle vocabulary and the rules about
-what a name may be live in Python exactly once. The VS Code extension shells out
-to them because it is TypeScript and has no other way in; the tray and the
-command center import them, because they are one Python process inside this
-package already and spawning a subprocess of its own CLI would buy nothing but an
-interpreter start per refresh. The rule is one implementation, not one process
+what a name may be live in Python exactly once. The tray and the command center
+import them, because they are one Python process inside this package already and
+spawning a subprocess of its own CLI would buy nothing but an interpreter start
+per refresh; the deleted VS Code extension shelled out to the same commands
+because it was TypeScript and had no other way in, which is the same rule reached
+the other way. The rule is one implementation, not one process
 boundary — worth saying in both directions, since a later reader could "fix" it
 either way.
 
-**Ten commands answer in JSON**, and the first five only because the extension
-asked. Step 20 added `transcript <id> --json` and `show <id> --json`, phase
+**Ten commands answer in JSON**, and the first five only because the VS Code
+extension asked. They outlived it, on the rule step 23 wrote down: a document you
+can print is a document you can test, and they are what anything scripting this
+from outside Python reads. Step 20 added `transcript <id> --json` and `show <id> --json`, phase
 3 added the `gallery` field on `label <id> --json`, phase 4 added `hotwords
 --json`, and phase 5 added `people
 --json` and the `people` field on `transcript <id> --json`; they exist even
@@ -621,17 +690,17 @@ project id to display name; `referat project list --json` is every project with
 its docs, its glossary and how many meetings carry it, plus the orphaned ids no
 project answers to; `referat label <id> --json` is one meeting's unnamed speakers
 with their snippet paths, sample lines and the **channel** each arrived on, plus
-the owner's name at document level — the two fields that let the sidebar say
-*this voice came out of your own microphone* and lead the chips with the owner,
+the owner's name at document level — the two fields that let a labeling surface
+say *this voice came out of your own microphone* and lead the chips with the owner,
 which is a hint and never a name applied on its own, and since phase 3 a
 **`gallery`** of `scoped`, `rest` and the `tags` that scoped them — the last of
 those so a surface can say *this meeting has no project, so every name is
 offered* as something it was told rather than something it inferred from a short
 list; and `referat status --json`, added at
 step 15 for the sidebar's status bar item, is what the tray is doing — with
-`elapsed` as `format_duration`'s own output, so nothing in TypeScript formats a
-duration, and a `stale` flag that tells a tray which died apart from one that
-never ran. The fifth is `referat project add <name> --json`, which emits the
+`elapsed` as `format_duration`'s own output, so nothing outside Python ever grew a
+second duration formatter, and a `stale` flag that tells a tray which died apart
+from one that never ran. The fifth is `referat project add <name> --json`, which emits the
 project it just created: an id is `slugify` plus a `-2` collision suffix, so a
 caller cannot work it out, and looking it back out of `project list` by display
 name is wrong the moment two projects share one. The sixth and seventh arrived
@@ -660,11 +729,10 @@ appears in and the projects those carry. **Names, counts and meeting ids and
 nothing else** — no embedding, and not even the path the database lives at. That
 is not a formality about a listing verb; it is the whole reason the rule is
 restated wherever a person is the subject. All nine are the same functions the
-human-readable forms call, so the table, the dashboard and the sidebar cannot
+human-readable forms call, so the table, the dashboard and the window cannot
 drift apart — and the id-to-name map inside `list --json` comes out of the very
-`ProjectsDB.name_map` that `project list --json` hands out, so one subprocess
-feeds the whole sidebar and the join between a tag and its name cannot drift
-either. The tables themselves are unchanged and stay the default: `referat show`
+`ProjectsDB.name_map` that `project list --json` hands out, so the join between a
+tag and its name cannot drift either. The tables themselves are unchanged and stay the default: `referat show`
 prints the record for a person, and `referat transcript` prints **who spoke, how
 often and what share of the words** rather than the transcript itself — which is
 a file you can already open, is the document here most likely to hold a character
@@ -740,8 +808,9 @@ cannot see across one, and two large-v3 models do not fit in 12 GB of VRAM.
 
 **Steps 10, 11, 15 and 12 are built**, in that order — 12 was re-sequenced to run
 after 15 because it would otherwise have packaged the TreeView step 15 deleted.
-The scaffold, the `/cleanup` prompt, `referat index` and the extension
-exist and have been driven on a real transcript. What is still open is the tuning
+The scaffold, the `/cleanup` prompt and `referat index` exist and have been
+driven on real transcripts; the extension built at 11 and packaged at 12 was
+deleted at step 23. What is still open is the tuning
 the gate was really about: the prompt has met one meeting, and one held in person
 at that, so it has never been read against a call with diarized speakers in it.
 
@@ -823,7 +892,7 @@ widgets**, and the toolkit half of that was decided by measurement (see the Smar
 App Control paragraphs above) while the widgets half was decided in phase 1
 against the criteria step 20 wrote down: `QTextBrowser` renders Markdown, holds
 anchors and answers a custom URL scheme, which is every criterion this UI has,
-and the one argument for QtWebEngine — reusing `referat-vscode/media/sidebar.js`
+and the one argument for QtWebEngine — reusing the VS Code sidebar's own page
 — is an argument for keeping the three-hundred-pixel column this step exists to
 escape. Qt owns the tray icon too: `QSystemTrayIcon` replaces `pystray`, so one
 process holds the icon, the hotkeys, the recorder and the window, with one event
@@ -993,19 +1062,32 @@ reads `input()` and answers no on EOF, which is a question asked of a terminal,
 and a window asks the same question with a modal. Neither asks it twice.
 
 **The window writes notes and deletes meetings, from 2026-09-03.** Those were
-the two things the sidebar could do and the command center could not, so anybody
-living in the window had to keep the extension open for them — which is the
+two of the four things the sidebar could do and the command center could not, so
+anybody living in the window had to keep the extension open for them — which is
+the
 opposite of what a primary UI is. *Generate notes…* drives `cli.write_notes` and
 *Delete…* drives `cli.delete_meeting`, both new guarded functions over machinery
 that already existed inside `run_notes`' and `run_delete`'s printing. The same
 correction as `apply_tags`, `name_speaker`, the five project functions and
-`forget_person`; that makes seven, and the shape is settled — **a `run_*` that
+`forget_person`; step 23 added `cli.promote_meeting` for the ninth time. The
+shape is settled — **a `run_*` that
 holds a rule is a `run_*` a second surface cannot use.**
 
 Notes run **on a thread**, because a cleanup pass takes a minute or two and this
 process owns the recorder: blocking the GUI thread here would freeze the window
 somebody stops a meeting from. What comes back comes back through `App.notify`,
 which is now the safe crossing.
+
+**The window re-transcribes and promotes, from 2026-09-04.** Those were the other
+two, and building them is what let the extension be deleted at step 23 — the
+audit of what parity meant is in that section below. *Re-transcribe…* and
+*Promote…* lead the action row, **before** *Tags…*, because they come first in a
+meeting's life: everything else there acts on a transcript and these two act on
+the audio it was made from. Both are disabled for almost every meeting, which is
+honest rather than untidy — the audio is normally gone, and a meeting that still
+has it is a meeting waiting on exactly one of those two decisions. *Promote…* is
+enabled on `staged` and not on `audio == "kept"`, which is the wider of the two
+and covers a promotion that failed to move the folder as well as a failed gate.
 
 **`referat notes <id>` is that verb at the prompt, and `referat/notes.py` is the
 only implementation.** It spawns the official `claude` binary with `-p "/cleanup
@@ -1020,14 +1102,14 @@ surface sequences them itself. A pass that wrote the notes but could not record
 the state is reported as a partial success, not a failure: `notes.md` is on
 disk, and calling that a failure sends somebody to fix the wrong thing.
 
-**Finding `claude` from Python is not the same problem the extension solved.**
-The extension asks VS Code, which follows its own extensions; Python has no VS
+**Finding `claude` from Python was not the same problem the VS Code extension
+solved.** It asked VS Code, which follows its own extensions; Python has no VS
 Code to ask, so `notes.resolve_claude` reads `~/.vscode/extensions` and **honours
 the `.obsolete` file VS Code writes there** — on 2026-09-03 that listed 2.1.252
 as obsolete beside a live 2.1.258, so taking the highest version number would
 have picked a directory about to be deleted. Then `PATH`. Resolved at spawn time
-and **never persisted**, for the reason the extension never persists it: a stored
-absolute path is still there a week later pointing at nothing.
+and **never persisted**, for the reason the extension never persisted it: a
+stored absolute path is still there a week later pointing at nothing.
 `[cleanup].claude_binary` is the escape hatch and is **not a credential** — no
 API key belongs in `config.toml`, and `claude` owns all authentication.
 
@@ -1047,12 +1129,14 @@ already in the baseline when the diff ran, landed in neither `added` nor
 untagged. `checked` is also the only truth the dialog has — filtering hides rows
 rather than rebuilding, creating appends one, and nothing reads the check states
 back in bulk, because rebuilding a checkable list and then restoring its states
-races the widget. The reopen-the-picker workaround the extension needs has no
-counterpart in Qt and is deliberately not copied.
+races the widget. The reopen-the-picker workaround the extension needed has no
+counterpart in Qt and must not be reinvented.
 
 **A refusal reaches the window as `cli.Outcome`, and the message is
-unprefixed.** That is the in-process form of what `cli.ts`'s `mutate` gives the
-extension — the sentence its rule's owner wrote, never a paraphrase — and the
+unprefixed.** The sentence its rule's owner wrote, never a paraphrase — which is
+what the deleted extension got by reading the CLI's stderr and could get no other
+way, and which this gets in process. The guarantee is the part that mattered
+rather than the mechanism, and the
 prefix is left to the caller because it is direction-dependent: `referat tag`
 says one thing, `referat untag` another, and a picker calling both directions at
 once has no command to name. `meeting.resolve_meeting` already returns its
@@ -1188,7 +1272,8 @@ blank it. The cross-link resolves to the **nearest entry at or before** the
 target, because a note's timestamp is approximate and an exact hit would usually
 miss — leaving a click that visibly did nothing. Every node is escaped: the text
 is whatever Whisper heard and the label is whatever somebody typed into `referat
-label`, which is the same reason the sidebar builds its nodes with `textContent`.
+label`, which is the same reason the VS Code sidebar built its nodes with
+`textContent`.
 
 **A `[[Wikilink]]` renders as a bold link with the brackets taken off**, and the
 argument that used to keep them was about the wrong file. It was that `[[Anna]]`
@@ -1383,11 +1468,12 @@ functions the CLI calls — `cli.list_document`, `cli.show_document`,
 `cli.project_document`, `cli.hotwords_document`, `cli.people_document`,
 `cli.apply_tags`,
 `cli.create_project`, `cli.rename_project`, `cli.set_description`,
-`cli.set_glossary`, `cli.remove_project`, `cli.write_notes`,
+`cli.set_glossary`, `cli.set_archived`, `cli.remove_project`, `cli.write_notes`,
 `cli.write_day_summary`, `cli.actions_document`, `cli.actions_markdown`,
 `cli.select_actions`, `cli.owner_counts`, `cli.is_mine`, `cli.set_action_done`,
 `cli.dismiss_action`, `cli.edit_action`, `cli.prune_actions`,
-`cli.delete_meeting`, `cli.delete_warning`, `audio_state`,
+`cli.delete_meeting`, `cli.delete_warning`, `cli.promote_meeting`,
+`cli.promote_warning`, `audio_state`,
 `meeting.format_duration`, `index.meeting_title`, `voices.unknown_speakers`,
 `label.label_document`, `label.name_speaker`, `label.forget_person` — and spawning a subprocess of its
 own CLI would buy nothing
@@ -1407,139 +1493,81 @@ while the reserved-name rule, the meeting lookup, the refusal to rename somebody
 who already has a name and the dashboard regeneration are the operation, and they
 lived inside `run_apply` where only the CLI could reach them. The rule is one implementation, not one process boundary, which is
 the same sentence said above about the tray. The `--json` documents stay and grow
-anyway: they are the shape both surfaces agree on, the extension still reads them
-while it lives, and a document you can print is a document you can test. **The
+anyway: they are the shape a surface and the CLI agree on, and a document you can
+print is a document you can test — which is why they survived the reader they were
+written for. **The
 window may not read `meta.json`, `voices.json` or `projects.json` itself**, and
 the day it does is the day this stops being one implementation.
 
-**The VS Code extension is in maintenance**, and is deleted once the command
-center reaches parity with it. Step 11 built it as a meetings TreeView; **step 15
-replaced that with a sidebar webview** — one row per meeting, reverse
-chronological, carrying date, duration, project tag chips and a strip rendering
-the lifecycle state, with project CRUD, the tag picker and speaker labeling all
-inside it, and a status bar item for ambient state. It was the primary UI from
-step 15 until step 20. Everything it does keeps working and keeps being fixed
-when it breaks; nothing new is added to it, and it is not packaged again. Because
-it is TypeScript it shells out where the command center imports — the same rule
-reached two ways.
+**The VS Code extension was deleted at build step 23**, on 2026-09-04. Step 11
+built it as a meetings TreeView, step 15 replaced that with a sidebar webview and
+made it the primary UI, step 20 took that title away and put it into maintenance
+on one written condition — *deleted once the command center reaches parity with
+it* — and step 23 is that condition being met and then acted on. Nothing about it
+runs, nothing in `pyproject.toml` ever mentioned it, and `referat-vscode/`,
+`.vscode/launch.json` and `.vscode/tasks.json` are gone.
 
-**The rows are grouped by project**, one collapsible section per project ordered
-by its most recent meeting, then one per orphaned tag id, then *Untagged* last —
-which is the queue. A meeting carrying two tags is drawn under **both**, because a
-project is a label rather than a container; the flat list it replaced does not
-survive a year of meetings. Grouping, the search box beside the *Untagged only*
-toggle, and the newest-first order are all **presentation and live in the page**:
-`referat list` stays oldest-first and learns nothing about any of it. Which
-sections are folded is the one piece of page state kept across a reload, through
-`vscode.setState` — expanded *rows* are not, because refilling one costs an
-interpreter start.
+**Parity was audited against its own `runAction` switch**, not asserted. Ten row
+actions; eight already had a home here — the viewer for both documents, the tag
+picker, the speaker dialog, *Generate notes…*, *Delete…*, the recorder buttons
+and the activity strip in place of its status bar item, the Activity tab's log
+pane in place of *Show Output*, and *Open meetings folder* already on the tray
+menu. The two that did not were **re-transcribing a meeting** and the
+**gate-failed off-ramp**, and both are about the *audio* rather than about a
+transcript, which is why they were last: everything else in this window acts on
+`transcript.md`, `notes.md` or `meta.json`, and those two act on the one part of
+a meeting that cannot be regenerated. They are *Re-transcribe…* and *Promote…*.
 
-**The page renders itself; the host only feeds it.** `sidebar.ts` sets
-`webview.html` once and thereafter posts documents, because re-assigning the HTML
-on every refresh would collapse an expanded row and stop a snippet mid-playback —
-and transcription rewrites `meta.json` several times a meeting. The page builds
-every node with `textContent` rather than `innerHTML`: a meeting title comes out
-of somebody's `notes.md` and a speaker's line out of a transcript, and neither is
-markup.
+**A rerun from the window runs on the tray's own thread and not through a `cli`
+function**, which is the one place this arrangement's usual answer is the wrong
+one. What a rerun costs is the state machine, the job count and a daemon thread,
+and a window may touch none of the three — so `App.rerun_meeting` is the
+operation and `App._queue_transcription` is the one path onto the GPU that
+`_finish_meeting`, `_resume` and it all share. The extension opened a *terminal*
+for this, which was right for a different process and would be absurd from the
+window that owns the job.
 
-The one row that needs an action rather than a label is a **gate-failed**
-meeting, which is stuck in staging because `promote_meeting` will not move a
-folder that still holds WAVs. Its off-ramp cannot promote the meeting with its
-audio — no WAV may ever reach the meetings folder — so *accept* means delete the
-WAVs and then promote, irreversibly, behind a modal that says exactly that. The
-verb is `referat promote <id> --release-audio`; without the flag `promote`
-refuses and names the files, which is the whole safety of the bare form, and the
-bare form is the retry for a promotion that failed to move the folder. Accepting
-the transcript is what the flag means, so the meeting also stops being
-`gate_failed` and becomes `transcribed` — the transcript was never what was in
-doubt. The deletion itself is `transcribe.release_audio`, split out of
-`release_audio_if_clean` so that the gate and the act are separable and
-`audio_released` means one thing whoever wrote it.
+**`rerun.check` is the split, and where the line falls is the point.** It holds
+the three questions about the *meeting* — it exists, its `meta.json` reads, its
+audio is on disk — while `rerun.run` keeps the one about another *process*:
+`busy_tray`, which exists because `transcribe._RUN_LOCK` serializes jobs inside
+one process and cannot see across one, and two large-v3 models do not fit in 12
+GB. The command center **is** the tray's process, where that lock serializes a
+queued rerun by itself, so asking the GPU guard there would refuse the one caller
+it was never about.
 
-Every row also carries a **Delete…** button, last and styled as danger, driving
-`referat delete <id> --yes` behind a modal. The modal is the one place this
-extension says something Python also says — it is shown *before* the command runs,
-so there is no output yet to quote — and what it says is the pair of caveats from
-the CLI: whether this deletion is real depends on whether the folder is synced,
-and the voiceprints stay. A refusal still comes back through `mutate` unedited.
+**`cli.promote_meeting` is the ninth guarded function**, and `cli.promote_warning`
+beside it is `delete_warning`'s counterpart. `release_audio` stays a *direction*
+on one function rather than becoming two, as `set_archived` and `apply_tags`
+already are: the bare form is the same operation with the deletion refused. What
+the warning has to say that `delete_warning` does not is that promoting is
+irreversible in a way deleting a whole meeting is **not** — deleting takes the
+transcript with the audio, and this keeps the transcript and destroys the only
+material it could ever be re-derived from, on exactly the meeting whose transcript
+the gate was not confident in.
 
-**The extension reimplements nothing.** It reads meetings from `referat list
---json` and makes every change through a verb: `label <id> --speaker <s> --name
-<n>` and `list --json` were added for it at step 11, and step 15 gave it `tag`,
-`untag`, `project add|rename|rm`, `state` and `promote --release-audio` to drive
-as well. The two meeting roots, `format_duration`, `audio_state`,
-`index.meeting_title`, `voices.unknown_speakers`, `voices.name_complaint`,
-`projects.name_complaint`, `projects.slugify`, the lifecycle vocabulary and the
-whole of `label.apply_name` stay in Python, where they already exist exactly once
-and are shared by the CLI, the dashboard and the tray *so that they cannot
-disagree*. Reading `meta.json` from TypeScript would have made the extension a
-seventh reader of it with its own opinions about all seven. What the sidebar
-shows on a refusal is therefore the sentence the CLI would have printed, passed
-through unedited — `cli.ts`'s `mutate` exists to make that the only way a
-mutation can fail.
+**Three things it taught outlived it**, and each is cited where it landed rather
+than left in a deleted file: build every node with `textContent`, which is
+`referat/ui/viewer.py`'s escaping rule and the reason a transcript's text and a
+speaker's typed name are data; **a picker diffs against what the meeting carries
+and never against the set it mutates**, which is `referat/ui/tags.py`'s two sets
+and which the sidebar's picker got wrong the first time somebody used it; and **a
+refusal reaches the user in the words of whatever owns the rule**, which its
+`mutate` achieved by reading the CLI's stderr and which `cli.Outcome` now does in
+process. The guarantee was the part that mattered, not the mechanism.
 
-It also has **no meetings-folder setting**, only `referat.repoRoot` and
-`referat.claudeBinary`. Where meetings live is `[paths].meetings_dir` in the
-repository's `config.toml` — the file the tray records against — and a second
-place to say it is a second thing that can disagree with the recorder. That is
-the mistake `voices_dir` and `format_duration` were each pulled back from
-already.
+**Every `--json` document stays**, and each was written for a reader that no
+longer exists. They are the shape a surface and the CLI agree on, a document you
+can print is a document you can test, and they are what anything scripting this
+from outside Python reads — as are `label`'s four non-interactive flags, which
+the command center does not need because it calls `label.name_speaker` directly.
+Deleting them would have been the mistake this step could have made.
 
-**The tag picker reads the projects fresh, and diffs against the meeting.** Both
-halves were bugs the first time somebody used it. It used to take the project map
-out of the listing the sidebar already held, which saved a subprocess and went
-stale the moment anything created a project without a refresh following — which
-`editTags` itself did, on every path that returned early — so the picker offered
-one of two projects. And creating a project inside the picker added its id to the
-very set the picker was diffing against, so the new project looked like a tag the
-meeting already carried, landed in neither `added` nor `removed`, and `referat
-tag` was never called for it. Two sets now: what the meeting carries, which never
-moves and is the baseline, and what is ticked, which grows on a create. Creating
-also reopens the picker rather than re-rendering it, because assigning
-`picker.items` makes VS Code recompute the ticked rows and setting `selectedItems`
-on the next line races that.
-
-**The extension reaches Python through the venv's own interpreter**, spawning
-`<repoRoot>\.venv\Scripts\python.exe -m referat.cli` with the working directory
-at the repository root. Not `uv run`, which Smart App Control blocks here, and
-not `.venv\Scripts\referat.exe`, which Dropbox has deleted twice; the
-interpreter is the one link that survives both. The working directory is
-load-bearing rather than tidy, since `-m referat.cli` resolves only because the
-repository root is on `sys.path` — the same dependency the autostart shortcut
-carries.
-
-`claude` is **not on `PATH` on this machine**: it ships inside the installed
-Claude Code VS Code extension, whose directory name carries a version that
-changes on every update. So the extension asks VS Code —
-`extensions.getExtension("Anthropic.claude-code").extensionPath` plus
-`resources/native-binary/` — which follows that extension across updates by
-itself, and only then falls back to `PATH`. **The resolution happens at spawn
-time and is never persisted**: a resolved absolute path stored anywhere would
-still be there a week later, pointing at a directory that has been deleted, and
-would fail silently at the moment somebody clicks *Generate notes*.
-
-**The extension was packaged and installed** at step 12, and step 20 closed that
-work: `referat-vscode-0.2.0.vsix` stays installed and no further one is built.
-`npm run package`
-gives a `.vsix` of five files — `dist/extension.js`, `media/`, `package.json`,
-`README.md`, `LICENSE` — and `code --install-extension` puts it in every window
-instead of only in an F5 development host. `.vscodeignore` is written as `**`
-plus negations rather than as a list of things to leave out, because an
-exclusion list is right the day it is written and wrong the next time `media/`
-gains a file. Source maps are tied to `--watch` for the same reason the payload
-is: an esbuild map carries `sourcesContent`, so shipping one would put the
-TypeScript back inside the package that bundling exists to keep it out of.
-
-Installing changes exactly one thing about behaviour, and it is
-**`referat.repoRoot`**. Left empty the extension searches the open workspace
-folders and then falls back to the checkout its own bundle sits inside — which
-is what lets F5 work in a host window opened on no folder, and which from
-`~\.vscode\extensions` finds no `pyproject.toml`. So an installed build in a
-window that does not have the repository open needs the setting, and the window
-opened on the *meetings* folder is exactly that window. That is the fallback
-behaving correctly, not a regression; do not "fix" it by teaching the extension
-where meetings live, which is the second-place-to-say-it mistake this file
-records `voices_dir` and `format_duration` being pulled back from.
+**`notes.resolve_claude` still reads `~/.vscode/extensions`**, and that is the
+**Claude Code** extension rather than this one. The two are easy to confuse in a
+sweep and must not be: `claude` is not on `PATH` on this machine and ships inside
+that extension under a version that changes weekly, which is why that lookup
+honours the `.obsolete` file and resolves at spawn time.
 
 ## Per-project digests (build step 13)
 
@@ -1875,6 +1903,132 @@ The meetings folder gets its own `CLAUDE.md`, seeded from
 of [templates/meetings/](templates/meetings/) on first run. Keep the two in sync
 when the format changes — by hand, since nothing overwrites a seeded file.
 
+## Archiving a project (build step 21)
+
+**A project can be finished, and that is different from being a mistake.** Until
+step 21 the only tool for a thread of work that had ended was `project rm`, which
+cascades nothing — so every meeting it tagged kept the id as an orphan, and the
+record of what those meetings were about was lost to make a picker shorter.
+`archived_at` in `projects.json` is the other answer, and **it is a presentation
+decision and the whole of it**: the entry stays in the file, every meeting keeps
+its tag, that tag still resolves to its display name everywhere, the glossary
+still feeds the hotword list, and `referat tag` will still add it. What stops is
+the *offering*.
+
+**A timestamp and not a flag**, because `""` is already this file's falsy absence
+— `created_at`, `description`, `DocRef.tab_id` — so `bool(project.archived_at)`
+is the predicate and there is no second field to disagree with the first. A flag
+beside a date would be two places saying one thing; a flag instead of one throws
+away when the work stopped. **Re-archiving does not move the date**, which is the
+same rule that stopped `rerun` clearing `speaker_names`: re-running a command may
+not rewrite history.
+
+`SCHEMA_VERSION` stayed at 1. `Project.from_json` already defaulted a missing key,
+so a file written before this step loads with every project active — which is
+*true* of it, and a version bump would have asserted a migration that does not
+exist. The one lossy direction is an older `to_json` dropping the key on its next
+save, which loses which projects were archived and nothing else: no orphan, no
+glossary, no meeting. **Move the version when a key changes meaning, not when one
+is added.**
+
+**`name_map()` is never narrowed, and that is the rule this feature is built
+around.** It is tempting to have archived projects simply fall out of the map and
+let every surface hide them for free; it would be a bug, and a quiet one.
+`cli.tags_cell` and `ui.rows.tags_text` render an id *missing* from that map with
+a trailing `?`, because that is what an orphan is — so a narrowed map would turn
+every archived project's tags into orphans in `referat list`, in `list --json`,
+in the meetings list, on the dashboard and on the people page, all at once,
+which is precisely the quiet disappearance this codebase keeps
+designing against. Archivedness therefore travels *beside* the map, as
+`ProjectsDB.archived_ids()`, and that sentence lives in that method's docstring
+where the next person to have the idea will read it.
+
+The consequence was that **the VS Code extension needed no change at all** — a
+frozen surface that needed zero work is what a presentation-only change looks
+like from the outside. That was the last thing ever said about it; it was deleted
+the next day.
+
+**Only two documents changed, and one of them for free.** `project_document`
+spreads `**project.to_json()`, so `archived_at` arrived with no code; that is the
+payoff of the dataclass being the schema rather than an accident to leave
+unremarked. `people_document` gained `archived` and a per-person `inactive`.
+`list_document`, `show_document`, `pending` and `actions_document` gained
+nothing, on the rule that **a document gains a field only where something renders
+a difference** — `pending`'s queues are about meetings, and archiving a project
+makes no meeting more or less untagged.
+
+**`referat tag` still adds an archived id, deliberately.** `apply_tags` refuses
+an *unknown* id for a reason written beside it — an orphan should be made by
+deleting a project rather than by mistyping — and an archived id is not an
+orphan. Refusing would widen that guard past its own recorded reason and would
+make a late meeting for a finished thread of work cost three writes: unarchive,
+tag, re-archive. The picker simply does not offer it, which is a different thing.
+The note naming the archived tag lives in `apply_tags` rather than in `run_tag`,
+because a `run_*` holding a rule is a `run_*` a second surface cannot use, and it
+is computed inside the existing `if add:` block so that a pure removal still
+never opens `projects.json`.
+
+**A person is inactive when every project they carry is archived, and it is
+derived on every read and stored nowhere.** There is no `inactive` key in any
+file and there must not be: it would be a fifth thing to keep in step with
+`meta.json`'s tags, the voices database and the transcripts, and the first one to
+disagree with them. It is computed in `cli.people_document`, which already loads
+the projects file for its `name_map()`, and **not** in `people.directory` — that
+module deliberately never opens `projects.json`, and `people.gallery` is built on
+it through `project_people`, so archivedness introduced there would reach the
+speaker dialog's scoping, which is the one place it must never go. `gallery` is
+unchanged: a missing or archived tag must never cost a name.
+
+**There are three ways to be active and all three are one principle** — an
+unknown must never be read as an ending. No tags at all is active, because no
+project is not a finished one. An **orphaned** tag is active, because that says
+the project record is gone rather than that the work stopped. And somebody seen
+in an **untagged meeting** is active even when every tag they do carry is
+archived. That last one is why `people.Person.in_untagged` exists: `tags` alone
+cannot tell a person seen in one archived project and one untagged meeting from
+one seen only in the archived project, since an untagged meeting contributes no
+id to compare. It lives in `people.py` because it is a fact about `meta.json`
+alone and costs that module no new file. It was found by driving the feature —
+the first run called somebody inactive who had been in an untagged meeting that
+morning — and it reads a *missing* meeting differently from an untagged one, or
+deleting a meeting would quietly reactivate everybody who was in it.
+
+**In the window, archiving is a button and deleting is still a modal.** The
+projects page's title row runs Rename, Archive…, Delete — harmless, reversible,
+destructive and last. Archiving asks first, in a modal saying what it does *not*
+do; unarchiving asks nothing, because nothing was lost. The list grows an
+**Archived** section between the live projects and the orphans, ordered by how
+much of a project each thing is, and its heading is unselectable while **its rows
+are not** — you select one to unarchive it, and everything in the form still
+edits it, the glossary above all, since that still feeds the hotword list.
+
+**That section folds and starts folded**, since a finished project is the one
+somebody is least likely to have come to the page for — done with `setHidden` on
+the `QListWidget` rather than by moving to a `QTreeWidget`, which is the tag
+picker's own rule about hiding rather than rebuilding. Its heading is *enabled but
+not selectable*, the one flag between it and the inert orphan headings, because
+`QListWidget` sends no click to a disabled row. It opens itself in the two cases
+where staying folded would lie about the page: when the selected project has just
+been archived, and when there are no live projects at all.
+
+The tag picker hides an archived project it would *offer* and keeps one the meeting
+**carries**, ticked and removable, under its real name and `(archived)` rather
+than the orphan suffix, which would be a lie about a project that exists. That
+cost nothing to build: `_carried` and `_checked` do not know about archiving and
+do not need to. The people page grows an **Only archived projects** section above
+the drifted one, since drift is the database disagreeing with itself and is the
+more urgent of the two; the heading names the fact rather than calling somebody
+inactive, which is the register that page's privacy note is in.
+
+**Glossaries still feed the hotword list, archived or not.** A glossary is read
+twice at two different times, and the first is *before any meeting has been
+tagged* — so an archived project's terms are exactly as likely to be said in the
+next meeting as they were last month, and dropping them would make archiving cost
+a transcription. Worth revisiting only when the 223-token cap is actually seen
+dropping something, which is what the projects page's hotword panel is for.
+Meeting rows are likewise **not** decorated: `?` marks that something
+disappeared, and nothing disappears here.
+
 ## Conventions
 
 - **Windows only, except that the UI layer stays portable.** No cross-platform
@@ -1910,6 +2064,13 @@ when the format changes — by hand, since nothing overwrites a seeded file.
   bucket of quiet mistakes. Step 17's notes-splitting experiment is the place this
   is most tempting and it does not bend there either: the human's tags are an
   *input* to the split, never an output of it.
+- **Hiding is presentation and never a constraint.** A surface may narrow what
+  it *offers*; nothing may narrow what is stored, what resolves to a name, or
+  what a verb will accept. The speaker gallery narrows what a human is offered
+  and never what the pipeline matches; an archived project drops out of the tag
+  picker and stays in `projects.json`, keeps resolving through `name_map`, keeps
+  feeding the hotword list, and is still accepted by `referat tag`. A missing tag
+  must never cost a name, and an archived project must never cost a tag.
 - **No UI infers a meeting's state from which files exist.** `meta.json`'s
   `status` is the lifecycle, every surface renders that field, and a state that
   nothing writes is a state that does not exist.
@@ -1950,9 +2111,9 @@ when the format changes — by hand, since nothing overwrites a seeded file.
 - **No Anthropic API key, ever.** All LLM work goes through the official
   `claude` binary under the user's Claude Code subscription login. No module in
   this project may call the Anthropic API directly, no key belongs in
-  `config.toml`, in the environment, in the command center or in the VS Code
-  extension, and no Anthropic SDK belongs in `pyproject.toml`. Both surfaces
-  spawn `claude` as a child process and neither handles credentials.
+  `config.toml`, in the environment, or in the command center, and no Anthropic
+  SDK belongs in `pyproject.toml`. Referat spawns `claude` as a child process and
+  handles no credential.
 - **Voiceprints never leave the machine.** The known-voices database is not
   synced, not backed up, not readable by the `/cleanup` pass, and never sent
   anywhere. Deleting a person deletes them.

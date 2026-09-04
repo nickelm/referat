@@ -19,7 +19,7 @@ their own palette so a dark theme does not get black icons on a dark tab bar.
 **Drawn rather than shipped**, and that is a dependency decision rather than an
 aesthetic one. An icon font or an SVG set is a package in `pyproject.toml`, and
 the base install is on the recording path — every file in it is something Smart
-App Control can one day refuse. Fourteen glyphs of `QPainter` are three hundred lines
+App Control can one day refuse. Fifteen glyphs of `QPainter` are three hundred lines
 that cannot be blocked, cannot be missing at runtime, and scale to whatever DPI
 the window is opened on. It is also the last place a raster asset would still be
 readable: these are drawn at 64 px and asked for at 16.
@@ -31,6 +31,7 @@ refresh, and repainting a pixmap per call would be work for nothing.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from functools import lru_cache
 
@@ -342,6 +343,93 @@ def _trash(painter: QPainter, size: int) -> None:
     painter.drawPolygon(body)
 
 
+def _archive(painter: QPainter, size: int) -> None:
+    """A box with a lid and a handle slot: a project put away, not thrown out.
+
+    Drawn deliberately far from `_trash`, which it sits two buttons from on the
+    projects page — and the two mean opposite things, one reversible and one not,
+    so a reader who confuses them loses a project. That one is a *tapered* body
+    under a thin lid with a handle on top; this is a plain body under a thick,
+    wider lid, with a slot cut clean through it. The slot is what reads at
+    sixteen pixels, where the taper does not.
+    """
+    lid = size * 0.16
+    painter.drawRoundedRect(
+        QRectF(size * 0.12, size * 0.24, size * 0.76, lid), size / 22, size / 22
+    )
+    painter.drawRoundedRect(
+        QRectF(size * 0.20, size * 0.46, size * 0.60, size * 0.36), size / 18, size / 18
+    )
+    # Punched rather than drawn in the background colour, for `_tag`'s reason:
+    # this pixmap is transparent and is composited onto whatever the widget is,
+    # so a slot filled with an assumed white is a white mark on a dark theme.
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    slot = size * 0.09
+    painter.drawRoundedRect(
+        QRectF(size * 0.37, size * 0.57, size * 0.26, slot), slot / 2, slot / 2
+    )
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+
+def _redo(painter: QPainter, size: int) -> None:
+    """An open ring with an arrowhead: run the pipeline round again.
+
+    A circuit and deliberately not a play triangle, which `_play` already spends
+    on the speaker dialog's snippets. The two would otherwise sit two tabs apart
+    meaning *hear this second of audio* and *spend two minutes of GPU on this
+    meeting again*, which is the wrong pair of things to make look alike.
+
+    Built out of two solid shapes because every glyph here is drawn with a brush
+    and no pen — a filled pie with its middle punched out is how this set draws
+    an arc at all.
+    """
+
+    def at(angle: float, radius: float) -> QPointF:
+        theta = math.radians(angle)
+        return QPointF(
+            size / 2 + radius * math.cos(theta), size / 2 - radius * math.sin(theta)
+        )
+
+    outer, inner, mid = size * 0.40, size * 0.23, size * 0.315
+    box = QRectF(size / 2 - outer, size / 2 - outer, outer * 2, outer * 2)
+    # Qt's angles are sixteenths of a degree, zero at three o'clock, positive
+    # counter-clockwise. The gap runs 45 degrees either side of the top right,
+    # which is where the head goes.
+    painter.drawPie(box, int(40 * 16), int(275 * 16))
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    painter.drawEllipse(QRectF(size / 2 - inner, size / 2 - inner, inner * 2, inner * 2))
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+    # Tangent to the arc and pointing the way it travels, so the ring reads as
+    # going round rather than as a broken circle. It overhangs the band on both
+    # sides, which is the whole of what makes it a head at sixteen pixels.
+    painter.drawPolygon(
+        QPolygonF([at(40, outer * 1.38), at(40, inner * 0.42), at(95, mid)])
+    )
+
+
+def _promote(painter: QPainter, size: int) -> None:
+    """An arrow up out of a tray: the meeting leaves staging for the meetings folder.
+
+    The tray is the half that carries the meaning. An arrow alone points; an
+    arrow *leaving* something says which way a meeting is going, and this button
+    only ever moves one in the direction it cannot be moved back from — the audio
+    is deleted on the way out, and nothing brings it back.
+    """
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                QPointF(size * 0.50, size * 0.10),
+                QPointF(size * 0.78, size * 0.40),
+                QPointF(size * 0.22, size * 0.40),
+            ]
+        )
+    )
+    painter.drawRect(QRectF(size * 0.41, size * 0.37, size * 0.18, size * 0.27))
+    painter.drawRect(QRectF(size * 0.12, size * 0.74, size * 0.76, size * 0.13))
+    painter.drawRect(QRectF(size * 0.12, size * 0.60, size * 0.13, size * 0.27))
+    painter.drawRect(QRectF(size * 0.75, size * 0.60, size * 0.13, size * 0.27))
+
+
 GLYPHS: dict[str, Callable[[QPainter, int], None]] = {
     "record": _record,
     "pause": _pause,
@@ -354,11 +442,14 @@ GLYPHS: dict[str, Callable[[QPainter, int], None]] = {
     "page": _page,
     "pulse": _pulse,
     "trash": _trash,
+    "archive": _archive,
     "check": _check,
     "calendar": _calendar,
     "copy": _copy,
+    "redo": _redo,
+    "promote": _promote,
 }
-"""Fourteen shapes, each drawn filled in one colour.
+"""Seventeen shapes, each drawn filled in one colour.
 
 One style throughout — solid, no outlines, no two-tone — because a set that mixes
 filled and stroked glyphs reads as icons borrowed from two places, which at this

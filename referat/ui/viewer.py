@@ -201,8 +201,8 @@ def render_transcript_html(document: dict[str, Any]) -> str:
     Escaped with :func:`html.escape` entry by entry, and that is not a formality:
     the text is whatever Whisper heard in a meeting and the label is whatever
     somebody typed into `referat label`, so an `<` in either is data. This is the
-    same rule `referat-vscode/media/sidebar.js` follows by building every node
-    with `textContent`.
+    same rule the VS Code sidebar followed by building every node with
+    `textContent`, and the one thing worth carrying out of it.
 
     Colours are left to two grays that read on a light and a dark palette alike,
     rather than pulled from the theme: the pane is a `QTextBrowser` whose own

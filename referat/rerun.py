@@ -4,7 +4,7 @@ The pipeline keeps both WAVs whenever it is not certain of what it produced: a
 channel that failed outright, a transcript that looks garbled by
 faster-whisper's own scores, a meeting whose diarization went nowhere. That is
 what this command is for. It is also how a transcript is regenerated after the
-model, the language or the diarization checkpoint in `config.toml` changes.
+model, the languages or the diarization checkpoint in `config.toml` changes.
 
 **It only ever re-derives.** Nothing here edits a transcript — it hands the
 meeting to :func:`referat.transcribe.transcribe_meeting`, which writes a new
@@ -35,6 +35,11 @@ disk.
 serializes jobs inside one process and cannot see across one, so this command
 reads `status.json` and refuses while a live tray is transcribing. `--force`
 overrides it, because the guard is about the GPU rather than about correctness.
+
+**That guard is the one thing the command center does not get**, which is why
+:func:`check` holds the questions about the *meeting* and :func:`run` keeps the
+question about the other *process*. The window runs inside the tray, where the
+lock does its own serializing; see :func:`check`.
 
 The `transcribe` extra is imported inside :func:`run` rather than at module
 scope, so `referat list` and `referat status` stay free of three gigabytes of
@@ -105,40 +110,61 @@ def audio_present(meeting: Meeting) -> list[Path]:
     return [p for p in (meeting.mic_path, meeting.system_path) if p.exists()]
 
 
-def run(config: Config, meeting_id: str, *, force: bool = False) -> int:
-    """`referat rerun <meeting-id> [--force]`. Returns the process exit code."""
+def check(config: Config, meeting_id: str) -> tuple[Meeting | None, str]:
+    """The meeting a rerun would re-transcribe, or the sentence saying why not.
+
+    Three questions about the *meeting*: it exists, its `meta.json` reads, and
+    its audio is still on disk. Split out of :func:`run` at build step 23 so the
+    command center's *Re-transcribe...* asks them through this rather than
+    through a second copy — a `run_*` that holds a rule is a `run_*` a second
+    surface cannot use, for the ninth time. The complaint comes back
+    **unprefixed** for the reason :class:`referat.cli.Outcome` records: `referat
+    rerun` says `referat rerun:` and a modal says nothing at all.
+
+    **:func:`busy_tray` is deliberately not asked here**, and that is the whole
+    reason this is a split rather than a move. It is a fact about another
+    *process* — `transcribe._RUN_LOCK` serializes jobs inside one process and
+    cannot see across one, and two large-v3 models do not fit on this card. The
+    command center *is* the tray's process, where that lock already serializes a
+    queued rerun against every other job, so asking the GPU guard there would
+    refuse the one caller it was never about.
+
+    Plain ASCII in every message, as `label.py` also does: this console's code
+    page is not UTF-8 and a dash is not worth a `UnicodeEncodeError`.
+    """
     folder = paths.find_meeting_dir(config.meeting_roots(), meeting_id)
     if folder is None:
         where = " or ".join(str(r) for r in config.meeting_roots())
-        print(
-            f"referat rerun: no meeting {meeting_id} in {where}\n"
-            f"               run `referat list` to see what is there",
-            file=sys.stderr,
+        return None, (
+            f"no meeting {meeting_id} in {where}\n"
+            f"run `referat list` to see what is there"
         )
-        return 1
     meeting = Meeting.load(folder)
     if meeting is None:
-        print(f"referat rerun: cannot read {folder / paths.META_JSON}", file=sys.stderr)
-        return 1
+        return None, f"cannot read {folder / paths.META_JSON}"
 
-    audio = audio_present(meeting)
-    if not audio:
+    if not audio_present(meeting):
         released = bool(meeting.transcription.get("audio_released"))
         why = (
             "its audio was released once the transcript came out clean"
             if released
             else "its audio is gone"
         )
-        print(
-            # Plain ASCII in everything printed, as `label.py` also does: this
-            # console's code page is not UTF-8 and a dash is not worth a
-            # UnicodeEncodeError.
-            f"referat rerun: nothing to re-transcribe in {meeting.id}: {why}.\n"
-            f"               transcript.md is what is left of it; "
-            f"`referat label {meeting.id}` can still name its speakers",
-            file=sys.stderr,
+        return None, (
+            f"nothing to re-transcribe in {meeting.id}: {why}.\n"
+            f"transcript.md is what is left of it; `referat label {meeting.id}` "
+            f"can still name its speakers"
         )
+    return meeting, ""
+
+
+def run(config: Config, meeting_id: str, *, force: bool = False) -> int:
+    """`referat rerun <meeting-id> [--force]`. Returns the process exit code."""
+    meeting, why = check(config, meeting_id)
+    if meeting is None:
+        print(f"referat rerun: {why}", file=sys.stderr)
         return 1
+    audio = audio_present(meeting)
 
     busy = busy_tray()
     if busy is not None and not force:

@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -67,8 +68,8 @@ SPEAKER_ROLE = Qt.ItemDataRole.UserRole
 CHANNELS = {"mic": "your microphone", "system": "the call"}
 """How a channel is said to a person. Anything else is not said at all.
 
-The same two phrases `referat label`'s prompt prints and the sidebar's card
-shows, so three surfaces cannot describe one speaker differently.
+The same two phrases `referat label`'s prompt prints, so a speaker is not
+described one way at a terminal and another way here.
 """
 
 WARNING = (
@@ -87,6 +88,14 @@ NO_EMBEDDING = (
 )
 
 RECORDING = "Not while a meeting is recording: the snippets would be captured into it."
+
+CHIP_ROWS = 70
+"""How little vertical room the gallery may be squeezed into, in pixels.
+
+About two rows of chips. It is a *minimum* and not a size: the gallery is the
+one thing in this dialog that grows without bound, so it takes the slack above
+the name field and scrolls when even that is not enough.
+"""
 
 CHIP_STYLE = """
 QPushButton {
@@ -159,6 +168,24 @@ class SpeakerDialog(QDialog):
         # squeezed everything else — and the gallery only grows. See
         # :mod:`referat.ui.flow`.
         self.chips, self.chip_row = flow.wrapping(spacing=6)
+        # And the chips scroll, which is the other half of the same complaint.
+        # `FlowLayout` reports a *height for its width*, so a gallery of forty
+        # names is forty names' worth of minimum height and the dialog grows to
+        # fit it — past the bottom of the screen, taking the name field with it,
+        # which is the one control this dialog exists for. A scroll area breaks
+        # that chain: the gallery gets whatever room is going and scrolls for the
+        # rest, and nothing below it can be pushed off.
+        self.chip_scroll = QScrollArea()
+        self.chip_scroll.setWidget(self.chips)
+        self.chip_scroll.setWidgetResizable(True)
+        self.chip_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        # Never horizontally: chips wrap, so a horizontal bar would mean the
+        # wrapping had failed rather than that there was more to see.
+        self.chip_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.chip_scroll.setMinimumHeight(CHIP_ROWS)
+
         self.show_all = QPushButton()
         self.show_all.setFlat(True)
         self.show_all.clicked.connect(self._on_show_all)
@@ -187,8 +214,11 @@ class SpeakerDialog(QDialog):
         detail = QVBoxLayout()
         detail.addWidget(self.heading)
         detail.addWidget(self.play_button)
-        detail.addWidget(self.lines, 1)
-        detail.addWidget(self.chips)
+        # The gallery takes the slack and the lines take what they need: the
+        # heading and the play button are one row each, and `lines` says anything
+        # at all only for a speaker whose snippets are gone.
+        detail.addWidget(self.lines)
+        detail.addWidget(self.chip_scroll, 1)
         detail.addWidget(self.show_all)
         detail.addLayout(name_row)
         detail.addWidget(self.message)
@@ -244,6 +274,7 @@ class SpeakerDialog(QDialog):
         """Every speaker in this meeting has a name. Say so and leave nothing to click."""
         self.heading.setText(f"Every speaker in {self.meeting_id} has a name.")
         self.lines.clear()
+        self.lines.hide()
         self.detail.setEnabled(False)
 
     def _selected(self) -> dict[str, Any] | None:
@@ -281,6 +312,10 @@ class SpeakerDialog(QDialog):
             # all — the embedding `meta.json` kept is still perfectly good.
             said = "\n".join(f"  {line}" for line in speaker["lines"])
             self.lines.setText(f"{NO_AUDIO}\n\n{said}" if said else NO_AUDIO)
+
+        # Hidden rather than merely emptied, or an empty label would still hold
+        # the spacing above the gallery for the usual speaker, who has snippets.
+        self.lines.setVisible(not clips)
 
         self.field.clear()
         self.field.setEnabled(speaker["has_embedding"])
@@ -396,8 +431,8 @@ class SpeakerDialog(QDialog):
         """File the typed name, then re-read the document and move on.
 
         Every rule is `label.name_speaker`'s and its refusal is shown unedited,
-        which is the in-process form of what `cli.ts`'s `mutate` gives the
-        extension. The dialog stays open on one: the ticks of a tag picker have
+        in the sentence its owner wrote rather than in a paraphrase this dialog
+        invented. The dialog stays open on one: the ticks of a tag picker have
         their counterpart here in a typed name, and closing over the top of a
         complaint would lose both the name and the reason.
         """

@@ -9,8 +9,9 @@ until the next meeting finishes.
 It works as a dashboard only because the scaffold's `.vscode/settings.json`
 associates `*.md` with the Markdown preview editor in that workspace, so opening
 the folder in VS Code shows a rendered table of links rather than pipes and
-dashes. Until the extension arrives at build step 11, this file is the whole
-browsing layer.
+dashes. It was the whole browsing layer until build step 11, and it is still the
+one that needs nothing but a Markdown reader — which is why it survived the two
+UIs built on top of it and one that was deleted.
 
 Light on purpose: JSON, paths and string formatting. It is imported by
 :mod:`referat.cli` at module scope and called from the transcription pipeline, so

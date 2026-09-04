@@ -34,7 +34,7 @@ import threading
 from collections.abc import Callable
 from ctypes import wintypes
 
-from referat import gpu, progress, status, voices
+from referat import gpu, progress, rerun, status, voices
 from referat.config import Config, ConfigError, load_config
 from referat.hotkeys import Hotkeys
 from referat.logging_setup import setup_logging
@@ -139,7 +139,7 @@ class App:
         self.power.want("machine", transition.to is not State.IDLE)
 
     def _on_transition_status(self, _transition: Transition) -> None:
-        """Record the new state on disk, for `referat status` and the extension."""
+        """Record the new state on disk, for `referat status` to read back."""
         status.write_status(self.machine)
 
     # --- Recording ----------------------------------------------------------
@@ -242,11 +242,59 @@ class App:
             log.warning("no meeting to transcribe")
             self.machine.try_to(State.IDLE)
             return
+        self._queue_transcription(meeting)
+
+    def _queue_transcription(self, meeting: Meeting) -> None:
+        """Count the job, claim the state, start the thread. The one path onto the GPU.
+
+        All three callers want exactly this — a meeting just stopped, a meeting
+        the last process did not finish, and since build step 23 a meeting
+        somebody asked to re-transcribe from the command center — and they used
+        to be three copies of it.
+
+        `try_to` rather than `to`, which is what makes the three interchangeable:
+        a hotkey may have started a recording between the caller's decision and
+        here, and `RECORDING -> TRANSCRIBING` is not a legal edge. The job count
+        is still right, the thread still runs, and the machine keeps saying the
+        truer of the two things — which is the same reasoning the resumed-job
+        edge `IDLE -> TRANSCRIBING` was added under.
+
+        Queueing several is safe: `transcribe._RUN_LOCK` serializes them inside
+        this process, so two large-v3 models never coexist.
+        """
         self.machine.begin_job()
         self.machine.try_to(State.TRANSCRIBING)
         threading.Thread(
             target=self._transcribe, args=(meeting,), name="transcribe", daemon=True
         ).start()
+
+    def rerun_meeting(self, meeting_id: str) -> tuple[bool, str]:
+        """Transcribe a finished meeting again, on the thread a fresh one uses.
+
+        The command center's *Re-transcribe...*, and the reason it is a method
+        here rather than a `cli` function: what a rerun costs is the state
+        machine, the job count and a thread, all three of which are this class's
+        and none of which a window may touch. `referat rerun` in a terminal is
+        the same work in a process that owns none of them, which is why it runs
+        the pipeline inline and this queues it.
+
+        The rules are :func:`referat.rerun.check`'s — including the one that is
+        deliberately *not* asked here, `busy_tray`: it guards a second process
+        against this one, and this is that one.
+
+        Returns the pair rather than a `cli.Outcome` so the recorder core keeps
+        importing no part of the CLI. The message is unprefixed either way.
+        """
+        meeting, why = rerun.check(self.config, meeting_id)
+        if meeting is None:
+            return False, why
+        # Before the pipeline runs, because it writes `speakers/SPEAKER_NN_*.wav`
+        # as it goes and a run finding fewer speakers than the last would leave
+        # the extras behind claiming to be somebody this run never produced.
+        rerun.clear_snippets(meeting)
+        self._queue_transcription(meeting)
+        channels = ", ".join(p.name for p in rerun.audio_present(meeting))
+        return True, f"re-transcribing {meeting.id} from {channels}"
 
     def _transcribe(self, meeting: Meeting) -> None:
         """The background job. Deliberately survives a new recording starting."""
@@ -358,6 +406,7 @@ class App:
 
         Jobs are serialized by `transcribe._RUN_LOCK`, so queueing several is
         safe — they run one at a time, and two large-v3 models never coexist.
+        This is `IDLE -> TRANSCRIBING`, the edge added for exactly this.
         """
         pending = [m for m in meetings if m.mic_path.exists() or m.system_path.exists()]
         if not pending:
@@ -369,14 +418,7 @@ class App:
             f"{'s' if len(pending) > 1 else ''}: {names}"
         )
         for meeting in pending:
-            self.machine.begin_job()
-            # IDLE -> TRANSCRIBING, the edge added for exactly this; `try_to`
-            # rather than `to`, since a hotkey could in principle have started a
-            # recording between the reconcile and here.
-            self.machine.try_to(State.TRANSCRIBING)
-            threading.Thread(
-                target=self._transcribe, args=(meeting,), name="transcribe", daemon=True
-            ).start()
+            self._queue_transcription(meeting)
 
     def shutdown(self) -> None:
         """Stop the hotkeys, close out any recording, and release the sleep hold.

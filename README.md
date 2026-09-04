@@ -14,8 +14,8 @@ transcripts.
 
 ## Status
 
-The recorder is finished, and so are the meetings-folder scaffold and the first
-VS Code extension. The tray app runs and autostarts, the
+The recorder is finished, and so are the meetings-folder scaffold and the
+command center. The tray app runs and autostarts, the
 two hotkeys drive the state machine, and a meeting is recorded as `mic.wav` plus
 `system.wav` written crash-safely — left playable even if the process is killed
 mid-meeting — and Windows will not idle-sleep out from under it.
@@ -43,8 +43,9 @@ gate_failed | transcribed -> notes_written -> synced`, and every surface renders
 that field rather than guessing from which files happen to exist.
 
 The `referat` CLI is the rest of it: `list` (the inventory and the queue),
-`status`, `devices`, `rerun`, `promote`, `label`, `project`, `tag`, `untag`,
-`state`, `index` and `config`.
+`show`, `transcript`, `status`, `devices`, `rerun`, `promote`, `label`, `people`,
+`actions`, `day`, `notes`, `project`, `tag`, `untag`, `state`, `hotwords`,
+`index` and `config`.
 
 A `/cleanup` slash command writes `notes.md` beside a transcript when asked —
 lazily, never automatically. The graphical surface is a **command center** — a
@@ -52,18 +53,21 @@ desktop window the tray app owns and opens from its own icon, built on three
 things rather than one list: meetings, with an untagged inbox and a transcript
 shown beside its notes; projects, kept deliberately light; and people, a page per
 voice unifying who somebody is with the projects and meetings they turn up in.
-Its first, read-only part is built: the meetings list, the transcript-and-notes
-viewer with timestamps in the notes navigating into the transcript, and record,
-pause and stop buttons driving the same recorder the two hotkeys do.
+It opens on a **dashboard** — recent meetings, the action items you owe, a day
+summary, and the three queues of work still waiting: untagged meetings, speakers
+nobody has named, meetings with no notes yet. Behind it are the meetings list and
+the transcript-and-notes viewer with timestamps in the notes navigating into the
+transcript, the tag picker, the speaker labeling dialog, the projects page with
+its glossaries and the merged hotword list, the people page any name in any
+document links to, and an activity tab over the running jobs and the live log.
+Record, pause and stop drive the same recorder the two hotkeys do.
 
-A VS Code extension held that job until then — a sidebar of meetings with their
-lifecycle and their tags, the buttons that write notes, re-transcribe, tag and
-name speakers, and a status bar item saying what the tray is doing. It still
-works and is still installed; it is in maintenance, and retires when the window
-reaches parity with it. What is next: tagging and speaker labeling inside the
-window, then tagging from the tray, then per-project digests pushed into Google
-Docs. See [TODO.md](TODO.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for
-what has landed.
+A VS Code extension held that job from build step 15 until step 20, and was
+**deleted at step 23** once the window could re-transcribe a meeting and release
+a staged one's audio, which were the last two things it could do and the window
+could not. There is one UI again. What is next: per-project digests pushed into
+Google Docs. See [TODO.md](TODO.md) for the plan and
+[CHANGELOG.md](CHANGELOG.md) for what has landed.
 
 ## Quick start
 

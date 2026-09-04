@@ -123,9 +123,9 @@ def apply_name(config: Config, meeting: Meeting, speaker: str, name: str) -> boo
     **An echo cluster is refused outright.** `voices.unknown_speakers` already
     stops one being offered, but that is the wrong place to rely on: this function
     is reached directly by `referat label <id> --speaker SPEAKER_NN --name <n>`,
-    which is the path the VS Code extension uses and which asks nothing about who
-    is unknown. Naming an echo cluster files a voiceprint recorded off a
-    loudspeaker under a real person's name, and that print then sits in the
+    which is a path into naming that asks nothing about who is unknown. Naming an
+    echo cluster files a voiceprint recorded off a loudspeaker under a real
+    person's name, and that print then sits in the
     database producing false accepts that `match_margin` cannot catch, because the
     margin compares names and this one is filed under the right one.
     """
@@ -402,7 +402,7 @@ def _label_speaker(config: Config, meeting: Meeting, speaker: str) -> str:
     # is not UTF-8, and a dash is not worth a UnicodeEncodeError.
     #
     # The channel is said here for the same reason `label --json` carries it, and
-    # said in both places so the terminal and the sidebar cannot describe the same
+    # said in both places so the terminal and the window cannot describe the same
     # speaker differently: which file a voice arrived in is the strongest hint
     # available about who they are, and it was not being shown at all.
     channel = voices.speaker_channel(meeting, speaker)
@@ -514,10 +514,10 @@ def label_document(config: Config, meeting: Meeting) -> dict[str, Any]:
 
     What `referat label <id> --json` prints and what
     :class:`referat.ui.speakers.SpeakerDialog` renders — the same builder, for
-    the same reason `list_document` and `transcript_document` are: the extension
-    shells out because it is TypeScript, the window imports because it is already
-    a Python process in this package, and neither may hold an opinion about a
-    meeting the other does not share.
+    the same reason `list_document` and `transcript_document` are: the window
+    imports it because it is already a Python process in this package, the
+    printed form is what makes the shape testable, and no surface may hold an
+    opinion about a meeting the others do not share.
 
     The snippet *paths* rather than the audio: they are ordinary WAVs on disk,
     which a webview loads through `asWebviewUri` and a window decodes in place.

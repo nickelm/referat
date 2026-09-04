@@ -69,7 +69,37 @@ class TranscriptionConfig:
     cpu_fallback_model: str = "medium"
     device: str = "auto"
     compute_type: str = "auto"
-    language: str = "en"
+    languages: tuple[str, ...] = ("en", "sv")
+    """The languages this machine is expected to hear, most likely first.
+
+    One key with three meanings, and each is a real state rather than a mode
+    flag. **One code** pins that language and asks Whisper nothing -- the
+    cheapest and the most certain, and what this was until 2026-09-04. **Two or
+    more** run a detection pass per channel and take the best *of these*, which
+    is the case this machine is actually in: meetings are held in English and in
+    Swedish, and which one is not known until somebody speaks. **Empty** is bare
+    autodetect over all ninety-nine languages Whisper knows.
+
+    The middle state is the point, and it is not the same thing as the empty one.
+    Swedish sits in a dense neighbourhood -- Norwegian, Danish, German, Dutch --
+    and an unrestricted guess off a quiet or short channel lands in it often
+    enough to matter, which costs the whole channel: a language is chosen once
+    and every segment is decoded under it. Naming the candidates makes a wrong
+    answer require beating a *plausible* rival rather than merely being the
+    loudest of a hundred, and a code that never gets said costs nothing but the
+    room it takes on this line.
+
+    Order is not preference and nothing breaks ties by it -- probability decides.
+    It is the order :func:`referat.transcribe.detect_language` logs in, so the
+    first entry should be the ordinary case if only to make the log read right.
+
+    Detection is per **channel**, not per meeting: the microphone is the room and
+    the loopback is the far end, and a Swedish room on an English call is exactly
+    the meeting this exists for. It is never per *segment* -- faster-whisper's
+    `multilingual=True` re-detects on every one of them, which turns one wrong
+    guess per channel into one wrong guess anywhere and makes a transcript that
+    switches language mid-sentence.
+    """
     diarization: bool = True
     diarization_model: str = "pyannote/speaker-diarization-community-1"
     keep_audio: bool = False
@@ -376,6 +406,18 @@ def _validate(config: Config) -> None:
             f"[transcription].compute_type must be one of {VALID_COMPUTE_TYPES}, "
             f"got {t.compute_type!r}"
         )
+    # Shape only. Whether "sv" is a language Whisper knows is a question for
+    # faster-whisper, which is behind the `transcribe` extra and must not be
+    # imported here -- `referat config` runs in the base install. The membership
+    # check happens in transcribe.py against the loaded model, where the answer
+    # is authoritative rather than a copy of somebody's list that goes stale.
+    for code in t.languages:
+        if not code or code != code.strip().lower() or not code.isalpha():
+            raise ConfigError(
+                f"[transcription].languages must be lowercase language codes, got {code!r}"
+            )
+    if len(set(t.languages)) != len(t.languages):
+        raise ConfigError(f"[transcription].languages has a duplicate: {list(t.languages)}")
     level = config.app.log_level.upper()
     if level not in VALID_LOG_LEVELS:
         raise ConfigError(f"[app].log_level must be one of {VALID_LOG_LEVELS}, got {level!r}")

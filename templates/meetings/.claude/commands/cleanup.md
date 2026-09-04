@@ -83,11 +83,22 @@ folder, and at build step 13 it is what a project digest is assembled around.
 Use the exact name the transcript uses for a person; do not wikilink a
 `SPEAKER_NN`.
 
-## Spelling
+## Language and spelling
 
-Write the notes in **U.S. English**: *organize*, *analyze*, *color*, *center*,
-*defense*, *program*, *toward*. The transcript may be in any variety; the notes
-are normalized here.
+**Write the notes in English, whatever language the meeting was in.** Meetings
+here are held in English and in Swedish, and `transcript.md` is in whichever was
+spoken -- Referat detects the language per channel, so one transcript may be
+Swedish on the microphone and English on the far end. The notes are not a
+translation of it, they are the writing-up of it, and they are always English:
+they are what gets pasted into a shared document, read months later, and
+assembled into a project digest, and a notes folder that switches language by
+meeting is one nobody can skim.
+
+Quote in the language the thing was said in, and put an English gloss after it in
+parentheses where the point turns on the wording.
+
+Write that English as **U.S. English**: *organize*, *analyze*, *color*, *center*,
+*defense*, *program*, *toward*.
 
 This applies to your own prose and nothing else. It never touches
 `transcript.md`, which is immutable. It never touches a **name** — a person, a

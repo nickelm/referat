@@ -74,6 +74,17 @@ log = logging.getLogger(__name__)
 ID_ROLE = Qt.ItemDataRole.UserRole
 """The project id a row stands for, so nothing parses a display name back."""
 
+TOGGLE_ROLE = Qt.ItemDataRole.UserRole + 1
+"""Set on the foldable Archived heading, so a click is recognised by role."""
+
+ARCHIVED_ROLE = Qt.ItemDataRole.UserRole + 2
+"""Set on the rows the Archived heading folds, so folding hides them in place.
+
+Carried on the row rather than recomputed from the document, so the toggle is a
+walk of the list and never a rebuild — the tag picker's rule, and for its reason:
+rebuilding re-runs the reselect and the dirty check to hide four rows.
+"""
+
 GLOSSARY_HELP = (
     "One term per line: the names, products and jargon of this thread of work. "
     "Every glossary on this machine is merged into the one hotword list Whisper is "
@@ -93,6 +104,23 @@ EXTRAS_NOTE = (
 )
 
 NOTHING_SELECTED = "Pick a project, or create one."
+
+ARCHIVED_HEADING = "Archived"
+ARCHIVED_NOTE = (
+    "Finished threads of work, hidden from the tag picker and nowhere else. Every "
+    "meeting keeps its tag and it still resolves to this name, the glossary still "
+    "feeds the hotword list, and `referat tag` will still add it. Select one to "
+    "edit or unarchive it."
+)
+
+ARCHIVE_CONFIRM = (
+    "Archive {name}?\n\n"
+    "Its {meetings} keep the tag and it still resolves to that name. Its glossary "
+    "still feeds the hotword list Whisper is handed, and `referat tag` will still "
+    "add it.\n\n"
+    "What changes is that the tag picker stops offering it and it moves to the "
+    "Archived section here. Nothing is deleted, and Unarchive puts it back."
+)
 
 ORPHAN_HEADING = "Orphaned tags"
 ORPHAN_NOTE = (
@@ -115,12 +143,24 @@ class ProjectsPage(QWidget):
         self._loading = False
         """Set while the form is being filled, so filling it does not read as editing."""
 
+        self._archived_open = False
+        """Whether the Archived section is unfolded. Folded on open, deliberately.
+
+        A finished project is the one somebody is *least* likely to have come here
+        for, and the count in the heading is enough to say it is still there. Page
+        state and not stored anywhere: it survives a refresh because this object
+        does, and resets when the window does. Deliberately not persisted: a
+        folded section is a glance somebody took, not a preference they set.
+        """
+
         self.projects = QListWidget()
         self.projects.currentItemChanged.connect(self._on_row_changed)
+        self.projects.itemClicked.connect(self._on_row_clicked)
 
         # Read once and kept, rather than per row: `icons.glyph` caches on the
         # colour anyway, and this page rebuilds its whole list on every refresh.
         self._tag = icons.glyph("tag", self.palette().windowText().color().name())
+        self._archive = icons.glyph("archive", self.palette().windowText().color().name())
 
         self.new_field = QLineEdit()
         self.new_field.setPlaceholderText("New project")
@@ -152,6 +192,16 @@ class ProjectsPage(QWidget):
         self.rename_button = QPushButton("Rename...")
         self.rename_button.setAutoDefault(False)
         self.rename_button.clicked.connect(self._on_rename)
+        self.archive_button = QPushButton("Archive...")
+        # `windowText` and not a state colour. `icons.LIFECYCLE` is keyed on
+        # `meta.json`'s `status` and is about *meetings*, so borrowing its grey
+        # for a project would be exactly the drift that palette guards against by
+        # keying on the rendered string. Archiving is not a lifecycle state.
+        self.archive_button.setIcon(
+            icons.glyph("archive", self.palette().windowText().color().name())
+        )
+        self.archive_button.setAutoDefault(False)
+        self.archive_button.clicked.connect(self._on_archive)
         self.delete_button = QPushButton("Delete...")
         # The same red trash the meetings page's Delete carries: two different
         # destructive buttons on two tabs, one picture, so neither has to be
@@ -188,9 +238,12 @@ class ProjectsPage(QWidget):
         self.message.setWordWrap(True)
         self.message.hide()
 
+        # Harmless, then reversible, then destructive and last — so the red one
+        # stays at the end of the row where it has always been.
         title_row = QHBoxLayout()
         title_row.addWidget(self.heading, 1)
         title_row.addWidget(self.rename_button)
+        title_row.addWidget(self.archive_button)
         title_row.addWidget(self.delete_button)
 
         save_row = QHBoxLayout()
@@ -295,25 +348,69 @@ class ProjectsPage(QWidget):
         self._complain(complaint)
 
     def _fill_list(self) -> None:
-        """Build the project list, then the orphans, and reselect what was selected."""
+        """Build the live projects, then the archived, then the orphans, and reselect.
+
+        Three sections ordered by how much of a project each thing is: one being
+        worked on, one that is finished, and an id that is not a project at all.
+        """
         wanted = self._selected
         self._loading = True
         try:
             self.projects.clear()
             chosen: QListWidgetItem | None = None
-            for project in self._document["projects"]:
-                item = QListWidgetItem(f"{project['name']}\n{_meetings(project['meetings'])}")
+
+            def add(project: dict[str, Any], hidden: bool = False) -> None:
+                nonlocal chosen
+                second = _meetings(project["meetings"])
+                if project["archived_at"]:
+                    second = f"{second} - archived {project['archived_at'][:10]}"
+                item = QListWidgetItem(f"{project['name']}\n{second}")
                 item.setData(ID_ROLE, project["id"])
+                if project["archived_at"]:
+                    item.setData(ARCHIVED_ROLE, True)
                 # The tag that is on this page's tab, on its button and on the
                 # dashboard's untagged queue. A project *is* a label, and the
                 # glyph saying so in four places is the cheapest way to say it.
-                item.setIcon(self._tag)
+                # The archived ones carry the archive box instead -- the one list
+                # in this UI where a second glyph earns its place, because it is
+                # what distinguishes two otherwise identical kinds of row.
+                item.setIcon(self._archive if project["archived_at"] else self._tag)
                 self.projects.addItem(item)
+                item.setHidden(hidden)
                 if project["id"] == wanted:
                     chosen = item
+
+            live = [p for p in self._document["projects"] if not p["archived_at"]]
+            archived = [p for p in self._document["projects"] if p["archived_at"]]
+            for project in live:
+                add(project)
+            if archived:
+                # **Folded unless something needs it open**, and the two overrides
+                # are not conveniences. A selected project that has just been
+                # archived would otherwise vanish from the list while its form is
+                # still on screen; and with no live projects at all, a folded
+                # section is a page that looks empty while holding four projects.
+                # `_archived_open` is then synced to what was actually drawn, so
+                # the next click on the heading closes what is visible rather than
+                # toggling a state nobody can see.
+                self._archived_open = (
+                    self._archived_open
+                    or not live
+                    or any(p["id"] == wanted for p in archived)
+                )
+                # A heading like the orphans', and there the resemblance stops
+                # twice over: this one folds, and these rows stay **selectable**.
+                # Unarchiving one means selecting it first, and everything in the
+                # form still edits it -- the glossary above all, which still feeds
+                # the hotword list.
+                self.projects.addItem(
+                    _toggle_heading(ARCHIVED_HEADING, self._archived_open, len(archived))
+                )
+                for project in archived:
+                    add(project, hidden=not self._archived_open)
             orphans = self._document["orphans"]
             if orphans:
-                # A section of its own, as in the sidebar: a tag quietly
+                # A section of its own: a tag quietly
                 # vanishing off three meetings is how you lose track of what a
                 # meeting was about, so a deleted project's ids are shown rather
                 # than hidden. Unselectable, because there is no project here to
@@ -389,6 +486,25 @@ class ProjectsPage(QWidget):
         )
 
     # --- The form -----------------------------------------------------------
+
+    def _on_row_clicked(self, item: QListWidgetItem | None) -> None:
+        """Fold or unfold the Archived section. The only click a heading answers.
+
+        A walk of the rows rather than a rebuild, which is the tag picker's rule:
+        rebuilding would re-run the reselect and the dirty check in order to hide
+        four rows, and `_fill_list` would then have to be careful not to lose a
+        half-typed glossary. Hiding in place cannot.
+        """
+        if item is None or not item.data(TOGGLE_ROLE):
+            return
+        self._archived_open = not self._archived_open
+        count = 0
+        for row in range(self.projects.count()):
+            other = self.projects.item(row)
+            if other.data(ARCHIVED_ROLE):
+                other.setHidden(not self._archived_open)
+                count += 1
+        item.setText(_toggle_text(ARCHIVED_HEADING, self._archived_open, count))
 
     def _on_row_changed(self, item: QListWidgetItem | None, previous: object) -> None:
         """Show another project, offering to keep whatever was typed into this one.
@@ -466,16 +582,39 @@ class ProjectsPage(QWidget):
                 return
             self.detail.setEnabled(True)
             self.heading.setText(project["name"])
-            self.subheading.setText(
+            summary = (
                 f"id {project['id']} - {_meetings(project['meetings'])} - the id never "
                 f"moves, which is why meetings store it rather than the name"
             )
+            self._fill_archive_state(project, summary)
             self.description.setText(project["description"])
             self.glossary.setPlainText("\n".join(project["glossary"]))
             self.docs.setText(_docs_text(project["docs"]))
         finally:
             self._loading = False
         self._on_edited()
+
+    def _fill_archive_state(self, project: dict[str, Any], summary: str | None = None) -> str:
+        """The two parts of the form that say whether this project is archived.
+
+        Split out of :meth:`_fill_form` so that :meth:`_on_archive` can refresh
+        *only* these after a write. Refilling the whole form there would silently
+        discard a half-typed glossary — archiving does not save one — and leaving
+        it alone was worse: the button still read `Archive...` on a project that
+        had just been archived, which is the one control somebody would click
+        next.
+        """
+        if summary is None:
+            summary = self.subheading.text().split("\n")[0]
+        if project["archived_at"]:
+            summary = f"{summary}\nArchived {project['archived_at'][:10]}. {ARCHIVED_NOTE}"
+        self.subheading.setText(summary)
+        # The button says the direction; the section and the subheading say the
+        # state. Deliberately **not** disabling the form for an archived project:
+        # the glossary is live data whatever the project's state, since it still
+        # feeds the hotword list.
+        self.archive_button.setText("Unarchive" if project["archived_at"] else "Archive...")
+        return summary
 
     def _typed(self) -> tuple[str, list[str]]:
         """What the form currently says: the description, and the glossary by line.
@@ -555,12 +694,56 @@ class ProjectsPage(QWidget):
         log.info("%s", outcome.message)
         self.refresh()
 
+    def _on_archive(self) -> None:
+        """Archive or unarchive, behind a modal that says what archiving does not do.
+
+        **Only archiving asks.** Unarchiving loses nothing and restores nothing —
+        it clears one field — so a confirmation there would be a dialog for the
+        sake of symmetry. The archive modal is shown before the command runs and
+        so is the same exception the Delete modals are; what it says is the half
+        somebody assumes the other way, which is that nothing is hidden *from a
+        meeting*.
+
+        `_selected` is deliberately **not** cleared afterwards, unlike
+        :meth:`_on_delete`'s: the project still exists, and the reselect finds it
+        because archived rows keep their `ID_ROLE`.
+        """
+        project = self._project(self._selected)
+        if project is None:
+            return
+        archiving = not project["archived_at"]
+        if archiving:
+            answer = QMessageBox.question(
+                self,
+                "Archive project",
+                ARCHIVE_CONFIRM.format(
+                    name=project["name"], meetings=_meetings(project["meetings"])
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        outcome = cli.set_archived(self.config, project["id"], archiving)
+        if not outcome.ok:
+            self._complain(outcome.message)
+            return
+        log.info("%s", outcome.message)
+        self.refresh()
+        # The list is rebuilt by `refresh`, but reselecting the row that was
+        # already selected fires no change and so refills no form -- the property
+        # that keeps a half-typed glossary across a refresh. The two parts that
+        # just became wrong are updated directly rather than by refilling.
+        updated = self._project(self._selected)
+        if updated is not None:
+            self._fill_archive_state(updated)
+
     def _on_delete(self) -> None:
         """Delete a project, behind a modal that says what it leaves behind.
 
         The modal is shown *before* the command runs, so there is no outcome to
         quote yet and this is the one place the page says something Python also
-        says — exactly the exception the sidebar's Delete modal is. What it says
+        says — the same exception every Delete modal here is. What it says
         is the consequence somebody would otherwise assume the other way: the
         tags stay, on every meeting carrying them, as orphans.
         """
@@ -652,6 +835,36 @@ def _heading(text: str) -> QListWidgetItem:
     item = QListWidgetItem(text)
     item.setFlags(Qt.ItemFlag.NoItemFlags)
     return item
+
+
+def _toggle_heading(text: str, open_: bool, count: int) -> QListWidgetItem:
+    """A heading that can be clicked to fold its section, and still cannot be selected.
+
+    **Enabled but not selectable**, which is the one flag between this and
+    :func:`_heading`. `QListWidget` delivers no `itemClicked` for a row with
+    `NoItemFlags` — a disabled row is not clickable — so a foldable heading has
+    to be enabled; leaving `ItemIsSelectable` off is what keeps it out of the
+    selection, out of arrow-key navigation, and out of `_first_project`'s search,
+    exactly as the inert headings are.
+
+    The count is in the text rather than implied by the rows, because a folded
+    section whose rows are hidden would otherwise be a heading that says nothing
+    about what it is hiding.
+    """
+    item = QListWidgetItem(_toggle_text(text, open_, count))
+    item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+    item.setData(TOGGLE_ROLE, True)
+    return item
+
+
+def _toggle_text(text: str, open_: bool, count: int) -> str:
+    """A foldable heading's label. One implementation, because two would drift.
+
+    Written once and called from both the build and the fold: the toggle rewrites
+    the label in place rather than rebuilding the row, so the two would otherwise
+    be two copies of the same format string.
+    """
+    return f"{'▾' if open_ else '▸'}  {text} ({count})"
 
 
 def _docs_text(docs: list[dict[str, Any]]) -> str:

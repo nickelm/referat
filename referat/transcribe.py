@@ -732,6 +732,132 @@ def _hotword_kwargs(model: Any, config: Config) -> dict[str, str]:
     return {"hotwords": prompt}
 
 
+CONDITION_ON_PREVIOUS_TEXT = False
+"""Whether each 30-second window is decoded with the previous window's text.
+
+faster-whisper defaults this to `True`, and on 2026-09-04 that cost
+`2026-09-04_1001` **twelve of its thirty-two minutes**. The window at 00:12:09
+came out as `Ljusen.` twenty-six times; the next one was handed that as context,
+found it plausible, and slid into `Tack för att du har tittat på den här videon!`
+-- YouTube subtitle boilerplate, Whisper's best-known Swedish hallucination --
+which it then repeated once every thirty seconds until 00:24:50. **A repetition
+loop is not a bad window, it is a bad window feeding itself**, and this flag is
+the feed. Measured: that same stretch decoded in isolation, with no poisoned
+context to carry in, gives 2128 words of ordinary conversation.
+
+The audio in it is -33.8 dBFS against -34.0 for the rest of the meeting, so this
+is not the silence case anybody would forgive -- it was twelve minutes of two
+people talking, and it was silently replaced with one sentence.
+
+What conditioning buys is prose coherence across a window boundary, and Referat
+is unusually well placed to give that up. The transcript is not prose: it is
+diarized, per-segment, relabeled and merged with a second channel, and each entry
+is read beside a timestamp rather than as a paragraph. The vocabulary priming is
+already bought and paid for by :mod:`referat.hotwords`, which puts every name in
+front of the model on **every** window rather than only after somebody has
+already said it. So this trades a coherence Referat does not render for a failure
+mode that costs whole minutes and says nothing.
+
+It is not a config knob, on the no-knobs-nobody-asked-for rule: there is no
+meeting for which the loop is the better outcome. The quality gate is the
+backstop rather than the fix -- it caught this one, by `compression_ratio` 8.11
+against a 2.4 ceiling, which is what kept the audio and made the repair possible.
+"""
+
+LANGUAGE_WINDOW = 30 * SAMPLE_RATE
+"""One language-detection window: the 30 seconds Whisper's encoder takes at once."""
+
+LANGUAGE_WINDOWS = 5
+"""How many of them to sample across a channel before deciding.
+
+faster-whisper's own default is **one**, taken from the very beginning, and that
+is the wrong end of a meeting to ask. The first thirty seconds are somebody
+sitting down, a "hej, can you hear me", and a laptop finding its microphone --
+and on the loopback of an in-person meeting they are silence. Spreading the
+windows over the whole channel and summing costs four extra encoder passes,
+which is under a second on this card against the half hour it decides for.
+"""
+
+
+def detect_language(model: Any, audio: np.ndarray, config: Config) -> str | None:
+    """Pick which of `[transcription].languages` this channel is in.
+
+    Returns a language code for :meth:`WhisperModel.transcribe`, or `None` for
+    "decide for yourself" -- which is what an empty candidate list asks for and
+    also what every failure here degrades to. **Detection may never cost a
+    transcript**, the same rule diarization runs under: a language Whisper picks
+    unaided is a worse guess than a restricted one and an immeasurably better
+    one than a traceback.
+
+    The restriction is applied to the *ranking* rather than to the decoder. There
+    is no faster-whisper argument for "one of these" -- `language` takes exactly
+    one code -- so the pass is run for its `all_language_probs`, the allowed
+    codes are read out of it, and the winner is handed back as a pin. Whisper is
+    therefore never told that Norwegian was a candidate, which is the whole
+    point: with the set open it wins a Swedish channel often enough to matter,
+    and a language is chosen **once per channel** and every segment decoded under
+    it.
+
+    Codes the model does not know are dropped with a warning rather than
+    silently: `[transcription].languages` is hand-written, Swedish is `sv` and
+    not `se`, and a typo that merely narrowed the set to nothing would come back
+    as unrestricted autodetect -- the failure mode this function exists to
+    prevent, wearing the face of the fix.
+    """
+    allowed = tuple(dict.fromkeys(config.transcription.languages))
+    if not allowed:
+        return None
+    try:
+        known = set(model.supported_languages)
+    except Exception:  # noqa: BLE001 - a property that may not exist on a future release
+        log.debug("could not read the model's language list", exc_info=True)
+        known = set(allowed)
+    if unknown := [c for c in allowed if c not in known]:
+        log.warning("[transcription].languages: %s unknown to this model", ", ".join(unknown))
+        allowed = tuple(c for c in allowed if c in known)
+    if not allowed:
+        log.warning("no configured language is known to this model; detecting without a set")
+        return None
+    if len(allowed) == 1:
+        # Nothing to weigh. The pinned case pays for no encoder pass at all,
+        # which is what it was before this function existed.
+        return allowed[0]
+
+    # Evenly spaced rather than the first N: see LANGUAGE_WINDOWS. `starts` is at
+    # least [0], so a channel shorter than one window is still asked once.
+    count = max(1, min(LANGUAGE_WINDOWS, audio.size // LANGUAGE_WINDOW))
+    span = max(0, audio.size - LANGUAGE_WINDOW)
+    starts = [0] if count == 1 else [round(i * span / (count - 1)) for i in range(count)]
+
+    totals: dict[str, float] = {c: 0.0 for c in allowed}
+    asked = 0
+    for start in starts:
+        try:
+            _, _, probs = model.detect_language(audio[start : start + LANGUAGE_WINDOW])
+        except Exception:  # noqa: BLE001 - degrades to autodetect, never to a failure
+            log.warning("language detection failed; letting whisper decide", exc_info=True)
+            return None
+        asked += 1
+        for code, prob in probs:
+            if code in totals:
+                totals[code] += float(prob)
+    if not asked:
+        return None
+
+    # Ordered by score, so the log reads as the ranking it is rather than as a
+    # verdict with no runner-up -- the same reason a refused speaker match is
+    # recorded with the name it beat.
+    ranked = sorted(totals.items(), key=lambda kv: -kv[1])
+    log.info(
+        "language: %s (%s over %d window%s)",
+        ranked[0][0],
+        ", ".join(f"{c} {v / asked:.2f}" for c, v in ranked),
+        asked,
+        "" if asked == 1 else "s",
+    )
+    return ranked[0][0]
+
+
 def transcribe_channel(
     meeting: Meeting,
     path: Path,
@@ -764,7 +890,6 @@ def transcribe_channel(
     transcript exists; everything else is corrected downstream in `notes.md`,
     because this file is immutable.
     """
-    language = config.transcription.language.strip() or None
     started = time.monotonic()
     progress.step(job, f"reading {path.name}", None)
     # A decoded array, not a path: that is what keeps PyAV out of the picture.
@@ -772,8 +897,17 @@ def transcribe_channel(
     # Two passes over the array rather than one over `np.abs(audio)`, which would
     # copy a quarter of a gigabyte to find a single number.
     peak = float(max(audio.max(initial=0.0), -audio.min(initial=0.0)))
+    # Per channel, on the decoded array this function already holds -- the
+    # microphone is the room and the loopback is the far end, and they are
+    # routinely not in the same language.
+    progress.step(job, f"identifying the language of {path.name}", None)
+    language = detect_language(model, audio, config)
     segments, info = model.transcribe(
-        audio, language=language, vad_filter=VAD_FILTER, **_hotword_kwargs(model, config)
+        audio,
+        language=language,
+        vad_filter=VAD_FILTER,
+        condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
+        **_hotword_kwargs(model, config),
     )
     # How much of the file the VAD took for voice, before any transcription. A
     # channel with no segments *and* nothing voiced held no speech to lose; one
@@ -1211,9 +1345,11 @@ def release_audio(meeting: Meeting) -> int:
     **The decision is the caller's; this is only the act.** Split out of
     :func:`release_audio_if_clean` at build step 15, when `referat promote
     --release-audio` became the second thing that deletes a meeting's audio: the
-    sidebar's off-ramp for a gate-failed meeting, where the person looking at the
-    transcript overrules the quality gate. Deleting the WAVs and recording that it
-    was deliberate has to happen the same way both times, or `audio_released`
+    off-ramp for a gate-failed meeting, where the person looking at the transcript
+    overrules the quality gate. It was the VS Code sidebar's button then and is
+    the command center's *Promote...* now, through `cli.promote_meeting`.
+    Deleting the WAVs and recording that it was deliberate has to happen the same
+    way both times, or `audio_released`
     would mean two different things.
 
     A channel whose file is already gone is not a failure — it is the state this

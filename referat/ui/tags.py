@@ -21,11 +21,11 @@ rediscovered, which is what these two attributes are.
 hides rows and never rebuilds, creating appends one row, and nothing ever reads
 the check states back in bulk. That is deliberate: rebuilding a checkable list
 and then restoring its check states races the widget, which is the Qt form of
-the lesson `referat-vscode/src/projects.ts` records. The workaround that file
-needs — reopening the picker after a create, because assigning `picker.items`
-makes VS Code recompute the ticked rows — has **no counterpart here** and must
-not be copied: a `QListWidgetItem` owns its check state and nothing recomputes
-it.
+the lesson the VS Code sidebar recorded before it was deleted at build step 23.
+The workaround *it* needed — reopening the picker after a create, because
+assigning `picker.items` makes VS Code recompute the ticked rows — had **no
+counterpart here** and must not be reinvented: a `QListWidgetItem` owns its check
+state and nothing recomputes it.
 """
 
 from __future__ import annotations
@@ -63,6 +63,16 @@ dialog could not take off, which is precisely the tag somebody opened it for.
 `referat untag` validates nothing for the same reason.
 """
 
+ARCHIVED_SUFFIX = " (archived)"
+"""What a carried tag whose project has been archived is labelled.
+
+Listed, and ticked, for `ORPHAN_SUFFIX`'s reason: otherwise this dialog could not
+take it off, which is precisely what somebody archiving a project then wants to
+do to one meeting. Marked with the project's **real name** and never as an
+orphan — an archived project is in the file and resolves, and the two states are
+opposite kinds of thing: one is finished, the other is missing.
+"""
+
 
 class TagPicker(QDialog):
     """Which projects one meeting carries. Ticks, unticks, and creates."""
@@ -74,6 +84,7 @@ class TagPicker(QDialog):
         meeting_id: str,
         carried: list[str],
         known: dict[str, str],
+        archived: set[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.config = config
@@ -82,6 +93,15 @@ class TagPicker(QDialog):
         self._carried = list(carried)
         self._checked = set(carried)
         self._known = dict(known)
+        self._archived = set(archived or ())
+        """Which of :attr:`_known` are archived, and therefore not offered.
+
+        A third set, and it touches neither of the other two: `_carried` and
+        `_checked` do not know about archiving and do not need to, so ticking,
+        unticking and the diff in :meth:`_on_apply` all work on a carried
+        archived project with no change at all. That is the two-sets design
+        paying off a second time.
+        """
         self._building = False
         self.created = False
         """Whether a project was made in here, whether or not it was applied.
@@ -143,13 +163,33 @@ class TagPicker(QDialog):
     def _rows(self) -> list[tuple[str, str]]:
         """Every id to offer, as `(id, label)`, ordered by what a person reads.
 
-        Known projects by display name, then the orphans the meeting carries.
-        Orphans last and marked, because an id with no project behind it is a
-        different kind of thing from a project and should not sort in among them.
+        Three sections, ordered by how much of a project each one is: the live
+        projects by display name, then the **archived** ones the meeting already
+        carries, then the orphans it carries. Each later section is a different
+        kind of thing from the one before it and should not sort in among them.
+
+        **An archived project the meeting does not carry is simply not offered**,
+        and that is the whole of build step 21 as this dialog sees it. One it
+        *does* carry stays, ticked and untickable, for exactly the reason an
+        orphan does: it would otherwise be the one tag this dialog could not take
+        off. It is labelled with its **real name** and never `ORPHAN_SUFFIX` —
+        the project exists, and calling it an orphan would be a lie about the
+        file.
         """
-        known = sorted(self._known.items(), key=lambda kv: kv[1].casefold())
+        live = sorted(
+            ((pid, name) for pid, name in self._known.items() if pid not in self._archived),
+            key=lambda kv: kv[1].casefold(),
+        )
+        archived = sorted(
+            (
+                (pid, self._known[pid] + ARCHIVED_SUFFIX)
+                for pid in self._carried
+                if pid in self._archived and pid in self._known
+            ),
+            key=lambda kv: kv[1].casefold(),
+        )
         orphans = [pid for pid in self._carried if pid not in self._known]
-        return [*known, *((pid, pid + ORPHAN_SUFFIX) for pid in orphans)]
+        return [*live, *archived, *((pid, pid + ORPHAN_SUFFIX) for pid in orphans)]
 
     def _fill(self) -> None:
         """Build the list once, from :attr:`_checked`. The only full build there is."""
@@ -305,11 +345,16 @@ def open_for(parent: QWidget, config: Config, meeting_id: str, carried: list[str
     render as an orphan — a worse thing to put in front of somebody than a
     refusal. The cost is that a pure *removal*, which the CLI would still allow,
     cannot be done here either; recorded in `TODO.md` rather than papered over.
+
+    The archived ids come back **beside** the map rather than subtracted from it,
+    so a carried archived project still resolves to its real name here. A
+    narrowed map would have drawn it as an orphan, which is the one thing
+    archiving must never do to a tag.
     """
-    known, complaint = cli.project_names(config)
+    known, archived, complaint = cli.project_names(config)
     if complaint:
         QMessageBox.warning(parent, "Projects", complaint)
         return False
-    picker = TagPicker(parent, config, meeting_id, carried, known)
+    picker = TagPicker(parent, config, meeting_id, carried, known, archived)
     accepted = picker.exec() == QDialog.DialogCode.Accepted
     return accepted or picker.created

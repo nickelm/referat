@@ -230,6 +230,26 @@ notes by hand:
 - **The Markdown stays in a narrow subset** — `##`/`###`, bold, italic, code, one
   level of `-` bullets, links and `[[Wikilinks]]`. Notes are translated into
   Google Docs later by a converter that handles exactly that much.
+- **The notes are written in English, whatever language the meeting was in.**
+  Meetings here are held in English and in Swedish, and `transcript.md` is in
+  whichever one was spoken — Referat detects it per channel, so a transcript may
+  even be Swedish on the microphone and English on the far end. The notes are
+  not a translation of the transcript, they are the writing-up of it, and they
+  are always in English: they are what gets pasted into a shared document, read
+  months later, and assembled into a project digest, and a notes folder that
+  switches language by meeting is one nobody can skim.
+
+  This is the same boundary as the spelling rule below and it stops in the same
+  places. It never reaches `transcript.md`, which is immutable and keeps what was
+  actually said. It never reaches a **quotation**: quote in the language it was
+  said in, and put the English gloss after it in parentheses where the point
+  turns on the wording. And it never reaches a **name** — a person, a product, a
+  project or an institution keeps its own name, so `Institutionen för
+  datavetenskap` is not *the Department of Computer Science* unless that is what
+  it actually calls itself in English.
+
+  Action item owners are names and follow the name rule; the item's own text is
+  English like the rest.
 - **U.S. spelling and conventions.** Write *organize*, *analyze*, *color*,
   *center*, *defense*, *program*, *toward*; not *organise*, *colour*, *centre*,
   *defence*, *programme*, *towards*. This is a house style, changed by editing

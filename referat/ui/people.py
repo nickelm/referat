@@ -82,6 +82,20 @@ UNKNOWN = (
     "says so rather than selecting nobody."
 )
 
+INACTIVE_HEADING = "Only archived projects"
+INACTIVE_NOTE = (
+    "Every project this name is tagged with has been archived. Derived on every "
+    "read and stored nowhere - unarchive one of their projects and they move back "
+    "up. Somebody who appears in an untagged meeting is not here: no project is "
+    "not a finished one, and neither is an orphaned tag."
+)
+"""The heading names the fact rather than calling somebody inactive.
+
+The document's field is `inactive`, which is a predicate about tags; a heading
+reading *Inactive* over a list of people would be this page holding an opinion
+about a person, which is the register its privacy note is careful to stay out of.
+"""
+
 DRIFTED_HEADING = "No voiceprint on file"
 DRIFTED_NOTE = (
     "A transcript still calls somebody this and the known-voices database holds "
@@ -122,7 +136,12 @@ class PeoplePage(QWidget):
     def __init__(self, config: Config, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.config = config
-        self._document: dict[str, Any] = {"owner": "", "projects": {}, "people": []}
+        self._document: dict[str, Any] = {
+            "owner": "",
+            "projects": {},
+            "archived": [],
+            "people": [],
+        }
         self._selected: str | None = None
         self._open_actions: dict[str, int] = {}
         """`{name: open action items}`, handed over by the window.
@@ -267,9 +286,14 @@ class PeoplePage(QWidget):
     def _fill_list(self) -> None:
         """Build the list through the search box, then reselect what was selected.
 
-        The drifted names get a section of their own at the end. Filtering hides
-        rows rather than rebuilding a model, exactly as the tag picker does — the
-        document is the truth and this is a view of it.
+        Two sections at the end, and their order is the point: people all of
+        whose projects are archived, then the drifted names. **Drift wins where
+        somebody is both**, because it is the known-voices database disagreeing
+        with a transcript — a thing to fix — while having only archived projects
+        is simply what a finished collaboration looks like.
+
+        Filtering hides rows rather than rebuilding a model, exactly as the tag
+        picker does — the document is the truth and this is a view of it.
         """
         needle = self.search.text().strip().casefold()
         wanted = self._selected
@@ -277,24 +301,33 @@ class PeoplePage(QWidget):
         try:
             self.people.clear()
             chosen: QListWidgetItem | None = None
+            inactive = []
             drifted = []
+
+            def place(person: dict[str, Any]) -> None:
+                nonlocal chosen
+                item = self._row(person)
+                self.people.addItem(item)
+                if person["name"] == wanted:
+                    chosen = item
+
             for person in self._document["people"]:
                 if needle and needle not in person["name"].casefold():
                     continue
                 if not person["in_database"]:
                     drifted.append(person)
-                    continue
-                item = self._row(person)
-                self.people.addItem(item)
-                if person["name"] == wanted:
-                    chosen = item
+                elif person["inactive"]:
+                    inactive.append(person)
+                else:
+                    place(person)
+            if inactive:
+                self.people.addItem(_heading(INACTIVE_HEADING))
+                for person in inactive:
+                    place(person)
             if drifted:
                 self.people.addItem(_heading(DRIFTED_HEADING))
                 for person in drifted:
-                    item = self._row(person)
-                    self.people.addItem(item)
-                    if person["name"] == wanted:
-                        chosen = item
+                    place(person)
         finally:
             self._loading = False
 
@@ -405,8 +438,14 @@ class PeoplePage(QWidget):
             self.appearances.addItem(item)
 
         known = self._document["projects"]
+        archived = set(self._document["archived"])
         for pid in person["tags"]:
-            item = QListWidgetItem(known.get(pid, f"{pid}?"))
+            label_text = known.get(pid, f"{pid}?")
+            # Marked here and nowhere else on a project's behalf: this is the
+            # list that explains which section the person is sitting in.
+            if pid in archived:
+                label_text = f"{label_text} (archived)"
+            item = QListWidgetItem(label_text)
             item.setData(TARGET_ROLE, pid)
             item.setIcon(self._project_icon)
             self.projects.addItem(item)
@@ -423,6 +462,8 @@ class PeoplePage(QWidget):
         appears = len(person["appears_in"])
         if not person["in_database"]:
             return DRIFTED_NOTE
+        if person["inactive"]:
+            return INACTIVE_NOTE
         return (
             f"{person['prints']} voiceprint(s) filed from {filed} meeting(s); the name "
             f"appears in {appears}. Recognition files nothing new, so the second is "
@@ -468,10 +509,11 @@ class PeoplePage(QWidget):
         """Delete a person, behind a modal that says what goes with them.
 
         Shown *before* the command runs, so there is no outcome to quote yet —
-        the same exception the projects page's Delete modal and the sidebar's are,
-        and for the same reason. What it says is the part somebody would otherwise
-        assume the other way: the labels revert too, everywhere, and the snippets
-        that would let you recognise the voice again are already gone.
+        the same exception the projects page's Delete modal and the meetings
+        page's two are, and for the same reason. What it says is the part
+        somebody would otherwise assume the other way: the labels revert too,
+        everywhere, and the snippets that would let you recognise the voice again
+        are already gone.
         """
         person = self._person(self._selected)
         if person is None:

@@ -18,8 +18,8 @@ hotkeys call.
 
 **It calls the CLI's functions, never its subprocess.** `list_document`,
 `show_document` and `transcript_document` are the same builders `referat list
---json` and friends print, so the window and the extension cannot come to
-disagree about a meeting. It reads exactly one file for itself — `notes.md`,
+--json` and friends print, so what this window says about a meeting and what the
+prompt says about it cannot come apart. It reads exactly one file for itself — `notes.md`,
 which is prose to render and not a record to interpret — and no `meta.json`, no
 `voices.json`, no `projects.json`.
 
@@ -27,8 +27,8 @@ which is prose to render and not a record to interpret — and no `meta.json`, n
 wrote down, and the reasoning is in `TODO.md`; the short form is that
 `QTextBrowser` renders Markdown, holds anchors and answers a custom URL scheme,
 which is every criterion this phase had, and that the one argument for the web
-view — reusing `referat-vscode/media/sidebar.js` — is an argument for keeping the
-column this step exists to escape.
+view — reusing the VS Code sidebar's own page — was an argument for keeping the
+column this step exists to escape. That sidebar was deleted at step 23.
 """
 
 from __future__ import annotations
@@ -131,8 +131,8 @@ class CommandCenter(QMainWindow):
         """The action items, read once per refresh and handed to two surfaces.
 
         Beside `_document` rather than inside it because the two are built by
-        different functions and `list_document` is a published shape the
-        extension still reads. Both are *handed* to the dashboard and to the
+        different functions and `list_document` is a published shape that
+        `referat list --json` prints. Both are *handed* to the dashboard and to the
         actions page, which is what keeps a sixth tab from costing a sixth scan
         of both meeting roots.
         """
@@ -194,6 +194,30 @@ class CommandCenter(QMainWindow):
         self.stop_button.setIcon(icons.glyph("stop", icons.COLORS[State.STOPPED]))
         self._on_pause_icon(State.IDLE)
 
+        # Build step 23's two, and they come first because they come first in a
+        # meeting's life: everything else here acts on a transcript, and these
+        # two act on the *audio* it was made from. Both are disabled for almost
+        # every meeting, which is honest rather than untidy — the audio is
+        # normally gone, and a meeting that still has it is a meeting waiting on
+        # one of exactly these two decisions.
+        self.rerun_button = QPushButton("Re-transcribe...")
+        self.rerun_button.setIcon(self._glyph("redo"))
+        self.rerun_button.setEnabled(False)
+        self.rerun_button.setToolTip(
+            "Transcribe this meeting again from the audio it kept. Minutes of GPU, "
+            "and the speakers are renumbered from scratch."
+        )
+        self.rerun_button.clicked.connect(self._on_rerun)
+
+        self.promote_button = QPushButton("Promote...")
+        self.promote_button.setIcon(self._glyph("promote"))
+        self.promote_button.setEnabled(False)
+        self.promote_button.setToolTip(
+            "Move this meeting out of staging into the meetings folder, deleting "
+            "the audio it still holds. Nothing else can reach a staged meeting."
+        )
+        self.promote_button.clicked.connect(self._on_promote)
+
         self.tag_button = QPushButton("Tags...")
         self.tag_button.setIcon(self._glyph("tag"))
         self.tag_button.setEnabled(False)
@@ -209,11 +233,11 @@ class CommandCenter(QMainWindow):
         self.label_button.setEnabled(False)
         self.label_button.clicked.connect(self._on_label)
 
-        # Third and fourth, and the two the window simply did not have: the
-        # sidebar could write notes and delete a meeting and this could not, so
-        # anybody using the command center had to keep the extension open for
-        # them. Notes before Delete, and Delete last and on its own, because it
-        # is the destructive one — the same order the sidebar's row uses.
+        # Third and fourth, and the two the window simply did not have until
+        # 2026-09-03: the VS Code sidebar could write notes and delete a meeting
+        # and this could not, so anybody using the command center had to keep the
+        # extension open for them. Notes before Delete, and Delete last and on its
+        # own, because it is the destructive one.
         self.notes_button = QPushButton("Generate notes...")
         self.notes_button.setIcon(self._glyph("page"))
         self.notes_button.setEnabled(False)
@@ -281,6 +305,9 @@ class CommandCenter(QMainWindow):
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
         actions.addStretch(1)
+        actions.addWidget(self.rerun_button)
+        actions.addWidget(self.promote_button)
+        actions.addSpacing(18)
         actions.addWidget(self.tag_button)
         actions.addWidget(self.label_button)
         actions.addWidget(self.notes_button)
@@ -442,8 +469,8 @@ class CommandCenter(QMainWindow):
         Called when the window is shown, on F5, on a state transition — see
         :meth:`on_state` — and after anything is written. Never on a timer: the
         tray registers this window as a :class:`referat.state.Machine` listener,
-        so it learns transitions by callback. The extension's status bar keeps
-        its poll because it is a different process with no callback to register.
+        so it learns transitions by callback. Polling is what a surface in another
+        process has to do, and this one is not in another process.
 
         Split from :meth:`_rebuild` so the filter widgets can redraw without
         rescanning both meeting roots on every keystroke.
@@ -609,7 +636,13 @@ class CommandCenter(QMainWindow):
     def _on_row_changed(self, item: QTreeWidgetItem | None, _previous: object) -> None:
         self.tag_button.setEnabled(item is not None)
         if item is None:
-            for button in (self.label_button, self.notes_button, self.delete_button):
+            for button in (
+                self.rerun_button,
+                self.promote_button,
+                self.label_button,
+                self.notes_button,
+                self.delete_button,
+            ):
                 button.setEnabled(False)
             return
         self._selected = str(item.data(0, ID_ROLE))
@@ -627,6 +660,15 @@ class CommandCenter(QMainWindow):
         # with a sentence, because *why* is the useful part there.
         self.notes_button.setEnabled(bool(meeting and meeting["transcript"]) and not live)
         self.delete_button.setEnabled(not live)
+        # `audio` is `kept` for exactly the meetings a rerun has something to run
+        # from, and `staged` for exactly the ones that have not made it into the
+        # meetings folder — which is the union of a failed gate, an audio kept on
+        # request, and the rare promotion that could not move the folder. Two
+        # conditions rather than one, because they are two different questions
+        # even though they answer the same way nearly always.
+        kept = bool(meeting and meeting["audio"] == "kept")
+        self.rerun_button.setEnabled(kept and not live)
+        self.promote_button.setEnabled(bool(meeting and meeting["staged"]) and not live)
         self._show(self._selected)
 
     def _meeting(self, meeting_id: str | None) -> dict[str, Any] | None:
@@ -736,9 +778,10 @@ class CommandCenter(QMainWindow):
     def _on_notes(self) -> None:
         """Run `/cleanup` over the selected meeting, on a thread.
 
-        The two things the sidebar could do and this window could not are this
-        and :meth:`_on_delete`; anybody living in the command center had to keep
-        the extension open for them.
+        Two of the four things the VS Code sidebar could do and this window could
+        not: this and :meth:`_on_delete` closed on 2026-09-03, and
+        :meth:`_on_rerun` and :meth:`_on_promote` closed the rest at step 23,
+        which is what let the extension be deleted.
 
         On a thread, because a cleanup pass takes a minute or two and blocking
         the GUI thread here would freeze the *recorder's* window — this process
@@ -979,6 +1022,94 @@ class CommandCenter(QMainWindow):
             return
         log.info("%s", outcome.message)
         self._selected = None
+        self.refresh()
+
+    def _on_rerun(self) -> None:
+        """Transcribe the selected meeting again, from the audio it kept.
+
+        The last thing the sidebar could do and this window could not, and the
+        one it did by opening a terminal — which was the right answer *there*,
+        since the extension is another process and `referat rerun` loads the
+        model in a third. Here it is neither: this window lives inside the tray,
+        which already owns a transcription thread, the state machine and the job
+        count. So the work goes onto that thread through
+        :meth:`referat.tray.App.rerun_meeting`, and this asks once and reports.
+
+        Nothing is awaited. The pipeline announces itself through
+        :mod:`referat.progress`, which is the activity strip and the Activity
+        tab, and says it is finished through `App.notify` — the same two places a
+        recording stopped by the hotkey reports through, which is the point.
+
+        The confirmation is not ceremony. A rerun renumbers the speakers from
+        scratch and replaces `speaker_names` wholesale on success: every name is
+        looked up again in the known-voices database, so a voice that matched
+        will match again, and one whose print sits under the threshold comes back
+        a number. That is a real cost and it is worth naming before it is paid.
+        """
+        meeting_id = self._selected
+        if meeting_id is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Re-transcribe",
+            f"Transcribe {meeting_id} again from its audio?\n\n"
+            f"Minutes of GPU, and diarization clusters from scratch - the speakers "
+            f"are renumbered and their names are looked up again in the known-voices "
+            f"database. A voice whose print no longer matches comes back as a number.\n\n"
+            f"The current transcript.md stays until the new one is written whole, "
+            f"so an interrupted run costs nothing.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        ok, message = self.app.rerun_meeting(meeting_id)
+        if not ok:
+            QMessageBox.warning(self, "Re-transcribe", message)
+            return
+        log.info("%s", message)
+        self.statusBar().showMessage(message.capitalize(), 6000)
+        self.refresh()
+
+    def _on_promote(self) -> None:
+        """Move the selected meeting out of staging, releasing whatever audio it holds.
+
+        The off-ramp for a meeting the quality gate refused, and for one
+        `[transcription].keep_audio` kept on purpose. Both are stuck in the same
+        place for the same reason — `promote_meeting` will not move a folder
+        holding a WAV, because no WAV may ever reach a synced meetings folder —
+        and both are answered by the same decision: accept the transcript and let
+        the recording go.
+
+        Behind the warning Python wrote, and shown *before* the command runs, so
+        there is no outcome to quote — the same exception :meth:`_on_delete` is,
+        and `cli.promote_warning` is the one text the prompt's refusal and this
+        modal both speak in.
+        """
+        meeting_id = self._selected
+        if meeting_id is None:
+            return
+        from referat.meeting import resolve_meeting
+
+        meeting, why = resolve_meeting(self.app.config, meeting_id)
+        if meeting is None:
+            QMessageBox.warning(self, "Promote out of staging", why)
+            return
+        answer = QMessageBox.question(
+            self,
+            "Promote out of staging",
+            f"Promote {meeting.id}?\n\n{cli.promote_warning(self.app.config, meeting)}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        outcome = cli.promote_meeting(self.app.config, meeting_id, release_audio=True)
+        if not outcome.ok:
+            QMessageBox.warning(self, "Promote out of staging", outcome.message)
+            return
+        log.info("%s", outcome.message)
+        self.statusBar().showMessage(outcome.message.replace("\n", "   -   "), 8000)
         self.refresh()
 
     def _on_copy(self, formatted: bool) -> None:

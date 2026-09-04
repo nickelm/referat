@@ -40,8 +40,8 @@ class MeetingStatus(StrEnum):
     **One field, one authority.** Every surface renders this value and none of
     them infers a state from which files happen to exist. A parallel `state` key
     beside it would be a second place to say what a meeting is, which is the
-    mistake `voices_dir`, `format_duration` and the extension's absent
-    meetings-folder setting were each pulled back from.
+    mistake `voices_dir`, `format_duration` and the VS Code extension's
+    deliberately absent meetings-folder setting were each pulled back from.
 
     :attr:`GATE_FAILED` is what earned the widening. A meeting whose transcript
     failed the quality gate keeps its audio and stays in staging, and used to be

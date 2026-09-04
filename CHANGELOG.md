@@ -2,6 +2,427 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-04 (sixth) — A repetition loop that ate twelve minutes
+
+**`2026-09-04_1001` came back missing twelve of its thirty-two minutes**, and the
+quality gate is the only reason anybody found out. From 00:12:37 to 00:24:50 the
+transcript is one sentence repeated thirty-two times, once per thirty-second
+window: *Tack för att du har tittat på den här videon!* — "thanks for watching
+this video", YouTube subtitle boilerplate and Whisper's best-known Swedish
+hallucination. It is preceded by `Ljusen.` twenty-six times, which is where the
+slide began.
+
+**A repetition loop is not a bad window, it is a bad window feeding itself.**
+faster-whisper decodes each window conditioned on the previous window's text, so
+the twenty-six `Ljusen.` lines were handed forward as context, found plausible,
+and became a sentence that then justified itself once every thirty seconds for
+twelve minutes. `condition_on_previous_text` is that feed and is now `False`.
+Measured: the same stretch decoded in isolation, with no poisoned context to
+carry in, gives **2128 words** of ordinary conversation.
+
+**It was not silence, which is the version of this anybody would forgive.** The
+stretch measures **-33.8 dBFS against -34.0** for the rest of the meeting — the
+same two people talking at the same volume, replaced with one sentence.
+
+What conditioning buys is prose coherence across a window boundary, and Referat
+is unusually well placed to give that up: a transcript here is diarized,
+per-segment, relabeled, merged with a second channel and read beside timestamps
+rather than as paragraphs, and the vocabulary priming conditioning would supply
+is already bought by the hotword list — which puts every name in front of the
+model on *every* window, rather than only after somebody has already said it.
+
+Not a config knob, on the no-knobs-nobody-asked-for rule: there is no meeting for
+which the loop is the better outcome. **The gate is the backstop and not the
+fix** — `compression_ratio` 8.11 against a 2.4 ceiling is what refused the
+transcript, kept the audio and made the repair possible at all. Worth saying
+because the gate looked like a false positive on a good Swedish transcript, and
+it was the only thing in the system telling the truth.
+
+**Notes are written in English whatever language the meeting was in**, added to
+the meetings folder's `CLAUDE.md` and to the `/cleanup` prompt. The notes are not
+a translation of the transcript but the writing-up of it, and they are what gets
+pasted into a shared document, read months later and assembled into a digest — a
+notes folder that switches language by meeting is one nobody can skim. It stops
+where the spelling rule stops: never `transcript.md`, never a name, and never the
+inside of a quotation, which is quoted in the language it was said in with an
+English gloss after it where the point turns on the wording.
+
+## 2026-09-04 (fifth) — Swedish, and the languages this machine hears
+
+**`2026-09-04_1001` is a meeting with Hugo held in Swedish, and every channel
+had been pinned to English since step 1.** `[transcription].language = "en"` was
+a hint that had never been wrong before, on a machine whose meetings had all
+been in one language.
+
+`[transcription].languages` replaces it: **one key with three meanings**, each a
+real state rather than a mode flag. One code pins that language and asks Whisper
+nothing, which is the cheapest and most certain and costs no encoder pass —
+exactly what this was. Two or more run a detection pass per channel and take the
+best *of these*. `[]` is bare autodetect over all ninety-nine languages Whisper
+knows. The default is now `["en", "sv"]`. The old key is not kept as a fallback:
+`_build` warns on an unknown key and moves on, so a config still carrying
+`language` reverts to the default, which is the same behaviour it was asking for.
+
+**The middle state is the point, and it is not the same thing as the empty one.**
+There is no faster-whisper argument for "one of these" — `language` takes exactly
+one code — so `detect_language` runs the pass for its `all_language_probs`, reads
+the allowed codes out of that ranking, and hands the winner back as a pin.
+Whisper is therefore never told Norwegian was a candidate. That matters because
+Swedish sits in a dense neighbourhood — Norwegian, Danish, German, Dutch — and a
+language is chosen **once per channel**, with every segment decoded under it: an
+unrestricted guess that lands one country over does not cost a word, it costs the
+half hour. Verified against a stub: a channel scoring `no` at 0.90 and `sv` at
+0.05 is still transcribed as Swedish.
+
+**Five windows spread across the channel, not faster-whisper's one at the front.**
+Its default takes the first thirty seconds, which is the wrong end of a meeting —
+somebody sitting down, a "hej, can you hear me", a laptop finding its microphone,
+and on the loopback of an in-person meeting, silence. Four extra encoder passes,
+under a second against the half hour they decide for. On this meeting's
+microphone: **sv 0.98 against en 0.01**.
+
+**Per channel and never per segment.** The microphone is the room and the
+loopback is the far end, and a Swedish room on an English call is exactly the
+meeting this exists for. `multilingual=True` re-detects on every segment, which
+turns one wrong guess per channel into one wrong guess anywhere and writes a
+transcript that switches language mid-sentence.
+
+**Every failure degrades to unrestricted autodetect**, which is the rule
+diarization already runs under: a language Whisper picks unaided is a worse guess
+than a restricted one and an immeasurably better one than a traceback. Codes the
+model does not know are dropped with a warning rather than silently — Swedish is
+`sv` and not `se`, the file is hand-written, and a typo that quietly narrowed the
+set to nothing would come back as bare autodetect, which is the failure this
+exists to prevent wearing the face of the fix. Membership is checked in
+`transcribe.py` against the loaded model and **not** in `config.py`, which must
+not import faster-whisper: `referat config` runs in the base install.
+
+`2026-09-04_1001` was re-transcribed under the new setting. It had been stuck at
+`transcribing` since 10:33 — the tray was killed mid-job, which is the sticky
+lie `meeting.reconcile_interrupted` closes from the next start.
+
+## 2026-09-04 (fourth) — A dialog that fitted on the screen
+
+**The Speakers dialog had become unusable, and the cause was the fix for the
+last complaint about it.** `FlowLayout` reports a height for its width, which is
+how the chips wrap; the cost is that a long gallery is a long *minimum* height,
+and a minimum propagates up into the dialog, which then cannot be made smaller.
+With enough projects on this machine for a scoped list to be long, the dialog
+opened taller than the display and the name field at the bottom could not be
+reached — the one control it exists for.
+
+The chips now sit in a `QScrollArea` that takes the slack above the name field
+and scrolls when even that is not enough. Measured on a synthetic 60-name
+gallery: the dialog's `minimumSizeHint` was **1770 px** and is now **312 px**,
+constant however long the gallery gets. `referat/ui/flow.py` is untouched — the
+wrapping was right and this is the layout above it deciding how much room the
+wrapping gets. Horizontal scrolling is off, because chips wrap and a horizontal
+bar could only mean the wrapping had failed.
+
+The lines label is **hidden rather than emptied** for a speaker who still has
+snippets, which is almost all of them: it was an empty widget holding spacing
+away from the gallery, and its stretch went to the thing that actually grows.
+
+## 2026-09-04 (third) — One UI
+
+**Build step 23.** The VS Code extension is gone, and the two things it could do
+that the command center could not are now in the window. In that order — closing
+the gap first and deleting second, because deleting while something was still
+missing would have been a feature removal dressed up as a cleanup.
+
+**Parity was audited rather than assumed**, against `sidebar.ts`'s own
+`runAction` switch, which is the whole list of things a row could ever do. Ten
+actions; eight already had a home in the window, on the tray menu, or in the
+Activity tab. The two that did not were `reTranscribe` and `accept` — and both
+are about the **audio** rather than about a transcript, which is why they were
+last: everything else in this window acts on `transcript.md`, `notes.md` or
+`meta.json`, and these two act on the one part of a meeting that cannot be
+regenerated.
+
+**Re-transcribe…** runs the pipeline again from the WAVs a meeting kept.
+`rerun.check` is the new split and where the line falls is the point: it holds
+the three questions about the *meeting* — it exists, its `meta.json` reads, its
+audio is on disk — while `run` keeps the one question about another *process*,
+`busy_tray`. That guard exists because `transcribe._RUN_LOCK` cannot see across a
+process boundary and two large-v3 models do not fit on this card; the window is
+*inside* the tray, where the lock serializes by itself, so asking it there would
+refuse the one caller it was never about. The work goes onto the tray's own
+transcription thread through the new `App.rerun_meeting` — not a `cli` function,
+because what a rerun costs is the state machine, the job count and a daemon
+thread, and a window may touch none of the three. The extension opened a
+*terminal* for this, which was right for a different process and would be absurd
+from the window that owns the GPU job. `App._queue_transcription` fell out of it:
+count the job, `try_to(TRANSCRIBING)`, start the thread were the same three lines
+in `_finish_meeting`, in `_resume` and now here.
+
+**Promote…** is the off-ramp for a meeting stuck in staging. `cli.promote_meeting`
+is the **ninth** guarded function and was `run_promote`'s entire body — *a `run_*`
+that holds a rule is a `run_*` a second surface cannot use*, for the ninth time —
+with `release_audio` staying a direction on one function rather than becoming two,
+the way `set_archived` and `apply_tags` already are. `cli.promote_warning` beside
+it is `delete_warning`'s counterpart, the one text the prompt's refusal and the
+modal both speak in, and it says what deleting a whole meeting does not have to:
+**this is irreversible in a way deleting one is not.** Deleting takes the
+transcript with the audio; this keeps the transcript and destroys the only
+material it could ever be re-derived from — and it is normally pressed on exactly
+the meeting whose transcript the gate was not confident in.
+
+Both buttons lead the action row, before *Tags…*, because they come first in a
+meeting's life. Both are disabled for almost every meeting, which is honest rather
+than untidy: the audio is normally gone, and a meeting that still has it is a
+meeting waiting on exactly one of those two decisions. Two glyphs for them,
+`_redo` and `_promote` — a circuit and deliberately not a triangle, since `_play`
+already means *hear this second of audio* two tabs away and the two must not look
+alike where one costs a second and the other costs two minutes of GPU.
+
+**Then it was deleted.** `code --uninstall-extension` first, so VS Code did the
+deregistration itself rather than being left with a manifest pointing at nothing;
+then `referat-vscode/`, then `.vscode/launch.json` and `.vscode/tasks.json`, which
+existed only to run it from source under F5. `node_modules/`, `out/` and `*.vsix`
+stay in `.gitignore`: one of those appearing here now would be somebody starting
+it again. There were no settings to clean — `referat.repoRoot` and
+`referat.claudeBinary` were never set in user or workspace settings, checked
+rather than assumed, and the extension deliberately never had a meetings-folder
+setting.
+
+**Most of the work was prose**, and it had to be. Every present-tense sentence
+about the extension became false the moment the directory went, and *a document
+describing something the code does not do* is this codebase's own most expensive
+recorded failure. `referat/`, `README.md`, `SETUP.md` and `INDEX.md` were swept:
+a claim about a live reader was rewritten, a *lesson* was kept and put in the past
+tense. Three argparse help strings said "for the VS Code extension" in text a user
+reads. `SETUP.md` section 12 is now **the command center** rather than the
+extension, with a short note at the end on uninstalling a copy still installed
+somewhere else. `INDEX.md` keeps a *Deleted* section rather than dropping the
+table, because the map is also a record of what this repository has held — and
+three things the extension taught outlived it: build every node with
+`textContent`, a picker diffs against what the meeting carries and never against
+the set it mutates, and a refusal reaches the user in the words of whatever owns
+the rule.
+
+**The `--json` documents all stay**, every one of which was written for a reader
+that no longer exists. They are the shape a surface and the CLI agree on, a
+document you can print is a document you can test, and they are what anything
+scripting this from outside Python reads. Deleting them would have been the
+mistake this step could have made. `label`'s four non-interactive flags stay for
+the same reason. And `notes.resolve_claude` still reads `~/.vscode/extensions` and
+still honours `.obsolete` — that is the **Claude Code** extension, and the two are
+easy to confuse in a sweep.
+
+Left open, and written into step 23 rather than left to be discovered: **neither
+new button has been driven against a real staged meeting**, because there is not
+one on this machine — every meeting is released and promoted — so *Promote…* has
+only been through `promote_warning`'s no-audio branch and *Re-transcribe…* has not
+run end to end. Until the next gate-failed meeting this is code that renders
+rather than code that has worked.
+
+## 2026-09-04 (second) — What if it isn't a meeting
+
+No code changed. An idea was thought through and written down as **step 22** in
+`TODO.md`, from: *"multiple types of recordings: dry runs of talks, dictated
+paper sections, and maybe other voice to text situations besides meeting
+transcription."*
+
+The position it lands on is that **a kind selects a prompt and the file it
+writes, and changes nothing else**. Capture does not change — a dry run is
+mic-only and `audio_is_clean` already counts a voiceless loopback as clean.
+Diarization does not change — *the microphone is the room*, so a second voice in
+a dictation is a second person. The vocabulary stays "meeting", because renaming
+it spans nine modules, a TypeScript client and a synced folder to buy a word. And
+`notes._spawn` already takes `prompt` and `expect` as parameters, so a
+`/script <id>` writing `script.md` costs a command file in the meetings folder
+and a wrapper.
+
+Three things came out of the reading that were not obvious from the outside:
+
+- **The kind that most wants its audio is the kind that cannot be written up.**
+  You would keep a dry run's WAV to hear your own delivery, but `keep_audio`
+  leaves a meeting in staging, `promote_meeting` refuses a folder holding a WAV,
+  the passes run with cwd at the meetings folder, and `cli.pending` skips staged.
+  Unresolved, and recorded as unresolved.
+- **A kind is the one thing known *before* transcription**, unlike a project tag
+  — which reopens per-kind hotwords on their own terms, since step 12b's refusal
+  was that there is nothing to select on at the moment the model runs. Only if
+  the kind is set at `Meeting.create` time, though, and this idea also wants it
+  settable afterwards.
+- **`notes._spawn` already has a parameter called `kind`**, meaning the progress
+  namespace. Two different `kind`s in one module is how that gets confusing.
+
+The sharpest new rule is for dictation: the draft is the thing you ship, so a
+pass may reflow, punctuate, de-um and fix transcription errors against the
+glossary, and may never add a claim, a citation, a hedge or a transition that
+carries an argument. That is *a wrong name is worse than no name*, applied to
+prose.
+
+`CLAUDE.md` is deliberately untouched. It describes what exists, and it already
+carries the scar of having described step 16's toast in the present tense when
+nothing had been built.
+
+## 2026-09-04 — A project can be finished
+
+Build step 21, planned and built the same day: *"the ability to archive (and
+unarchive) projects. Keep them in archive, keep their times, associate people
+with projects so they can be set as inactive?"*
+
+### Finished is not the same as a mistake
+
+Projects were the first of the three entities that grows without bound. A thread
+of work ends and its name sits in the tag picker forever beside the four that are
+live, and the only tool for it was `project rm` — which is the wrong tool, and
+loudly so: it cascades nothing, so every meeting it tagged keeps the id as an
+orphan and the record of what those meetings were about is destroyed to make a
+picker shorter.
+
+`archived_at` in `projects.json` is the other answer, and **it is a presentation
+decision and the whole of it.** The entry stays in the file, every meeting keeps
+its tag, that tag still resolves to its display name everywhere, the glossary
+still feeds the hotword list Whisper is handed, and `referat tag` will still add
+it. What stops is the *offering*.
+
+A timestamp rather than an `archived: bool`, because `""` is already that file's
+falsy absence and a flag beside a date would be two places saying one thing —
+while a flag instead of one throws away the fact worth keeping. Re-archiving does
+not move the date, on the rule that stopped `rerun` clearing `speaker_names`:
+re-running a command may not rewrite history. `SCHEMA_VERSION` stayed at 1,
+because a file written before this step loads with every project active, and that
+is *true* of it rather than a migration waiting to happen.
+
+### The rule the whole feature is built around
+
+**`name_map()` is never narrowed.** Having archived projects fall out of that map
+would have hidden them everywhere for free, in about four characters, and it
+would have been a bug — a quiet one. `tags_cell` and `rows.tags_text` render an
+id *missing* from that map with a trailing `?`, because that is what an orphan
+is. A narrowed map would have turned every archived project's tags into orphans
+in `referat list`, in `list --json`, in the meetings tree, on the dashboard, on
+the people page and in the extension, all at once: the exact quiet disappearance
+this codebase keeps designing against.
+
+So archivedness travels *beside* the map, as `ProjectsDB.archived_ids()`, and
+that sentence now lives in that method's docstring where the next person to have
+the idea will read it. The evidence that the line was drawn in the right place is
+that **the VS Code extension needed no change at all** — a frozen surface that
+needed zero work is what a presentation-only change looks like from outside.
+
+Two documents changed and one of them for free: `project_document` spreads
+`to_json`, so the field arrived with no code, and `people_document` gained
+`archived` and a per-person `inactive`. `list_document`, `show_document`,
+`pending` and `actions_document` gained nothing, on the rule that a document
+gains a field only where something renders a difference.
+
+### One function with a direction, and two no-ops that write nothing
+
+`cli.set_archived(config, pid, archived)` is the sixth guarded project function
+and takes a direction rather than being two functions, which is what `apply_tags`
+and `set_action_done` already are; two would have been two copies of the same
+open, mutate, save and report differing in one boolean. Both no-ops come back
+`ok` having written nothing — verified by hash, since a second archive leaves
+`projects.json` byte-identical — and the already-archived message names the date,
+because that is what tells a no-op from a write at a prompt.
+
+`referat tag` still adds an archived id, deliberately. `apply_tags` refuses an
+*unknown* id for a reason written beside it, and an archived id is not an orphan;
+refusing would widen that guard past its own recorded reason and make a late
+meeting for a finished project cost three writes. It is *a missing tag must never
+cost a name* said one entity along: **an archived project must never cost a tag.**
+That generalized into a new Conventions rule — hiding is presentation and never a
+constraint.
+
+### The bug the feature found on its first run
+
+A person is inactive when every project they carry is archived, derived on every
+read and stored nowhere. Computed in `cli.people_document`, which already had the
+projects file open, and pointedly **not** in `people.directory` — that module
+never opens `projects.json`, and `gallery` is built on it, so archivedness there
+would have reached the speaker dialog's scoping, which is the one place it must
+never go.
+
+Then the first run called somebody inactive who had been in an untagged meeting
+that morning. There are three ways to be active and they are one principle — an
+unknown must never be read as an ending — and the third one, an untagged meeting,
+is invisible to `tags`, because an untagged meeting contributes no id to compare.
+Hence `Person.in_untagged`, which is a fact about `meta.json` alone and so costs
+`people.py` no new file. It distinguishes a *missing* meeting from an untagged
+one, or deleting a meeting would quietly reactivate everybody who was in it. All
+five boundaries were then driven by hand against a scratch meetings folder:
+archived-only, live, untagged-only, archived-plus-untagged, orphan-only.
+
+### In the window, archiving is a button where deleting is a modal
+
+Archive… / Unarchive sits between Rename and the red Delete — harmless,
+reversible, destructive and last. Archiving asks first, in a modal saying what it
+does *not* do; unarchiving asks nothing, because nothing was lost. The projects
+list grows an **Archived** section between the live projects and the orphans,
+ordered by how much of a project each thing is, and its heading is unselectable
+while its rows are not: you select one to unarchive it, and the form still edits
+it — the glossary above all, since that still feeds the hotword list.
+
+The tag picker hides an archived project it would *offer* and keeps one the
+meeting **carries**, ticked and removable, under its real name and `(archived)`
+rather than the orphan suffix, which would be a lie about a project that exists.
+That cost nothing to build: `_carried` and `_checked` do not know about archiving
+and do not need to, which is the two-sets design paying off a second time. The
+people page grows an **Only archived projects** section above the drifted one,
+since drift is the database disagreeing with itself and is the more urgent; the
+heading names the fact rather than calling somebody inactive.
+
+A fifteenth glyph, `_archive` — a plain body under a wide lid with a handle slot
+punched through, drawn deliberately far from `_trash`, which sits two buttons
+away and means the opposite. In `windowText` and not a state colour: `LIFECYCLE`
+is keyed on `meta.json`'s `status` and is about meetings.
+
+### The Archived section folds, and starts folded
+
+Asked for as soon as the feature had been used: a finished project is the one
+somebody is least likely to have come to this page for, so the section is closed
+on arrival and the count sits in the heading, because a folded section whose rows
+are hidden would otherwise say nothing about what it is hiding.
+
+Done with `setHidden` on a `QListWidget`, not by moving to a `QTreeWidget`. The
+tag picker already hides rather than rebuilds — for the reason that rebuilding a
+list races the widget and re-runs the reselect — and a tree would have rewritten
+`_fill_list`, `_first_project`, `select_project` and both kinds of heading in
+order to fold four rows. The heading is **enabled but not selectable**, which is
+the single flag between it and the inert orphan headings: `QListWidget` delivers
+no `itemClicked` for a disabled row, so a foldable heading has to be enabled,
+while leaving `ItemIsSelectable` off keeps it out of the selection, out of
+arrow-key navigation and out of `_first_project`'s search.
+
+Two things open it anyway and neither is a convenience. A project that has just
+been archived would otherwise vanish from the list while its own form is still on
+screen; and with no live projects at all, a folded section is a page that looks
+empty while holding four projects.
+
+### The button that did not flip
+
+Driving the fold turned up a bug in the archive button. `_fill_list` reselects
+the row that was already selected, which fires no change and so refills no form —
+the very property that keeps a half-typed glossary across a refresh — so after
+archiving, the button still read `Archive...` on a project that had just been
+archived, which is the one control somebody would click next.
+
+The fix is not to refill the form, which would have silently discarded an unsaved
+glossary, since archiving does not save one. `_fill_archive_state` is split out of
+`_fill_form` and refreshes the button and the subheading alone. Verified by
+driving the real handler with an unsaved glossary in the box: the button flips,
+the subheading gains its line without accumulating one per toggle, and the typed
+text is still there.
+
+`_on_rename` turns out to have the same staleness, and it is pre-existing rather
+than introduced here — after a rename the row shows the new name and the form's
+heading shows the old one. Left alone and written down, because the obvious fix
+is the one that eats a half-typed glossary.
+
+### What was deliberately not done
+
+Glossaries still feed the hotword list, archived or not. A glossary is read before
+any meeting has been tagged, so an archived project's terms are as likely to be
+said next week as last month, and dropping them would make archiving cost a
+transcription — worth revisiting only when the 223-token cap is actually seen
+dropping something. Meeting rows are not decorated: `?` means something
+disappeared, and nothing disappears here. And nothing cascades — no `meta.json`,
+no `notes.md`, no doc, no voiceprint.
+
 ## 2026-09-03 (ninth) — The day summary earns its provenance
 
 Ten pieces of feedback after the day summary had been read once. Six are built;

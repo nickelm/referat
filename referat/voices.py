@@ -621,7 +621,7 @@ def unknown_speakers(meeting: Meeting) -> list[str]:
     somebody to name it is asking them to file a voiceprint recorded off a
     loudspeaker under a real person's name — which is exactly how two of them got
     into the database on 2026-09-02. One filter here covers `referat label`, the
-    extension's labeling panel, `referat list`'s unnamed column, the tray's
+    command center's speaker dialog, `referat list`'s unnamed column, the tray's
     post-transcription notification and `label.run_json`'s gallery, because all
     five ask this function.
     """

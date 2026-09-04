@@ -82,9 +82,10 @@ share link — the `?tab=` in the address says which tab, or `--tab` names one. 
 needs the optional `digest` extra and one browser consent; `referat project
 link-doc` is where both are asked for.
 
-What is next: the same three verbs as buttons on the command center's projects
-page. See [TODO.md](TODO.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for
-what has landed.
+All of it is on the command center's projects page too — paste a document's link,
+pick its tab, and sync — which was the last phase of the window. See
+[TODO.md](TODO.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for what has
+landed.
 
 ## Quick start
 

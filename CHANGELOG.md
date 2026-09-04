@@ -2,6 +2,82 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-04 (ninth) — Phase 7: the digests reach the window
+
+Asked for as *"is the GDoc functionality integrated into the UI? I would like to
+be able to paste a link into the UI and not use the CLI."* It was not: step 13
+built the digests and left them reachable only from a prompt. This is build step
+20's **phase 7**, the last phase of the command center.
+
+Three buttons on the projects page — *Link doc...*, *Unlink*, *Sync now* — onto
+`cli.link_doc`, `cli.unlink_doc` and `cli.sync_project`. That those already
+existed as guarded functions is the whole reason this is a small change: the page
+implements no rule, and a refusal about a missing tab arrives in the window
+listing the document's actual tabs because that is the sentence `cli` wrote.
+
+### The link is the input, and the tab is fetched rather than typed
+
+`referat/ui/docs.py` takes the address bar or the Share button's link. A document
+id is forty-four characters out of the middle of a URL, and asking for it was
+asking a person to do a parser's job.
+
+The tabs are looked up and shown in a combo. This is the one place a window
+should *not* copy the CLI: a prompt can reasonably refuse and list the tabs in
+the refusal, and a dialog that could simply show them should. The lookup runs on
+a thread and returns through a queued signal, because this process owns the
+recorder.
+
+### The tab is never guessed, and the first version got that wrong
+
+The combo preselected the first tab. That was wrong on the very first real
+document: its tabs are `Proposal` and `Meeting Notes & Writing Log`, so the free
+default was the one tab a digest must not go in. **A wrong default that is
+visible is still a wrong default**, because the point of a dialog is that
+somebody clicks through it.
+
+Now a `?tab=` in the pasted link decides it, or a tab actually named `Meetings`
+does, and failing both nothing is selected and *Link* stays disabled. Which is
+the CLI's own rule — the tab is chosen and never guessed — not relaxed because a
+combo made a default cheap.
+
+### Renaming a tab is safe, and the display now keeps up
+
+Asked directly: *"can it be renamed later and still be found by the app?"* Yes.
+`DocRef` stores `tab_id`, which Docs mints once and never moves, so a link
+survives any rename; only *deleting* a tab breaks it, and the refusal now says
+so. What did go stale was `tab_name`, which is display text — a sync corrects it
+when it has changed rather than going on saying what the tab was called the day
+it was linked.
+
+That correction was a real bug for one commit: it ran under `--dry-run` too, so a
+dry run wrote `projects.json` while reporting that it had changed nothing. **A
+flag that is trusted before a network write has to be true for the
+harmless-looking write as well.** Fixed, and checked by setting a stale name,
+dry-running, and confirming the file was untouched.
+
+### Verified against two real documents
+
+A document Referat created, and one it did not. The second is 22,974 characters
+of somebody's prose in a tab called `Meeting Notes & Writing Log`; the block
+landed after all of it, properly bracketed, and every character of that prose is
+still there. The first had its tab renamed from `Tab 1` to `Meetings` between
+syncs and was found by id, with the stored display name corrected on the next
+pass — which is the rename question answered by running it rather than by
+reasoning about it.
+
+Two new glyphs, `_link` and `_sync`, drawn far apart on purpose: they sit one
+button from each other and mean opposite kinds of thing, and `_sync` is two
+arrows chasing each other rather than `_redo`'s single arc, because a sync
+reconciles two things and may write in one pass and nothing in the next.
+
+### Left open
+
+Nobody has clicked these buttons in a running window — they were driven
+offscreen, which is not somebody using them. A sync that fails halfway has not
+been seen in the page. And `--prune` is deliberately not in the UI at all: it is
+the one operation here that destroys somebody's prose, and it has not been run
+against a real block from anywhere yet.
+
 ## 2026-09-04 (eighth) — A digest you can keep in a document you write in
 
 Four pieces of feedback from the first real use of the digests, and one of them

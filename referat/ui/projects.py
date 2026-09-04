@@ -33,21 +33,36 @@ would either break that promise or make `config.toml` a second place to say what
 and no person, which is a short and rarely-touched list — the cost of a text
 editor is low and the cost of the promise is not.
 
-**Linking a Google Doc is not here.** `DocRef` is a list on every project and
-build step 13 is what fills it, through `project link-doc`; the CLI owns every
-mutation and that verb does not exist yet, so this page renders the doc
-references it finds and says where linking will come from. Rendering a list of
-zero is not the same as narrowing the schema to one doc — see the open question
-in `TODO.md`.
+**Linking a Google Doc is here since phase 7**, which is what made this the last
+phase of the command center: step 13 built the digests and left them reachable
+only from a prompt, and this was already the page where a project's documents
+belong. *Link doc...* opens :mod:`referat.ui.docs`, which takes a pasted share
+link and shows the document's tabs; *Unlink* and *Sync now* sit beside it. All
+three drive `cli.link_doc`, `cli.unlink_doc` and `cli.sync_project` and none of
+them implements a rule — a refusal about a missing tab arrives here listing the
+document's actual tabs because that is the sentence `cli` wrote.
+
+**The two that reach the network run on a thread**, and not one line of Qt runs
+on it: the result crosses back through the `doc_job_done` signal and the phases
+go through :mod:`referat.progress`. This process owns the recorder, and a hung
+request on the GUI thread is a window somebody cannot stop a meeting from — the
+same reasoning that put the notes queue on a worker.
+
+**This page cannot authenticate and does not try.** Google consent needs a
+terminal by construction, so a machine that has never consented gets the sentence
+saying to run one command at a prompt, once. That is a property of the paste flow
+`referat.gdocs` chose rather than a limitation this page ran into.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -64,9 +79,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from referat import cli
+from referat import cli, progress
 from referat.config import Config
 from referat.projects import clean_terms
+from referat.ui import docs as docs_dialog
 from referat.ui import icons
 
 log = logging.getLogger(__name__)
@@ -92,10 +108,7 @@ GLOSSARY_HELP = (
     "tags are what /cleanup normalizes its notes against."
 )
 
-DOCS_UNLINKED = (
-    "No Google Doc. Linking one arrives with the digests at build step 13, through "
-    "`referat project link-doc`."
-)
+DOCS_UNLINKED = "No Google Doc yet. Link one to push this project's notes into it."
 
 EXTRAS_NOTE = (
     "Terms from `config` are [transcription].hotword_extras, hand-edited in "
@@ -135,6 +148,15 @@ DISCARD = "Discard the unsaved changes to {name}?"
 class ProjectsPage(QWidget):
     """Every project, one editable at a time, over the merged hotword list."""
 
+    doc_job_done = Signal(bool, str)
+    """`(ok, message)` from a link or a sync worker.
+
+    A queued signal, because the thread that produced it may not touch a widget.
+    The same crossing `ui.shell.Bridge` makes for transitions and notifications,
+    and for the same reason: `Shell.notify` once ran a whole refresh on a
+    transcription thread and corrupted the heap three times.
+    """
+
     def __init__(self, config: Config, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.config = config
@@ -142,6 +164,16 @@ class ProjectsPage(QWidget):
         self._selected: str | None = None
         self._loading = False
         """Set while the form is being filled, so filling it does not read as editing."""
+
+        self._syncing = False
+        """Set while a link or a sync is in flight, so a second cannot be started.
+
+        Two syncs of one project at once would each hold indices from their own
+        `documents.get`, and the second would apply them to a document the first
+        had already moved.
+        """
+
+        self.doc_job_done.connect(self._on_doc_job_done)
 
         self._archived_open = False
         """Whether the Archived section is unfolded. Folded on open, deliberately.
@@ -221,9 +253,24 @@ class ProjectsPage(QWidget):
         glossary_help = QLabel(GLOSSARY_HELP)
         glossary_help.setWordWrap(True)
 
-        self.docs = QLabel()
-        self.docs.setWordWrap(True)
-        self.docs.setTextFormat(Qt.TextFormat.PlainText)
+        # A list rather than the label this was until phase 7, because a doc is
+        # now something you select in order to unlink it. It stays short by
+        # nature -- a project has one or two -- so it is sized to its contents
+        # rather than given a share of the pane.
+        self.docs = QListWidget()
+        self.docs.setMaximumHeight(88)
+        self.docs.setAlternatingRowColors(True)
+        self.docs.currentItemChanged.connect(lambda *_: self._refresh_doc_buttons())
+
+        self.link_button = QPushButton("Link doc...")
+        self.link_button.setAutoDefault(False)
+        self.link_button.clicked.connect(self._on_link_doc)
+        self.unlink_button = QPushButton("Unlink")
+        self.unlink_button.setAutoDefault(False)
+        self.unlink_button.clicked.connect(self._on_unlink_doc)
+        self.sync_button = QPushButton("Sync now")
+        self.sync_button.setAutoDefault(False)
+        self.sync_button.clicked.connect(self._on_sync)
 
         self.save_button = QPushButton("Save")
         self.save_button.setAutoDefault(False)
@@ -259,8 +306,19 @@ class ProjectsPage(QWidget):
         detail.addWidget(QLabel("Glossary"))
         detail.addWidget(glossary_help)
         detail.addWidget(self.glossary, 1)
+        # The same order the title row uses and for the same reason: harmless,
+        # then reversible, then the one that goes out to the network and writes
+        # into somebody's document.
+        docs_row = QHBoxLayout()
+        docs_row.setContentsMargins(0, 0, 0, 0)
+        docs_row.addStretch(1)
+        docs_row.addWidget(self.link_button)
+        docs_row.addWidget(self.unlink_button)
+        docs_row.addWidget(self.sync_button)
+
         detail.addWidget(QLabel("Google Docs"))
         detail.addWidget(self.docs)
+        detail.addLayout(docs_row)
         detail.addLayout(save_row)
         detail.addWidget(self.message)
         self.detail = QWidget()
@@ -578,6 +636,7 @@ class ProjectsPage(QWidget):
                 self.description.clear()
                 self.glossary.setPlainText("")
                 self.docs.clear()
+                self._refresh_doc_buttons()
                 self.detail.setEnabled(False)
                 return
             self.detail.setEnabled(True)
@@ -589,7 +648,7 @@ class ProjectsPage(QWidget):
             self._fill_archive_state(project, summary)
             self.description.setText(project["description"])
             self.glossary.setPlainText("\n".join(project["glossary"]))
-            self.docs.setText(_docs_text(project["docs"]))
+            self._fill_docs(project)
         finally:
             self._loading = False
         self._on_edited()
@@ -816,6 +875,162 @@ class ProjectsPage(QWidget):
 
     # --- Messages -----------------------------------------------------------
 
+    # --- Google Docs (build step 20, phase 7) -------------------------------
+
+    def _fill_docs(self, project: dict[str, Any]) -> None:
+        """The documents this project is linked to, one row each.
+
+        A row carries the `gdoc_id` rather than showing it, because what somebody
+        reads is which document and which tab, and what `unlink_doc` needs is the
+        id — the same split every list in this window makes between a display
+        name and the id underneath it.
+        """
+        self.docs.clear()
+        for doc in project["docs"]:
+            tab = doc["tab_name"] or doc["tab_id"] or "(no tab recorded)"
+            item = QListWidgetItem(icons.glyph("link", self._icon_color()), f"{tab}")
+            item.setData(ID_ROLE, doc["gdoc_id"])
+            item.setToolTip(f"{doc['gdoc_id']}\ntab {doc['tab_id']}")
+            self.docs.addItem(item)
+        if not project["docs"]:
+            item = QListWidgetItem(DOCS_UNLINKED)
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.docs.addItem(item)
+        self._refresh_doc_buttons()
+
+    def _refresh_doc_buttons(self) -> None:
+        """Unlink needs a selected doc; Sync needs one to exist. Both need a project.
+
+        Disabled rather than hidden, which is the same choice the meetings tab
+        makes for *Re-transcribe...* and *Promote...*: a button that is there and
+        greyed says the operation exists and what it wants, and a button that
+        vanishes says nothing at all.
+        """
+        project = self._project(self._selected)
+        linked = bool(project and project["docs"])
+        selected = self.docs.currentItem()
+        has_doc = bool(selected and selected.data(ID_ROLE))
+        self.link_button.setEnabled(project is not None and not self._syncing)
+        self.unlink_button.setEnabled(has_doc and not self._syncing)
+        self.sync_button.setEnabled(linked and not self._syncing)
+
+    def _icon_color(self) -> str:
+        return self.palette().windowText().color().name()
+
+    def _on_link_doc(self) -> None:
+        """Ask which document and which tab, then link and backfill on a thread."""
+        project = self._project(self._selected)
+        if project is None:
+            return
+        dialog = docs_dialog.LinkDocDialog(self.config, project["name"], self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        answers = dialog.result_link()
+        pid = project["id"]
+        self._run_doc_job(
+            f"Linking {pid}",
+            progress.SYNC,
+            pid,
+            lambda: cli.link_doc(self.config, pid, **answers),
+        )
+
+    def _on_unlink_doc(self) -> None:
+        """Detach one document. Local, instant, and behind a modal that says what it is not.
+
+        A modal rather than a straight click because the button sits beside two
+        that reach the network, and because the thing worth saying is what
+        unlinking does *not* do — the same shape as the archive modal one section
+        up.
+        """
+        project = self._project(self._selected)
+        item = self.docs.currentItem()
+        if project is None or item is None or not item.data(ID_ROLE):
+            return
+        gdoc_id = item.data(ID_ROLE)
+        confirmed = QMessageBox.question(
+            self,
+            "Unlink this document?",
+            f"Referat will stop writing into it.\n\n"
+            f"The document is not touched: every block it already holds stays exactly "
+            f"where it is, and this is not a delete. Each meeting also keeps its record "
+            f"of what was written there, so linking the same document again finds those "
+            f"blocks already current instead of re-rendering every one of them.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        outcome = cli.unlink_doc(self.config, project["id"], gdoc_id)
+        self._show_outcome(outcome)
+
+    def _on_sync(self) -> None:
+        """Reconcile this project's docs against the meetings tagged with it."""
+        project = self._project(self._selected)
+        if project is None:
+            return
+        pid = project["id"]
+        self._run_doc_job(
+            f"Syncing {pid}",
+            progress.SYNC,
+            pid,
+            lambda: cli.sync_project(
+                self.config, pid, progress=lambda phase: progress.step(f"sync:{pid}", phase)
+            ),
+        )
+
+    def _run_doc_job(self, what: str, kind: str, target: str, work) -> None:
+        """Run one network operation on a thread and report it when it lands.
+
+        **On a thread because this process owns the recorder.** A `documents.get`
+        plus one `batchUpdate` per block is a network round trip per meeting, and
+        a hung request on the GUI thread is a window somebody cannot stop a
+        meeting from — the same reasoning that put the notes queue on a worker.
+
+        Not one line of Qt runs in `work`: the result crosses back through
+        :attr:`doc_job_done`, which is a queued signal, and the phases go through
+        :mod:`referat.progress`, which knows nothing about toolkits. That is the
+        rule this project paid three heap corruptions for.
+
+        One at a time, and the buttons say so while it runs. Two syncs of the
+        same project at once would each hold indices from their own
+        `documents.get` and the second would apply them to a document the first
+        had already moved.
+        """
+        self._syncing = True
+        self._refresh_doc_buttons()
+        self._complain(f"{what}...")
+        progress.begin(f"{kind}:{target}", kind, target, "starting")
+
+        def run() -> None:
+            try:
+                outcome = work()
+            except Exception as exc:  # noqa: BLE001 - a page may not kill the process
+                log.exception("%s failed", what)
+                self.doc_job_done.emit(False, f"{what} failed: {exc}")
+            else:
+                self.doc_job_done.emit(outcome.ok, outcome.message)
+            finally:
+                progress.end(f"{kind}:{target}")
+
+        threading.Thread(target=run, name="digest", daemon=True).start()
+
+    def _on_doc_job_done(self, ok: bool, message: str) -> None:
+        """Back on the GUI thread. Refresh, then say what happened."""
+        self._syncing = False
+        self.refresh()
+        self._show_outcome(cli.Outcome(ok, message))
+
+    def _show_outcome(self, outcome: cli.Outcome) -> None:
+        """An outcome in the words its rule's owner wrote, unedited.
+
+        The guarantee `cli.Outcome` exists for, and the reason a refusal about a
+        missing tab arrives here listing the document's actual tabs rather than
+        as "could not link".
+        """
+        if outcome.ok:
+            self.refresh()
+        self._complain(outcome.message)
+
     def _complain(self, message: str) -> None:
         """Show a refusal in the words of whoever owns the rule, unedited."""
         self.message.setText(message)
@@ -865,19 +1080,3 @@ def _toggle_text(text: str, open_: bool, count: int) -> str:
     be two copies of the same format string.
     """
     return f"{'▾' if open_ else '▸'}  {text} ({count})"
-
-
-def _docs_text(docs: list[dict[str, Any]]) -> str:
-    """The Google Docs a project is linked to, or where linking will come from.
-
-    A list rather than one doc, because the schema is a list: step 13 specifies
-    zero or more docs per project, and a page rendering one would be the screen
-    narrowing the model. Today it renders zero, since nothing writes a `DocRef`
-    until `project link-doc` exists.
-    """
-    if not docs:
-        return DOCS_UNLINKED
-    return "\n".join(
-        f"{doc['gdoc_id']}  tab {doc['tab_name'] or doc['tab_id'] or '(none)'}"
-        for doc in docs
-    )

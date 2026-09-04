@@ -2257,15 +2257,23 @@ def sync_project(
     db = projects.ProjectsDB.load(config)
 
     lines: list[str] = []
+    renamed: list[tuple[str, str, str]] = []
     ok = True
     for doc in project.docs:
         say(f"reading {doc.gdoc_id}")
         try:
-            content, body_end = gdocs.read_tab(config, doc.gdoc_id, doc.tab_id)
+            content, body_end, live_title = gdocs.read_tab(config, doc.gdoc_id, doc.tab_id)
         except gdocs.GoogleError as exc:
             lines.append(f"{doc.gdoc_id}: {exc}")
             ok = False
             continue
+
+        if live_title and live_title != doc.tab_name:
+            # The link is by tab id, so a rename costs nothing but the display
+            # text -- corrected here rather than left saying what the tab was
+            # called on the day it was linked.
+            renamed.append((doc.gdoc_id, doc.tab_name, live_title))
+            doc.tab_name = live_title
 
         anchors = digest.scan_anchors(content, body_end)
         stored = {
@@ -2345,6 +2353,33 @@ def sync_project(
             written += 1
 
         lines.append(f"  {written} block{'s' if written != 1 else ''} written")
+
+    if renamed and not dry_run:
+        # **Not on a dry run**, which says it writes nothing *anywhere* and meant
+        # it: the first version recorded the new name during a `--dry-run` and so
+        # wrote `projects.json` while reporting that it had changed nothing. A
+        # flag that is trusted before a network write is a flag that has to be
+        # true everywhere, including for the harmless-looking write.
+        #
+        # Saved once, after the loop, and only when something actually moved: a
+        # sync is otherwise a *read* of this file and must not rewrite it for
+        # nothing. Guarded on the same flag every writer here checks, and a
+        # failure to record a new display name may not fail the sync that just
+        # worked -- so it is logged rather than returned.
+        store = projects.ProjectsDB.load(config)
+        stored_project = store.projects.get(pid)
+        if store.unreadable or stored_project is None:
+            log.warning("not recording the renamed tab(s): %s could not be read", store.path)
+        else:
+            moved = {gdoc_id: title for gdoc_id, _was, title in renamed}
+            for stored_doc in stored_project.docs:
+                if stored_doc.gdoc_id in moved:
+                    stored_doc.tab_name = moved[stored_doc.gdoc_id]
+            store.save()
+    for _gdoc_id, was, now in renamed:
+        # Reported on a dry run too -- what is being suppressed above is the
+        # write, not the fact.
+        lines.append(f"  the tab is now called {now!r} (it was {was!r})")
 
     return Outcome(ok, "\n".join(lines))
 

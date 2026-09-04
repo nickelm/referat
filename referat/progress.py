@@ -39,6 +39,16 @@ log = logging.getLogger(__name__)
 
 TRANSCRIBE = "transcribe"
 NOTES = "notes"
+SYNC = "sync"
+"""A `referat project sync` pushing one project into its Google Docs.
+
+Its own kind for the reason DAY is: keys are a namespace and :func:`begin`
+replaces what is under one, and the Activity tab prints this value as a column
+where two different jobs both saying the same word is a column carrying nothing.
+A sync is also the only kind here that is network-bound rather than CPU- or
+subprocess-bound, which is worth being able to tell apart when one is slow.
+"""
+
 DAY = "day"
 """A `/standup` pass over one day's notes.
 

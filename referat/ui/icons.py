@@ -430,6 +430,61 @@ def _promote(painter: QPainter, size: int) -> None:
     painter.drawRect(QRectF(size * 0.75, size * 0.60, size * 0.13, size * 0.27))
 
 
+def _link(painter: QPainter, size: int) -> None:
+    """Two interlocking rings: a project is attached to a document.
+
+    Rings rather than a chain of many, because what is being said is *these two
+    things are joined*, and a chain at sixteen pixels is a grey smear. Drawn the
+    way `_redo` draws an arc — a filled ellipse with its middle punched out —
+    since every glyph in this set is a brush and no pen.
+
+    Deliberately far from `_redo`, which sits next to it on the projects page and
+    means the opposite kind of thing: one attaches, the other sends. A ring and a
+    ring-with-an-arrowhead would have been the same picture twice.
+    """
+    band, radius = size * 0.10, size * 0.21
+    for centre in (size * 0.36, size * 0.64):
+        box = QRectF(centre - radius, size / 2 - radius, radius * 2, radius * 2)
+        painter.drawEllipse(box)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        inner = radius - band
+        painter.drawEllipse(
+            QRectF(centre - inner, size / 2 - inner, inner * 2, inner * 2)
+        )
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+
+def _sync(painter: QPainter, size: int) -> None:
+    """Two arrows chasing each other: the doc and the notes brought back together.
+
+    A cycle rather than `_redo`'s single arc, and the difference is the point:
+    `_redo` runs one pipeline again, while this reconciles two things against
+    each other and may write in one pass and nothing in the next. Two heads
+    facing opposite ways is what says *both directions were considered*, which
+    is what a sync actually does even when it turns out to be a no-op.
+    """
+
+    def at(angle: float, radius: float) -> QPointF:
+        theta = math.radians(angle)
+        return QPointF(
+            size / 2 + radius * math.cos(theta), size / 2 - radius * math.sin(theta)
+        )
+
+    outer, inner, mid = size * 0.38, size * 0.22, size * 0.30
+    box = QRectF(size / 2 - outer, size / 2 - outer, outer * 2, outer * 2)
+    # Two arcs with two gaps, opposite each other, so the heads land at the top
+    # right and the bottom left and the ring reads as turning.
+    painter.drawPie(box, int(35 * 16), int(110 * 16))
+    painter.drawPie(box, int(215 * 16), int(110 * 16))
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    painter.drawEllipse(QRectF(size / 2 - inner, size / 2 - inner, inner * 2, inner * 2))
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+    painter.drawPolygon(QPolygonF([at(35, outer * 1.34), at(35, inner * 0.45), at(-15, mid)]))
+    painter.drawPolygon(
+        QPolygonF([at(215, outer * 1.34), at(215, inner * 0.45), at(165, mid)])
+    )
+
+
 GLYPHS: dict[str, Callable[[QPainter, int], None]] = {
     "record": _record,
     "pause": _pause,
@@ -448,6 +503,8 @@ GLYPHS: dict[str, Callable[[QPainter, int], None]] = {
     "copy": _copy,
     "redo": _redo,
     "promote": _promote,
+    "link": _link,
+    "sync": _sync,
 }
 """Seventeen shapes, each drawn filled in one colour.
 

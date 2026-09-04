@@ -3370,14 +3370,49 @@ built the same evening; the other four are below, unchecked.
 
 ### Phase 7 — Google Docs export
 
-- [ ] **Gated on step 13**, which builds `gdocs.py`, `digest.py` and the
-      `link-doc` / `unlink-doc` / `sync` verbs. There is nothing to call until
-      then, which is the same reason step 15's doc-reference box is still open
-- [ ] **Google auth is unresolved and is not resolved here.** Left as an open
-      question deliberately, because it is step 13's problem and answering it
-      early would answer it in the wrong file
-- [ ] **Nothing but notes leaves the machine**, whatever the UI makes convenient.
-      Never `transcript.md`, never audio, never `.voices/`, never an embedding
+**Built on 2026-09-04**, the same day step 13 was, and the last phase of the
+command center. Asked for as *"is the GDoc functionality integrated into the UI?
+I would like to be able to paste a link into the UI and not use the CLI."*
+
+- [x] **Gated on step 13**, and the gate opened the same day. *Link doc...*,
+      *Unlink* and *Sync now* on the projects page, driving `cli.link_doc`,
+      `cli.unlink_doc` and `cli.sync_project` — three buttons rather than a
+      second implementation, which is what splitting those out as guarded
+      functions was for
+- [x] **Google auth was step 13's problem and stayed there.** The consequence
+      for this phase is a property rather than a limitation: the paste flow needs
+      a terminal, so **the window can never authenticate**, and a dialog that
+      popped a browser consent from the thread that owns the recorder is
+      structurally impossible rather than merely avoided
+- [x] **Nothing but notes leaves the machine.** Unchanged: the UI makes linking
+      convenient and changes nothing about what is sent
+- [x] **The link is the input, not the id.** `referat/ui/docs.py` takes the
+      address bar or the Share button's link, and the `?tab=` in it preselects
+      the tab. A document id is forty-four characters out of the middle of a URL
+- [x] **The tabs are fetched and shown rather than typed**, which is the one
+      place a window should not copy the CLI: a prompt can refuse and list them
+      in the refusal, and a dialog that could simply show them should
+- [x] **The tab is never guessed.** A `?tab=` decides it, or a tab named
+      `Meetings` does, and failing both nothing is selected and *Link* stays
+      disabled. Defaulting to the first tab was written first and was wrong on
+      the very first real document, whose tabs are `Proposal` and `Meeting Notes
+      & Writing Log`. A wrong default that is *visible* is still a wrong default
+- [x] **The network runs on a thread**, reporting through a queued signal and
+      `referat.progress`, with no Qt on it. One job at a time: two syncs of one
+      project would each hold indices from their own `documents.get`
+
+### Left open
+
+- [ ] **Nobody has clicked these buttons in a running window.** They were driven
+      offscreen — the page builds, the buttons enable and disable correctly, the
+      dialog's lookup thread returns real tabs — but a `QApplication` under
+      `offscreen` is not somebody using it
+- [ ] **A sync that fails halfway has not been seen in the window.** The message
+      comes back through `doc_job_done` like any other; what is unexercised is
+      what a half-written document looks like to somebody reading the page
+- [ ] **`--prune` is not in the UI at all**, deliberately for now: it is the one
+      operation here that destroys somebody's prose, and it has never been run
+      against a real block from anywhere
 
 ### What this needs from Python first
 

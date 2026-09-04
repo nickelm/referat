@@ -941,7 +941,22 @@ revoked at myaccount.google.com, the client deleted, a badly wrong system clock
 ask for consent** — do this once at a prompt and every later sync, from the
 window included, uses the stored token.
 
-### 13d. Linking, and which tab
+### 13d. Linking, in the window
+
+The projects page in the command center has **Link doc...**, **Unlink** and
+**Sync now** under the Google Docs list, which is the easy path and the one to
+use. *Link doc...* asks whether to create a document or attach one you already
+have; for the second, paste its link, press *Look up its tabs*, and pick the tab.
+Nothing is preselected unless the link carried a `?tab=` or the document has a
+tab called `Meetings` — Referat will not choose a tab for you.
+
+The consent in 13c is the one thing the window cannot do, by design: it needs a
+terminal. Do that once at a prompt and the window uses the stored token from then
+on.
+
+The rest of this section is the same thing at the prompt.
+
+### 13e. Linking, and which tab
 
 ```powershell
 # create a new doc titled "<Project> Meeting Digest", and backfill it
@@ -984,7 +999,7 @@ marker falls back to the older rule -- it owns everything down to the next block
 Linking ends by running a sync, which is what makes attaching an existing
 document backfill every meeting already tagged.
 
-### 13e. Syncing
+### 13f. Syncing
 
 ```powershell
 referat project sync my-project --dry-run   # say what would change, write nothing
@@ -1002,7 +1017,7 @@ see a sync is owed without making a network call.
 `referat project unlink-doc my-project <gdoc-id>` stops writing there. It does
 not delete anything: every block stays exactly where it is.
 
-### 13f. Before you share a digest doc with anybody
+### 13g. Before you share a digest doc with anybody
 
 Read the `notes.md` files that will land in it first. A shared document is a much
 wider blast radius than a synced folder, what goes into it is whatever `/cleanup`

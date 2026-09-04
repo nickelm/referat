@@ -917,8 +917,19 @@ screen is a **dashboard**: recent meetings, pending untagged meetings, pending
 unlabeled speakers, the **action items** owed by whoever is looking, and a
 **day summary**. Themes are still later.
 
-**Phases 1 to 6 are built**, and only phase 7 is left, which is gated on step
-13's Google half. Phase 1 was deliberately read-only — the
+**All seven phases are built.** Phase 7 arrived on 2026-09-04, the same day step
+13 did, and is the projects page growing *Link doc...*, *Unlink* and *Sync now* —
+three buttons onto the three guarded functions, which is what splitting them out
+was for. `referat/ui/docs.py` is the dialog: it takes a pasted **link** rather
+than a document id, fetches the document's tabs on a thread and shows them, and
+**never guesses which one** — a `?tab=` in the link decides it, or a tab named
+`Meetings` does, and failing both nothing is selected and *Link* stays disabled.
+Defaulting to the first tab was written first and was wrong on the first real
+document, whose tabs are `Proposal` and `Meeting Notes & Writing Log`; a wrong
+default that is *visible* is still a wrong default, because the point of a dialog
+is that somebody clicks through it. The window **cannot authenticate**, which is
+a property of the paste flow rather than a limitation: consent needs a terminal,
+so a browser consent can never be started from the thread that owns the recorder. Phase 1 was deliberately read-only — the
 meetings list, the viewer, the cross-links, the recording buttons and the ambient
 state — so the toolkit was settled against real meetings rather than against a
 prototype, with nothing at risk. Phase 2 is the first thing this window writes,
@@ -1689,6 +1700,15 @@ so does the command center's projects page through that verb's own function; the
 terms are cleaned on the way *in* — whitespace collapsed, blanks dropped,
 deduplicated case-insensitively with the first spelling winning — so the file is
 written in the shape `hotwords.collect` will read it in.
+
+**A tab is found by its id, so renaming one is safe.** `DocRef` stores `tab_id`,
+which Docs mints once and never moves; the `tab_name` beside it is display text
+and a sync **corrects it** when it has changed rather than going on saying what
+the tab was called the day it was linked. Only *deleting* a tab breaks a link,
+and that is what the refusal says. The correction is suppressed under
+`--dry-run`, which was a real bug for one commit: a dry run recorded the new name
+while reporting that it had changed nothing, and a flag that is trusted before a
+network write has to be true for the harmless-looking write too.
 
 **Tagging is manual, and nothing is remembered on your behalf.** `referat tag
 <meeting-id> <project-id>...` and `referat untag <meeting-id> <project-id>...`

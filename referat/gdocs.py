@@ -396,16 +396,28 @@ def tab_content(tab: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
     return content, end - 1
 
 
-def read_tab(config: Config, gdoc_id: str, tab_id: str) -> tuple[list[dict[str, Any]], int]:
-    """The content and `body_end` of one stored tab, or a complaint naming what is gone."""
+def read_tab(config: Config, gdoc_id: str, tab_id: str) -> tuple[list[dict[str, Any]], int, str]:
+    """The content, `body_end` and current *title* of one stored tab.
+
+    **Found by id and never by title**, which is what makes renaming a tab safe:
+    a Docs `tabId` is minted once and does not move, so a project stays linked to
+    the tab it was linked to whatever somebody later calls it. Only *deleting*
+    the tab breaks the link, and that is what the refusal below is about.
+
+    The title comes back so a caller can correct the `tab_name` it has stored,
+    which is display text and would otherwise still say what the tab was called
+    on the day it was linked.
+    """
     document = get_document(config, gdoc_id)
     tab = find_tab(document, tab_id=tab_id)
     if tab is None:
         raise GoogleError(
-            f"the tab this project is linked to is no longer in {gdoc_id} — it was renamed "
-            f"or deleted. `referat project unlink-doc` and link it again."
+            f"the tab this project is linked to is no longer in {gdoc_id} -- it was "
+            f"deleted, or the document was replaced. Renaming it would have been fine, "
+            f"since the link is by tab id. Unlink and link it again."
         )
-    return tab_content(tab)
+    content, end = tab_content(tab)
+    return content, end, (tab.get("tabProperties") or {}).get("title", "")
 
 
 def search_docs(config: Config, query: str, limit: int = 20) -> list[dict[str, str]]:

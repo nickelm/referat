@@ -1021,7 +1021,20 @@ Changing either of the first two only affects blocks written afterwards, since
 nothing about the existing notes has moved. `referat project sync <id>
 --rerender` redraws every block, which is how the change reaches them.
 
-### 13g. Syncing
+### 13g. Syncing, and syncing by itself
+
+**You normally do not have to.** A project pushes into its documents on its own
+as soon as a meeting's notes are written — that is the *Sync automatically*
+checkbox on the projects page, on by default, and `referat project auto-sync <id>
+on|off` at the prompt. Turn it off for a document other people read and you want
+to look over first; *Sync now* still works while it is off, and `referat notes
+<id> --no-sync` skips it for one pass.
+
+A push that fails never fails the cleanup: the notes are on disk whatever Google
+says, and what you get is a line saying the document did not update.
+
+By hand:
+
 
 ```powershell
 referat project sync my-project --dry-run   # say what would change, write nothing

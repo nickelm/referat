@@ -252,6 +252,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     notes_parser.add_argument("meeting_id", help="e.g. 2026-08-27_1400")
+    notes_parser.add_argument(
+        "--no-sync",
+        action="store_false",
+        dest="sync",
+        help="write the notes without pushing them into any linked Google Doc, "
+        "whatever the project says. `project sync` afterwards still does it",
+    )
 
     people_parser = subcommands.add_parser(
         "people",
@@ -728,6 +735,20 @@ def _add_project_parser(subcommands: argparse._SubParsersAction) -> None:
         ),
     )
     unarchive.add_argument("project_id")
+
+    auto = verbs.add_parser(
+        "auto-sync",
+        help="whether this project pushes to its docs on its own when notes are written",
+        description=(
+            "On by default. Linking a document is the asking, and nobody links a "
+            "project to a digest doc and then wants the doc to be stale. Turn it "
+            "off for a document other people read and you want to look over first "
+            "-- `project sync` and the Sync now button still work while it is off. "
+            "With no argument it prints the current setting."
+        ),
+    )
+    auto.add_argument("project_id")
+    auto.add_argument("state", nargs="?", choices=("on", "off"))
 
     link_doc_parser = verbs.add_parser(
         "link-doc",
@@ -1588,7 +1609,7 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
     if args.verb is None:
         print(
             "referat project: pick a verb - add, rename, describe, glossary, "
-            "archive, unarchive, rm, link-doc, unlink-doc, sync or list",
+            "archive, unarchive, rm, link-doc, unlink-doc, sync, auto-sync or list",
             file=sys.stderr,
         )
         return 2
@@ -1624,6 +1645,19 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
 
     if args.verb == "glossary":
         return run_project_glossary(config, args)
+
+    if args.verb == "auto-sync":
+        if args.state is None:
+            project, complaint = _read_project(config, args.project_id)
+            if project is None:
+                print(f"referat project auto-sync: {complaint}", file=sys.stderr)
+                return 1
+            print(f"{project.id}: {'on' if project.auto_sync else 'off'}")
+            return 0
+        return _report(
+            set_auto_sync(config, args.project_id, args.state == "on"),
+            "project auto-sync",
+        )
 
     if args.verb == "link-doc":
         return run_project_link_doc(config, args)
@@ -3649,7 +3683,100 @@ def _loopback_section(recorder: ModuleType, wanted: str) -> str:
 # --- referat notes ----------------------------------------------------------
 
 
-def write_notes(config: Config, meeting_id: str) -> Outcome:
+def set_auto_sync(config: Config, pid: str, auto: bool) -> Outcome:
+    """Turn auto-sync on or off for one project. The only implementation of that.
+
+    **One function taking a direction rather than two**, which is what
+    `set_archived` and `apply_tags` already are: two would be two copies of the
+    same guard, mutate, save and report differing in one boolean.
+
+    Off is not a refusal to sync -- *Sync now* and `referat project sync` are
+    unaffected. It is a refusal to sync *by itself*, which is the setting
+    somebody wants on a document other people read.
+    """
+    db, project, complaint = _open_project(config, pid)
+    if project is None or db is None:
+        return Outcome(False, complaint)
+    if project.auto_sync == auto:
+        # An idempotent no-op comes back ok having written nothing, which is the
+        # case :class:`Outcome` records that it exists to describe.
+        return Outcome(True, f"{project.id} already syncs {'automatically' if auto else 'only when asked'}")
+    project.auto_sync = auto
+    db.save()
+    if not auto:
+        return Outcome(
+            True,
+            f"{project.id} will not sync by itself. `referat project sync {project.id}` "
+            f"and the Sync now button still work.",
+        )
+    if not project.docs:
+        return Outcome(
+            True,
+            f"{project.id} will sync automatically once a document is linked to it.",
+        )
+    return Outcome(
+        True,
+        f"{project.id} will sync into its {len(project.docs)} document"
+        f"{'s' if len(project.docs) != 1 else ''} whenever a meeting's notes are written.",
+    )
+
+
+def auto_sync_meeting(
+    config: Config, meeting_id: str, *, progress: Callable[[str], None] | None = None
+) -> list[str]:
+    """Push one meeting into every linked, auto-syncing project it carries.
+
+    Called after notes are written, and **never on its own initiative**: a
+    meeting reaches a document because somebody tagged it and somebody linked
+    the document, and this is the standing consequence of those two rather than
+    a third decision. See :attr:`referat.projects.Project.auto_sync`.
+
+    Returns what happened, one line per project, for a caller to append to its
+    own message. It **never raises and never fails the thing that called it**:
+    the notes are written and on disk whatever Google says, and a push that
+    could not happen is a sentence rather than a failed operation. The same
+    reasoning that makes a lifecycle it could not record a partial success.
+
+    Silent when the `digest` extra is not installed. That is not an error -- it
+    is a machine that does not do digests, and saying so after every cleanup
+    pass would be noise about a feature nobody had asked for.
+    """
+    if gdocs.available():
+        return []
+    meeting, why = resolve_meeting(config, meeting_id)
+    if meeting is None or not meeting.tags:
+        return []
+
+    db = projects.ProjectsDB.load(config)
+    if db.unreadable:
+        log.warning("not auto-syncing %s: %s could not be read", meeting_id, db.path)
+        return []
+
+    lines: list[str] = []
+    for pid in meeting.tags:
+        project = db.projects.get(pid)
+        # An orphaned tag has no project and so no documents; an archived one is
+        # synced exactly like a live one, because archiving hides a project from
+        # the tag picker and changes nothing else -- a digest that quietly went
+        # stale would be archiving costing something real.
+        if project is None or not project.docs or not project.auto_sync:
+            continue
+        try:
+            outcome = sync_project(config, pid, progress=progress)
+        except Exception as exc:  # noqa: BLE001 - a push may not cost the notes
+            log.exception("auto-sync of %s failed", pid)
+            lines.append(f"{pid} did not sync: {exc}")
+            continue
+        first = outcome.message.splitlines()
+        lines.append(
+            f"{pid}: {' / '.join(line.strip() for line in first[1:3]) or 'nothing to do'}"
+            if outcome.ok
+            else f"{pid} did not sync: {outcome.message.splitlines()[0]}"
+        )
+    return lines
+
+
+def write_notes(config: Config, meeting_id: str, *, sync: bool = True) -> Outcome:
     """Run `/cleanup` and record the lifecycle. The only implementation.
 
     Two steps that belong together and are separately owned: spawning the pass is
@@ -3663,6 +3790,11 @@ def write_notes(config: Config, meeting_id: str) -> Outcome:
     partial success rather than a failure: `notes.md` is on disk and re-running
     would rewrite it, so calling that a failure would send somebody to fix the
     wrong thing. The lifecycle refusal is quoted as the reason.
+
+    **Three steps since auto-sync**, and the third runs under exactly that rule:
+    :func:`auto_sync_meeting` pushes the meeting into every linked, auto-syncing
+    project it carries, and a document that did not update is a line in the
+    message rather than a failed cleanup. `sync=False` is the way to skip it.
     """
     from referat import notes
 
@@ -3673,17 +3805,23 @@ def write_notes(config: Config, meeting_id: str) -> Outcome:
     recorded = set_notes_written(config, meeting_id)
     if not recorded.ok:
         return Outcome(True, f"{message}, but the lifecycle was not updated: {recorded.message}")
+
+    # Third step, and the only one that may not fail this: a document that did
+    # not update is a sentence, while notes that were not written is a failure.
+    pushed = auto_sync_meeting(config, meeting_id) if sync else []
+    if pushed:
+        return Outcome(True, "\n".join([message, *(f"  {line}" for line in pushed)]))
     return Outcome(True, message)
 
 
-def run_notes(config: Config, meeting_id: str) -> int:
+def run_notes(config: Config, meeting_id: str, *, sync: bool = True) -> int:
     """`referat notes <id>`. Blocking, and it prints nothing until claude answers.
 
     The progress a window shows goes through :mod:`referat.progress`; at a prompt
     the same information is the log, which is where `claude`'s own output already
     goes line by line.
     """
-    return _report(write_notes(config, meeting_id), "notes")
+    return _report(write_notes(config, meeting_id, sync=sync), "notes")
 
 
 # --- referat people ---------------------------------------------------------
@@ -4541,7 +4679,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_people(config, as_json=args.as_json)
 
     if args.command == "notes":
-        return run_notes(config, args.meeting_id)
+        return run_notes(config, args.meeting_id, sync=args.sync)
 
     if args.command == "label":
         # Imported here rather than at module scope so `referat --version` and

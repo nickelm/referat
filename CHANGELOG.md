@@ -2,6 +2,64 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-04 (twelfth) — A digest that keeps itself current
+
+Asked as *"do I have to manually sync from project to Google Docs? What is the
+possibility of having a checkbox per-project to turn on auto-sync?"* You did, and
+now you do not.
+
+`Project.auto_sync` is on by default and `cli.write_notes` consults it after the
+cleanup pass: `cli.auto_sync_meeting` pushes that meeting into every linked,
+auto-syncing project it carries. So a meeting is transcribed, written up, and in
+the document, with nobody pressing anything in between.
+
+### It amends a Convention, and that is written down rather than slipped past
+
+*Fully offline ... two exceptions, and both only run when the user asks.* A push
+that follows a cleanup pass by itself is not asked for at that moment, so the
+asking moves to **linking the document** — which is a far more deliberate act
+than pressing sync afterwards, and nobody links a project to a digest doc and
+then wants the doc to be stale.
+
+What does **not** widen is what leaves the machine: `notes.md`, for explicitly
+tagged meetings, into explicitly linked documents, and nothing else. Per project
+rather than global, because the answer differs by document — one shared with a
+room full of people is exactly the one somebody wants to read before it updates
+itself.
+
+### Three properties it was built to have
+
+**It never fails the cleanup.** A document that did not update is a line in the
+message, not a failed pass: `notes.md` is on disk whatever Google says. That is
+the rule `write_notes` already ran under for a lifecycle it could not record, so
+this is a third step under an existing rule rather than a new one.
+
+**Absent means yes.** The four projects already linked read as auto-syncing with
+no migration, the same move `MeetingStatus` makes for its legacy values.
+`SCHEMA_VERSION` stays at 1: a key was added, not changed in meaning.
+
+**Silent with no `digest` extra.** A machine that does not do digests is not a
+machine with an error, and a sentence after every cleanup pass would be noise
+about a feature nobody had asked for.
+
+An archived project still auto-syncs, because archiving hides a project from the
+tag picker and changes nothing else — a digest quietly going stale would be
+archiving costing something real.
+
+### Reaching it
+
+`referat project auto-sync <id> [on|off]` prints or sets it; `referat notes <id>
+--no-sync` skips one pass; and the projects page has a **Sync automatically**
+checkbox that writes immediately rather than waiting for *Save*, because it is a
+switch and not a field somebody is part-way through typing — the same reason
+Archive is a button. `set_auto_sync` is the thirteenth guarded function and, like
+`set_archived`, is one function taking a direction rather than two.
+
+Driven against the live PDS document: with it on, clearing the meeting's digest
+record — which is what a re-cleanup looks like to the reconciler — re-rendered
+the block and took the meeting to `synced`; with it off the meeting was skipped
+and *Sync now* still worked.
+
 ## 2026-09-04 (eleventh) — A list that did not redraw, and unreadable selections
 
 Two things from actually using the window, and the second was not ours.

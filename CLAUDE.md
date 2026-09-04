@@ -570,7 +570,7 @@ included since step 13 — they were deliberately absent from the parser until
 then rather than present and answering "not built yet".
 
 The project verbs are `add`, `rename`, `describe`, `glossary`, `archive`,
-`unarchive`, `rm`, `link-doc`, `unlink-doc`, `sync` and `list`, and **each
+`unarchive`, `rm`, `link-doc`, `unlink-doc`, `sync`, `auto-sync` and `list`, and **each
 mutating one is a line of dispatch onto a guarded function** — `create_project`, `rename_project`, `set_description`,
 `set_glossary`, `set_archived`, `remove_project` — which the command center's
 projects page calls too. `archive` and `unarchive` are **one** guarded function
@@ -1779,6 +1779,20 @@ its `Location` or `Range`. A request without one silently targets the first tab,
 which would write a meeting into somebody's unrelated notes with no error to
 notice. Referat never writes into any other tab of a linked doc.
 
+**A sync happens by itself unless a project says not to.** `auto_sync` is on
+every project, defaults on, and is what `cli.write_notes` consults after a
+cleanup pass: `cli.auto_sync_meeting` pushes that meeting into every linked,
+auto-syncing project it carries. It is the **third step** of an operation whose
+first two are spawning `/cleanup` and recording `notes_written`, and it runs
+under that function's existing rule — a document that did not update is a line in
+the message, never a failed cleanup, because `notes.md` is on disk whatever
+Google says. Silent when the `digest` extra is not installed, since that is a
+machine that does not do digests rather than an error. An **archived** project
+still auto-syncs: archiving hides a project from the tag picker and changes
+nothing else, and a digest that quietly went stale would be archiving costing
+something real. `referat notes --no-sync` and `project auto-sync <id> off` are
+the two escapes, and *Sync now* works while it is off.
+
 **Writing the doc is reconciliation, not appending.** Each block starts with an
 anchor paragraph reading `[referat:2026-08-27_1400]`, small and gray; a block
 runs from its anchor to the next one. `referat project sync` walks that
@@ -2227,10 +2241,19 @@ disappeared, and nothing disappears here.
   nothing writes is a state that does not exist.
 - **Fully offline.** No telemetry, no cloud calls, no analytics. The only
   network access is downloading models on first use. Recording and transcription
-  never leave the machine. There are exactly two deliberate exceptions, and both
-  only run when the user asks: the cleanup pass, and step 13's digest push,
-  which contacts Google only for projects that have been explicitly linked and
-  only for meetings that have been explicitly tagged.
+  never leave the machine. There are exactly two deliberate exceptions: the
+  cleanup pass, and step 13's digest push, which contacts Google only for
+  projects that have been explicitly linked and only for meetings that have been
+  explicitly tagged. **The second is now standing rather than per-push**, since
+  `Project.auto_sync` defaults on and a push follows a cleanup pass by itself.
+  That is an amendment to *only run when the user asks*, recorded as one: the
+  asking moved to linking the document, which is a far more deliberate act than
+  pressing sync afterwards, and nobody links a project to a digest doc and then
+  wants the doc to be stale. What it does **not** widen is what leaves the
+  machine, which is `notes.md`, for explicitly tagged meetings, into explicitly
+  linked docs, and nothing else. Per project rather than global, because the
+  answer differs by document — one shared with a room full of people is exactly
+  the one somebody wants to read before it updates itself.
 - **Nothing but notes leaves the machine.** The digest sends `notes.md` and
   nothing else — never `transcript.md`, never the audio, never `.voices/`, never
   a speaker embedding. This is its own rule rather than a detail of step 13,

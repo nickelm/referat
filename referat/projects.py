@@ -225,6 +225,25 @@ class Project:
     the order it was designed in.
     """
     created_at: str = ""
+    auto_sync: bool = True
+    """Push this project's meetings into its docs as soon as their notes are written.
+
+    **On by default, and that is a deliberate change to what "only when the user
+    asks" means.** Referat is fully offline with two exceptions, both of which
+    the Conventions say run only when asked; this makes the second one standing
+    rather than per-push. The argument is that linking a document *is* the
+    asking, and it is a much more deliberate act than pressing sync afterwards:
+    nobody links a project to a digest doc and then wants the doc to be stale.
+
+    What it does **not** widen is what leaves the machine. A sync still only
+    touches projects explicitly linked, still only carries meetings explicitly
+    tagged, and still sends `notes.md` and nothing else. And it is per project
+    rather than global, because the answer differs by document: a doc shared with
+    a room full of people is exactly the one somebody wants to read before it
+    updates itself.
+
+    Off is the escape hatch and *Sync now* still works while it is off.
+    """
     archived_at: str = ""
     """When work on this thread of work stopped, or `""` while it has not.
 
@@ -255,6 +274,7 @@ class Project:
             "glossary": list(self.glossary),
             "description": self.description,
             "created_at": self.created_at,
+            "auto_sync": self.auto_sync,
             "archived_at": self.archived_at,
         }
 
@@ -282,6 +302,12 @@ class Project:
             glossary=glossary,
             description=str(raw.get("description", "")),
             created_at=str(raw.get("created_at", "")),
+            # Absent means *yes*, so every project written before this key
+            # existed reads as auto-syncing -- which is the answer that
+            # matches why they were linked. `MeetingStatus` maps its legacy
+            # values on load for the same reason: a default is a migration
+            # nobody has to run.
+            auto_sync=bool(raw.get("auto_sync", True)),
             archived_at=str(raw.get("archived_at", "")),
         )
 

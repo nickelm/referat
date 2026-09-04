@@ -75,8 +75,10 @@ place rather than appended twice, and a block whose meeting no longer carries th
 tag is reported and left alone rather than quietly removed. This is the only
 thing Referat ever sends anywhere, it happens only when you ask, and what it
 sends is `notes.md` — never the transcript, never the audio, never a voiceprint.
-Each block is bracketed by a small gray marker pair, so a digest can sit in a
-document you also write in: Referat replaces only what is between a matching
+A project pushes by itself once it is linked — writing a meeting's notes syncs
+them out, which is a per-project switch you can turn off for a document other
+people read. Each block is bracketed by a small gray marker pair, so a digest can
+sit in a document you also write in: Referat replaces only what is between a matching
 pair, and anything you wrote around it stays. Link an existing doc by pasting its
 share link — the `?tab=` in the address says which tab, or `--tab` names one. It
 needs the optional `digest` extra and one browser consent; `referat project

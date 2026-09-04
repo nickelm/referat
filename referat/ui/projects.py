@@ -63,6 +63,7 @@ from typing import Any
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QInputDialog,
@@ -267,6 +268,13 @@ class ProjectsPage(QWidget):
         self.link_button = QPushButton("Link doc...")
         self.link_button.setAutoDefault(False)
         self.link_button.clicked.connect(self._on_link_doc)
+        self.auto_sync = QCheckBox("Sync automatically when notes are written")
+        self.auto_sync.setToolTip(
+            "On by default. Turn it off for a document other people read and you "
+            "want to look over first -- Sync now still works while it is off."
+        )
+        self.auto_sync.toggled.connect(self._on_auto_sync)
+
         self.open_doc_button = QPushButton("Open in browser")
         self.open_doc_button.setAutoDefault(False)
         self.open_doc_button.clicked.connect(
@@ -326,6 +334,7 @@ class ProjectsPage(QWidget):
 
         detail.addWidget(QLabel("Google Docs"))
         detail.addWidget(self.docs)
+        detail.addWidget(self.auto_sync)
         detail.addLayout(docs_row)
         detail.addLayout(save_row)
         detail.addWidget(self.message)
@@ -914,6 +923,14 @@ class ProjectsPage(QWidget):
             item = QListWidgetItem(DOCS_UNLINKED)
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.docs.addItem(item)
+        # Set under the loading flag, or filling the form reads as somebody
+        # ticking the box and writes `projects.json` on every refresh.
+        was_loading = self._loading
+        self._loading = True
+        try:
+            self.auto_sync.setChecked(bool(project.get("auto_sync", True)))
+        finally:
+            self._loading = was_loading
         self._refresh_doc_buttons()
 
     def _refresh_doc_buttons(self) -> None:
@@ -928,10 +945,23 @@ class ProjectsPage(QWidget):
         linked = bool(project and project["docs"])
         selected = self.docs.currentItem()
         has_doc = bool(selected and selected.data(ID_ROLE))
+        self.auto_sync.setEnabled(project is not None and not self._syncing)
         self.open_doc_button.setEnabled(has_doc)
         self.link_button.setEnabled(project is not None and not self._syncing)
         self.unlink_button.setEnabled(has_doc and not self._syncing)
         self.sync_button.setEnabled(linked and not self._syncing)
+
+    def _on_auto_sync(self, checked: bool) -> None:
+        """Write the checkbox through the guarded function, never through `ProjectsDB`.
+
+        Written immediately rather than waiting for *Save*, because it is not
+        part of the form: the description and the glossary are text somebody is
+        part-way through typing and this is a switch, which is the same reason
+        Archive is a button rather than a field.
+        """
+        if self._loading or self._selected is None:
+            return
+        self._show_outcome(cli.set_auto_sync(self.config, self._selected, checked))
 
     def _refresh_docs(self) -> None:
         """Redraw the doc list alone, from the document just re-read.

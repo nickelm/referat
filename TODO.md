@@ -1552,8 +1552,44 @@ nothing of the sort. Step 13 stays gated, twice over now.
       the next hour needed no prompt. What is still unexercised is `--prune`
       against a real block, and attaching a document that already has prose in it
 
+### Auto-sync (2026-09-04)
+
+Asked as *"do I have to manually sync? What is the possibility of having a
+checkbox per-project to turn on auto-sync?"* Built the same day.
+
+- [x] **`Project.auto_sync`, on by default**, consulted by `cli.write_notes`
+      after the cleanup pass. `cli.auto_sync_meeting` pushes that meeting into
+      every linked, auto-syncing project it carries
+- [x] **Per project rather than global**, because the answer differs by document:
+      one shared with a room full of people is exactly the one somebody wants to
+      read before it updates itself
+- [x] **Absent means yes on load**, so the four projects already linked read as
+      auto-syncing without a migration -- the same move `MeetingStatus` makes for
+      its legacy values, and `SCHEMA_VERSION` stays at 1 because a key was added
+      rather than changed in meaning
+- [x] **It never fails the cleanup.** A document that did not update is a line in
+      the message; `notes.md` is on disk whatever Google says, which is the rule
+      `write_notes` already ran under for a lifecycle it could not record
+- [x] **Silent with no `digest` extra**, since that is a machine that does not do
+      digests rather than an error, and a sentence after every cleanup pass would
+      be noise about a feature nobody asked for
+- [x] **An archived project still auto-syncs**, because archiving hides a project
+      from the tag picker and changes nothing else -- a digest quietly going stale
+      would be archiving costing something real
+- [x] **This amends a Convention and is recorded as one.** *Only when the user
+      asks* moves from the push to the **linking**, which is a far more
+      deliberate act. What does not widen is what leaves the machine
+- [x] `referat project auto-sync <id> [on|off]`, `referat notes --no-sync`, and a
+      checkbox that writes immediately rather than waiting for Save -- it is a
+      switch, not a field somebody is part-way through typing
+
 ### Left open
 
+- [ ] **Auto-sync has not yet run off a real `/cleanup` pass.** It was driven by
+      clearing a meeting's `digest` record, which is what a re-cleanup looks like
+      to the reconciler, and it re-rendered and reached `synced` correctly. What
+      is unexercised is the whole of `write_notes` end to end with a document
+      attached
 - [ ] **`--prune` has never removed a real block.** It is the one operation here
       that destroys somebody's prose, and it is the least exercised
 - [x] **Closed the same day, because it stopped being hypothetical immediately.**

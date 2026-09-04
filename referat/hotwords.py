@@ -149,9 +149,13 @@ def collect(config: Config) -> list[Term]:
         for extra in config.transcription.hotword_extras:
             take(extra, CONFIG_SOURCE)
         # Read live rather than cached, so a forgotten person leaves the list
-        # with their voiceprints.
-        for name in voices.VoicesDB.load(config).names():
-            take(name, VOICES_SOURCE)
+        # with their voiceprints. Both spellings of a person -- the full name
+        # and the short name, where they differ -- because Whisper may hear
+        # either; **never the email**, which `spellings()` does not return. An
+        # address is not a word anybody says, and this is the one place a
+        # record's fields reach a speech model.
+        for term in voices.VoicesDB.load(config).spellings():
+            take(term, VOICES_SOURCE)
         # `ordered()` is by id, which is fixed at creation — so a rename cannot
         # reshuffle the prompt.
         for project in projects.ProjectsDB.load(config).ordered():

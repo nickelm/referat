@@ -52,6 +52,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from referat import voices
 from referat.config import Config
 from referat.meeting import load_meetings
 from referat.voices import VoicesDB
@@ -79,7 +80,13 @@ class Filing:
 
 @dataclass
 class Person:
-    """One name, and everywhere it appears. Never an embedding.
+    """One person — an id, two names, an address — and everywhere they appear. Never an embedding.
+
+    `id`, `name`, `short` and `email` are :class:`referat.voices.Person`'s four
+    display fields carried across without the prints. For a drifted entry — a
+    `speaker_names` value nobody is filed under — `id` is what that value
+    resolves to and `name` and `short` are the value as written, which is the
+    only spelling of them that exists.
 
     `filed_from` and `appears_in` are the two directions of the join and are kept
     apart rather than unioned, because they answer different questions: the first
@@ -93,7 +100,10 @@ class Person:
     else on this machine compares those two files.
     """
 
+    id: str
     name: str
+    short: str = ""
+    email: str = ""
     prints: int = 0
     filed_from: list[Filing] = field(default_factory=list)
     appears_in: list[str] = field(default_factory=list)
@@ -136,27 +146,40 @@ def directory(config: Config) -> list[Person]:
     meetings = load_meetings(config)
     tags_of = {meeting.id: list(meeting.tags) for meeting in meetings}
     db = VoicesDB.load(config)
-    owner = config.speakers.owner_name.strip()
+    owner = db.owner(config)
 
     found: dict[str, Person] = {}
 
-    def entry(name: str) -> Person:
-        return found.setdefault(name, Person(name=name, in_database=False))
-
-    for name, prints in db.people.items():
-        person = entry(name)
-        person.in_database = True
-        person.prints = len(prints)
-        person.filed_from = [
-            Filing(meeting=p.meeting, speaker=p.speaker, added=p.added) for p in prints
-        ]
+    for record in db.ordered():
+        found[record.id] = Person(
+            id=record.id,
+            name=record.name,
+            short=record.short,
+            email=record.email,
+            prints=len(record.prints),
+            filed_from=[
+                Filing(meeting=p.meeting, speaker=p.speaker, added=p.added)
+                for p in record.prints
+            ],
+        )
 
     for meeting in meetings:
-        for name in sorted(set(meeting.speaker_names.values())):
-            entry(name).appears_in.append(meeting.id)
+        # Keyed by what the value resolves to, so a legacy name and the id it
+        # became are one person; the value as written is kept as the name for
+        # somebody the database no longer holds.
+        seen_here: set[str] = set()
+        for value in meeting.speaker_names.values():
+            pid = voices.person_id(value)
+            if pid in seen_here:
+                continue
+            seen_here.add(pid)
+            person = found.setdefault(
+                pid, Person(id=pid, name=value, short=value, in_database=False)
+            )
+            person.appears_in.append(meeting.id)
 
     for person in found.values():
-        person.is_owner = bool(owner) and person.name == owner
+        person.is_owner = owner is not None and person.id == owner.id
         seen = {f.meeting for f in person.filed_from} | set(person.appears_in)
         person.tags = sorted({tag for mid in seen for tag in tags_of.get(mid, ())})
         # `mid in tags_of` first, deliberately: a meeting that no longer exists is
@@ -164,11 +187,11 @@ def directory(config: Config) -> list[Person]:
         # same would make a deletion read as an untagged meeting.
         person.in_untagged = any(mid in tags_of and not tags_of[mid] for mid in seen)
 
-    return [found[name] for name in sorted(found)]
+    return sorted(found.values(), key=lambda p: (p.name.casefold(), p.id))
 
 
 def project_people(config: Config) -> dict[str, set[str]]:
-    """Every project id mapped to the known names its meetings involve.
+    """Every project id mapped to the ids of the known people its meetings involve.
 
     Projects with nobody in them are simply absent rather than present and empty —
     a caller asks about the tags a meeting carries, and a missing key and an empty
@@ -182,15 +205,15 @@ def project_people(config: Config) -> dict[str, set[str]]:
     people: dict[str, set[str]] = {}
     for person in directory(config):
         for tag in person.tags:
-            people.setdefault(tag, set()).add(person.name)
+            people.setdefault(tag, set()).add(person.id)
     return people
 
 
 def gallery(config: Config, meeting: Meeting) -> tuple[list[str], list[str]]:
-    """The names to offer for this meeting first, and the rest as a second list.
+    """The people to offer for this meeting first, and the rest as a second list.
 
-    `(scoped, rest)`, both sorted, and together **exactly** the known-voices
-    database's own names — the caller may show one, the other or both, and cannot
+    `(scoped, rest)`, both lists of **ids** in the database's own order, and
+    together **exactly** the known-voices database's own people — the caller may show one, the other or both, and cannot
     end up offering a name that is not in the database or losing one that is.
 
     An untagged meeting comes back `([], every name)`, which is the honest answer
@@ -215,11 +238,13 @@ def gallery(config: Config, meeting: Meeting) -> tuple[list[str], list[str]]:
     `[speakers].owner_name` with no voiceprint behind it yet is not offered
     either.
     """
-    known = VoicesDB.load(config).names()
+    db = VoicesDB.load(config)
+    known = db.ids()
     if not meeting.tags:
         return [], known
     associated = project_people(config)
-    wanted = {name for tag in meeting.tags for name in associated.get(tag, ())}
-    wanted.add(config.speakers.owner_name.strip())
-    scoped = [name for name in known if name in wanted]
-    return scoped, [name for name in known if name not in wanted]
+    wanted = {pid for tag in meeting.tags for pid in associated.get(tag, ())}
+    if (owner := db.owner(config)) is not None:
+        wanted.add(owner.id)
+    scoped = [pid for pid in known if pid in wanted]
+    return scoped, [pid for pid in known if pid not in wanted]

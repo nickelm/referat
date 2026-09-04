@@ -29,11 +29,20 @@ step 11's labeling webview and step 20's dialog drive :func:`apply_name` and
 :func:`forget` rather than reimplementing the matching in TypeScript or in Qt.
 
 **There are two layers below the prompt and they are not the same layer.**
-:func:`apply_name` is the primitive and knows the order of writes; it is called
-by the pipeline as well. :func:`name_speaker` is the *operation* — the primitive
-plus the reserved-name rule, the meeting lookup, the refusal to rename somebody
-who already has a name, and the dashboard regeneration — and it is what every
-surface calls. The distinction is `cli.apply_tags`' against `projects.add_tags`,
+:func:`apply_name` is the primitive and knows the order of writes.
+:func:`name_speaker` is the *operation* — the primitive plus the reserved-name
+rule, the meeting lookup, resolving what was typed to a person or creating one,
+the refusal to rename somebody who already has a name, and the dashboard
+regeneration — and it is what every surface calls. (This docstring used to say
+the pipeline calls the primitive too; it never has. The pipeline matches in
+:func:`referat.voices.identify` and writes nothing here.)
+
+**A person is a record since build step 20c** — `{id, name, short, email}` in
+:class:`referat.voices.Person` — and the three things this module writes a name
+into hold different halves of it: the database and `meta.json`'s `speaker_names`
+hold the **id**, and `transcript.md` holds the **short name**, because it is
+prose. That split is what makes :func:`rename_person` an edit rather than a
+migration: the id never moves, so a rename touches one record and relabels. The distinction is `cli.apply_tags`' against `projects.add_tags`,
 and it exists for the same reason: a surface reaching past the guards would be
 the second implementation of them.
 """
@@ -50,7 +59,7 @@ from typing import Any
 
 from referat import index, paths, people, voices
 from referat.config import Config
-from referat.meeting import Meeting, load_meetings, resolve_meeting
+from referat.meeting import Meeting, MeetingStatus, load_meetings, resolve_meeting
 
 log = logging.getLogger(__name__)
 
@@ -112,13 +121,23 @@ def relabel_transcript(path: Path, mapping: dict[str, str]) -> int:
 # --- Naming and forgetting --------------------------------------------------
 
 
-def apply_name(config: Config, meeting: Meeting, speaker: str, name: str) -> bool:
-    """File `speaker`'s voice under `name` everywhere it belongs.
+def apply_name(
+    config: Config, meeting: Meeting, speaker: str, db: voices.VoicesDB, person: voices.Person
+) -> bool:
+    """File `speaker`'s voice under `person` everywhere it belongs.
 
     The database, then `meta.json`, then the transcript, then the snippets — see
     the module docstring for why that order and no other. Returns False when
     there is no embedding to file, which is the one case that cannot be repaired
     by asking again.
+
+    Takes the loaded database and the record rather than a name, since build
+    step 20c: resolving a typed name to a person — or creating one — is a
+    decision with refusals in it, and those belong in :func:`name_speaker`. The
+    record may be one :meth:`referat.voices.VoicesDB.new_person` has just made
+    and not yet saved; the save here is what lands it. `meta.json` gets the
+    **id** and the transcript gets the **short name**, which is the split
+    `tags` already makes between a record and what a person reads.
 
     **An echo cluster is refused outright.** `voices.unknown_speakers` already
     stops one being offered, but that is the wrong place to rely on: this function
@@ -128,6 +147,10 @@ def apply_name(config: Config, meeting: Meeting, speaker: str, name: str) -> boo
     person's name, and that print then sits in the
     database producing false accepts that `match_margin` cannot catch, because the
     margin compares names and this one is filed under the right one.
+
+    **So is a noise cluster**, for the other half of the same reason: a person
+    said it is not a person, its lines are out of the transcript, and a name here
+    would file a voiceprint of a corridor. See :mod:`referat.noise`.
     """
     if voices.is_echo(meeting, speaker):
         log.warning(
@@ -136,12 +159,14 @@ def apply_name(config: Config, meeting: Meeting, speaker: str, name: str) -> boo
             speaker,
         )
         return False
+    if voices.is_noise(meeting, speaker):
+        log.warning("%s: %s was marked as noise, not a person to name", meeting.id, speaker)
+        return False
     embedding = voices.stored_embedding(meeting, speaker)
     if embedding is None:
         log.warning("%s has no stored embedding in %s", speaker, meeting.id)
         return False
 
-    db = voices.VoicesDB.load(config)
     if db.unreadable:
         # An unreadable database loads as *nobody is known*, so the save below
         # would replace every voiceprint on this machine with this one. Naming
@@ -155,11 +180,12 @@ def apply_name(config: Config, meeting: Meeting, speaker: str, name: str) -> boo
             db.path,
         )
         return False
-    db.add(name, embedding, meeting.id, speaker)
+    name = person.short
+    db.add(person.id, embedding, meeting.id, speaker)
     db.save()
 
-    meeting.speaker_names[speaker] = name
-    voices.set_stored_name(meeting, speaker, name)
+    meeting.speaker_names[speaker] = person.id
+    voices.set_stored_name(meeting, speaker, person.id)
     meeting.save()
 
     changed = relabel_transcript(meeting.transcript_path, {speaker: name})
@@ -189,8 +215,8 @@ def apply_name(config: Config, meeting: Meeting, speaker: str, name: str) -> boo
     return True
 
 
-def forget(config: Config, name: str) -> tuple[int, int]:
-    """Delete a person from the database and revert their labels everywhere.
+def forget(config: Config, pid: str) -> tuple[int, int]:
+    """Delete the person `pid` from the database and revert their labels everywhere.
 
     A real deletion, not a tombstone: the embeddings go, every transcript that
     called somebody by this name goes back to calling them by the number they had
@@ -226,12 +252,25 @@ def forget(config: Config, name: str) -> tuple[int, int]:
             f"process can tell -- and saving over it would replace every voiceprint on "
             f"this machine. Nothing was deleted. Fix or move that file first."
         )
-    deleted = db.forget(name)
+    person = db.get(pid)
+    name = person.name if person is not None else pid
+    # What the transcript calls them: the short name, and — for a meeting whose
+    # `speaker_names` still holds the bare name it was written with — that
+    # spelling too. Every stored value that resolves to this id is a label the
+    # file may carry, and reverting only the current short name would leave a
+    # legacy file calling a forgotten person by their full name.
+    spellings = {person.short} if person is not None else set()
+    db.forget(pid)
+    deleted = len(person.prints) if person is not None else 0
     db.save()
 
     reverted = 0
     for meeting in load_meetings(config):
-        back = {label: n for label, n in meeting.speaker_names.items() if n == name}
+        back = {
+            label: value
+            for label, value in meeting.speaker_names.items()
+            if voices.person_id(value) == pid
+        }
         if not back:
             continue
         if len(back) > 1:
@@ -243,7 +282,8 @@ def forget(config: Config, name: str) -> tuple[int, int]:
                 ", ".join(sorted(back)),
                 min(back),
             )
-        relabel_transcript(meeting.transcript_path, {name: min(back)})
+        labels = spellings | {value for value in back.values() if value != pid}
+        relabel_transcript(meeting.transcript_path, {old: min(back) for old in labels})
         for label in back:
             meeting.speaker_names.pop(label, None)
             # The per-channel record names them too, in `name` and inside the
@@ -377,18 +417,21 @@ def stop_playback() -> None:
 # --- The prompt -------------------------------------------------------------
 
 
-def _resolve(entry: str, known: list[str]) -> str | None:
-    """Turn what was typed into a name, asking about near-misses. None to give up.
+def _resolve(entry: str, db: voices.VoicesDB) -> str | None:
+    """Turn what was typed into who to file under, asking about near-misses. None to give up.
 
-    A number picks off the list. A name close to one already in the database is
-    **confirmed rather than applied**, so a typo creates a second person only when
-    the user insists on it — the database has no way to merge two people back
-    together afterwards.
+    A number picks off the list, and comes back as that person's **id**, so a
+    namesake picked by number is never re-resolved by name. A name close to one
+    already in the database is **confirmed rather than applied**, so a typo
+    creates a second person only when the user insists on it — the database has
+    no way to merge two people back together afterwards. Anything else is handed
+    on as typed, for :func:`_file` to resolve exactly or create.
     """
+    people = db.ordered()
     if entry.isdigit():
         index = int(entry) - 1
-        if 0 <= index < len(known):
-            return known[index]
+        if 0 <= index < len(people):
+            return people[index].id
         print(f"  no name number {entry}")
         return None
 
@@ -398,12 +441,26 @@ def _resolve(entry: str, known: list[str]) -> str | None:
         return None
 
     name = entry.strip()
-    if name in known:
-        return name
+    person, why = db.resolve(name)
+    if person is not None:
+        return person.id
+    if why:
+        print(f"  {why}")
+        return None
+    known = [p.name for p in people]
     close = difflib.get_close_matches(name, known, n=1, cutoff=FUZZY_CUTOFF)
     if close and _confirm(f"  Did you mean {close[0]}?"):
-        return close[0]
+        return next(p.id for p in people if p.name == close[0])
     return name
+
+
+def _known_line(db: voices.VoicesDB) -> str:
+    """The numbered gallery the prompt prints: full name, and the short name if it differs."""
+    parts = []
+    for i, person in enumerate(db.ordered(), start=1):
+        shown = person.name if person.short == person.name else f"{person.name} ({person.short})"
+        parts.append(f"{i}) {shown}")
+    return ", ".join(parts)
 
 
 def _confirm(question: str) -> bool:
@@ -444,9 +501,9 @@ def _label_speaker(config: Config, meeting: Meeting, speaker: str) -> str:
             print(f"    {line[:100]}")
 
     while True:
-        known = voices.VoicesDB.load(config).names()
-        if known:
-            print("  known: " + ", ".join(f"{i}) {n}" for i, n in enumerate(known, start=1)))
+        db = voices.VoicesDB.load(config)
+        if db.people:
+            print("  known: " + _known_line(db))
         print(HELP if clips else HELP_NO_AUDIO)
         try:
             entry = input("  who was that? ").strip()
@@ -463,14 +520,18 @@ def _label_speaker(config: Config, meeting: Meeting, speaker: str) -> str:
             play(clips)
             continue
 
-        name = _resolve(entry, known)
-        if name is None:
+        who = _resolve(entry, db)
+        if who is None:
             continue
-        if apply_name(config, meeting, speaker, name):
-            print(f"  {speaker} is {name}")
+        named, message = _file(config, meeting, speaker, who)
+        print(f"  {message}")
+        if named:
             return "named"
-        print("  no embedding was stored for this speaker; nothing to file")
-        return "skipped"
+        if message.startswith("no embedding"):
+            return "skipped"
+        # A refusal with a way round it — a namesake in this meeting, an
+        # ambiguous name — is worth asking again rather than moving on.
+        continue
 
 
 # --- Entry points -----------------------------------------------------------
@@ -569,11 +630,18 @@ def label_document(config: Config, meeting: Meeting) -> dict[str, Any]:
     global, and every name written is still somebody's decision.
     """
     scoped, rest = people.gallery(config, meeting)
+    db = voices.VoicesDB.load(config)
+    owner = db.owner(config)
     return {
         "meeting": meeting.id,
         "dir": str(meeting.dir),
-        "known_names": voices.VoicesDB.load(config).names(),
-        "owner": config.speakers.owner_name.strip(),
+        # `known` is the records — id, full name, short name, email — and
+        # `gallery` is ids into it, since build step 20c. `known_names` stays
+        # as the flat list of full names it always was.
+        "known": [person.record() for person in db.ordered()],
+        "known_names": db.names(),
+        "owner": owner.name if owner is not None else config.speakers.owner_name.strip(),
+        "owner_id": owner.id if owner is not None else "",
         "gallery": {"tags": list(meeting.tags), "scoped": scoped, "rest": rest},
         "speakers": [
             {
@@ -597,8 +665,88 @@ def run_json(config: Config, meeting_id: str) -> int:
     return 0
 
 
-def name_speaker(config: Config, meeting_id: str, speaker: str, name: str) -> tuple[bool, str]:
+def _file(
+    config: Config,
+    meeting: Meeting,
+    speaker: str,
+    who: str,
+    short: str = "",
+    email: str = "",
+) -> tuple[bool, str]:
+    """Resolve `who` to a person — or create one — and file `speaker` under them.
+
+    The half of :func:`name_speaker` that the prompt shares: an id, a full name
+    or a short name resolves to the record it names; two people it fits equally
+    are refused by id; and text that fits nobody becomes a **new** person, whose
+    full name is the text and whose short name is `short` or, failing that, the
+    text again. Nothing derives a short name from a full one — *Lars* out of
+    *Lars Klein* is a guess about a name, and a guess that reads as authoritative
+    on every line of a transcript. `referat person rename` is where a short name
+    is decided.
+
+    `short` and `email` are for a person being created and are refused for one
+    who already exists, since silently ignoring them would leave somebody
+    believing they had set a short name they had not.
+
+    **A namesake already in this meeting is refused.** A transcript label is the
+    short name alone, so two people called `Anna` in one file are one label —
+    and every later edit to that label, a forget or a rename, would hit both.
+    See :func:`referat.voices.namesake_in`.
+    """
+    db = voices.VoicesDB.load(config)
+    if db.unreadable:
+        return False, (
+            f"{db.path} exists but could not be read, so nobody can be looked up and "
+            f"writing would replace every voiceprint on this machine. Nothing was "
+            f"filed. Fix or move that file first."
+        )
+    person, why = db.resolve(who)
+    if why:
+        return False, why
+    created = person is None
+    if person is None:
+        if complaint := voices.name_complaint(who):
+            return False, f"a name {complaint}"
+        if short and (complaint := voices.name_complaint(short)):
+            return False, f"a short name {complaint}"
+        if complaint := voices.email_complaint(email):
+            return False, f"an email {complaint}"
+        person = db.new_person(who.strip(), short.strip(), email.strip())
+    elif short.strip() or email.strip():
+        return False, (
+            f"{person.name} is already on file as {person.id}, so a short name or an "
+            f"email here would be a second record; `referat person rename {person.id}` "
+            f"is how that record changes"
+        )
+    if (other := voices.namesake_in(meeting, db, person, ignore=speaker)) is not None:
+        return False, (
+            f"{meeting.id} already has {other.name} ({other.id}) in it, whom the "
+            f"transcript calls {other.short} — the same short name as {person.name} "
+            f"({person.id}). Two people with one label cannot be told apart in one "
+            f"file; give one of them a different short name first with "
+            f"`referat person rename <id> --short <name>`"
+        )
+    if not apply_name(config, meeting, speaker, db, person):
+        return False, f"no embedding was stored for {speaker}; nothing to file"
+    if created:
+        return True, f"{speaker} is {person.name}, new on file as {person.id}"
+    return True, f"{speaker} is {person.name} ({person.id})"
+
+
+def name_speaker(
+    config: Config,
+    meeting_id: str,
+    speaker: str,
+    name: str,
+    short: str = "",
+    email: str = "",
+) -> tuple[bool, str]:
     """Name one speaker, with every rule that governs it. The only implementation.
+
+    `name` is an id, a full name or a short name of somebody on file, or the full
+    name of somebody new; `short` and `email` fill in a new record and are refused
+    for an existing one — see :func:`_file`, which is the half shared with the
+    prompt.
 
     `referat label <id> --speaker <s> --name <n>` is this printed, and the
     command center's dialog is this in process — which is the point, because the
@@ -633,7 +781,7 @@ def name_speaker(config: Config, meeting_id: str, speaker: str, name: str) -> tu
 
     if speaker not in voices.unknown_speakers(meeting):
         if name_it_has := meeting.speaker_names.get(speaker):
-            why = f"is already {name_it_has}"
+            why = f"is already {voices.VoicesDB.load(config).display(name_it_has)}"
         elif voices.is_echo(meeting, speaker):
             # Said in full rather than as "not an unnamed speaker", which is what
             # `unknown_speakers` filtering it out would otherwise reduce it to.
@@ -644,24 +792,31 @@ def name_speaker(config: Config, meeting_id: str, speaker: str, name: str) -> tu
                 "is the loopback coming back into the microphone rather than a "
                 "person, so a name here would file a voiceprint of a loudspeaker"
             )
+        elif voices.is_noise(meeting, speaker):
+            why = (
+                "was marked as noise rather than a person, so a name here would "
+                "file a voiceprint of whatever that was"
+            )
         else:
             why = f"is not an unnamed speaker in {meeting.id}"
         return False, f"{speaker} {why}"
 
-    if not apply_name(config, meeting, speaker, name):
-        return False, f"no embedding was stored for {speaker}; nothing to file"
+    named, message = _file(config, meeting, speaker, name, short, email)
+    if not named:
+        return False, message
 
-    # `apply_name` deliberately does not touch the dashboard — it is a primitive,
-    # and the pipeline calls it too. Every *entry point* that names somebody has
-    # to, or the Unnamed column goes stale the moment anything but the prompt is
-    # used.
+    # `apply_name` deliberately does not touch the dashboard — it is a primitive.
+    # Every *entry point* that names somebody has to, or the Unnamed column goes
+    # stale the moment anything but the prompt is used.
     index.write_index(config)
-    return True, f"{speaker} is {name}"
+    return True, message
 
 
-def run_apply(config: Config, meeting_id: str, speaker: str, name: str) -> int:
-    """`referat label <id> --speaker <s> --name <n>` — the prompt's answer, given."""
-    named, message = name_speaker(config, meeting_id, speaker, name)
+def run_apply(
+    config: Config, meeting_id: str, speaker: str, name: str, short: str = "", email: str = ""
+) -> int:
+    """`referat label <id> --speaker <s> --name <n> [--short <s>] [--email <e>]`."""
+    named, message = name_speaker(config, meeting_id, speaker, name, short, email)
     if not named:
         print(f"referat label: {message}", file=sys.stderr)
         return 1
@@ -669,8 +824,35 @@ def run_apply(config: Config, meeting_id: str, speaker: str, name: str) -> int:
     return 0
 
 
-def forget_person(config: Config, name: str) -> tuple[bool, str]:
+def _lookup(config: Config, who: str) -> tuple[voices.VoicesDB, voices.Person | None, str]:
+    """The database and the person `who` names, or the complaint that stopped it.
+
+    The unreadable check comes **before** the name, and the order matters for
+    the same reason it does in `cli._open_project`: with nothing loaded, every
+    name looks unknown, so the honest complaint about the file would come out
+    as a complaint about a typo nobody made.
+    """
+    db = voices.VoicesDB.load(config)
+    if db.unreadable:
+        return db, None, (
+            f"{db.path} exists but could not be read, so nobody can be looked up and "
+            f"writing would replace every voiceprint on this machine. Nothing was "
+            f"changed. Fix or move that file first."
+        )
+    person, why = db.resolve(who)
+    if why:
+        return db, None, why
+    if person is None:
+        return db, None, f"{who} is not in the known-voices database"
+    return db, person, ""
+
+
+def forget_person(config: Config, who: str) -> tuple[bool, str]:
     """Delete a person, with every rule that governs it. The only implementation.
+
+    `who` is an id, a full name or a short name, resolved exactly as
+    :func:`name_speaker` resolves one; a name two people share is refused by id
+    rather than deleting the first.
 
     `referat label --forget <name>` is this with a confirmation in front of it, and
     the command center's people page is this in process — which is the point, for
@@ -692,53 +874,36 @@ def forget_person(config: Config, name: str) -> tuple[bool, str]:
     window asks it with a modal instead. Both are asking the same thing and
     neither is asking it twice.
     """
-    db = voices.VoicesDB.load(config)
-    if db.unreadable:
-        # Checked before the name, and the order matters for the same reason it
-        # does in `cli._open_project`: with nothing loaded, every name looks
-        # unknown, so the honest complaint about the file would come out as a
-        # complaint about a typo nobody made.
-        return False, (
-            f"{db.path} exists but could not be read, so nobody can be looked up and "
-            f"writing would replace every voiceprint on this machine. Nothing was "
-            f"deleted. Fix or move that file first."
-        )
-    if name not in db.people:
-        return False, f"{name} is not in the known-voices database"
+    _db, person, complaint = _lookup(config, who)
+    if person is None:
+        return False, complaint
 
-    deleted, reverted = forget(config, name)
+    deleted, reverted = forget(config, person.id)
     # Forgetting puts labels back to SPEAKER_NN, so the Unnamed column goes up.
     index.write_index(config)
-    return True, f"Deleted {deleted} voiceprint(s) of {name}; reverted {reverted} transcript(s)."
+    return True, (
+        f"Deleted {deleted} voiceprint(s) of {person.name} ({person.id}); "
+        f"reverted {reverted} transcript(s)."
+    )
 
 
-def run_forget(config: Config, name: str, assume_yes: bool = False) -> int:
+def run_forget(config: Config, who: str, assume_yes: bool = False) -> int:
     """`referat label --forget <name>` — the confirmation, and one line of dispatch."""
-    db = voices.VoicesDB.load(config)
-    if db.unreadable:
-        # Before the name check, or an unreadable file -- which loads as nobody
-        # being known -- would come out as "that name is not in the database",
-        # sending somebody to look for a typo they did not make.
-        print(
-            f"referat label: {db.path} exists but could not be read, so nobody can be "
-            f"looked up in it. Nothing was deleted.",
-            file=sys.stderr,
-        )
-        return 1
-    if name not in db.people:
-        # Asked before the confirmation rather than after it, so a mistyped name
-        # is a refusal rather than a question about deleting somebody who does not
-        # exist. `forget_person` checks it again because it is its rule, not this
-        # command's, and a caller with no terminal reaches it directly.
-        print(f"referat label: {name} is not in the known-voices database", file=sys.stderr)
+    # Looked up before the confirmation rather than after it, so a mistyped
+    # name is a refusal rather than a question about deleting somebody who does
+    # not exist. `forget_person` looks it up again because it is its rule, not
+    # this command's, and a caller with no terminal reaches it directly.
+    _db, person, complaint = _lookup(config, who)
+    if person is None:
+        print(f"referat label: {complaint}", file=sys.stderr)
         return 1
     if not assume_yes and not _confirm(
-        f"Delete {name} and revert their labels in every transcript?"
+        f"Delete {person.name} ({person.id}) and revert their labels in every transcript?"
     ):
         print("Nothing was deleted.")
         return 0
 
-    forgotten, message = forget_person(config, name)
+    forgotten, message = forget_person(config, person.id)
     if not forgotten:
         print(f"referat label: {message}", file=sys.stderr)
         return 1
@@ -778,10 +943,10 @@ def run_drop_voiceprint(
         )
         return 1
     doomed = {
-        name: sum(1 for p in prints if p.meeting == meeting.id and p.speaker == speaker)
-        for name, prints in db.people.items()
+        pid: sum(1 for p in person.prints if p.meeting == meeting.id and p.speaker == speaker)
+        for pid, person in db.people.items()
     }
-    doomed = {name: n for name, n in doomed.items() if n}
+    doomed = {pid: n for pid, n in doomed.items() if n}
     if not doomed:
         print(
             f"referat label: no voiceprint in the database came from {speaker} "
@@ -789,7 +954,7 @@ def run_drop_voiceprint(
         )
         return 0
 
-    who = ", ".join(f"{name} ({n})" for name, n in sorted(doomed.items()))
+    who = ", ".join(f"{db.display(pid)} ({n})" for pid, n in sorted(doomed.items()))
     if not assume_yes and not _confirm(
         f"Delete the voiceprint(s) {speaker} of {meeting.id} contributed to {who}? "
         "Their transcript labels are not touched"
@@ -804,10 +969,194 @@ def run_drop_voiceprint(
         return 1
     db.save()
     total = sum(removed.values())
-    left = {name: len(db.people.get(name, [])) for name in removed}
+    left = {db.display(pid): len(db.people[pid].prints) for pid in removed}
     print(
         f"Deleted {total} voiceprint(s) from {speaker} of {meeting.id}: "
         + ", ".join(f"{name} keeps {n}" for name, n in sorted(left.items()))
     )
     # No `index.write_index`: no label moved, so no column on the dashboard did.
+    return 0
+
+
+# --- Renaming ---------------------------------------------------------------
+
+
+WIKILINK_RE_TEMPLATE = r"\[\[\s*{}\s*\]\]"
+"""How a `[[Wikilink]]` to one spelling is matched in `notes.md`. Brackets and nothing else."""
+
+
+def rename_person(
+    config: Config,
+    who: str,
+    *,
+    name: str | None = None,
+    short: str | None = None,
+    email: str | None = None,
+) -> tuple[bool, str]:
+    """Change what a person is called, everywhere a name is a label. The only implementation.
+
+    `referat person rename` is this printed, and the command center's people page
+    is this in process — the tenth guarded function, and the same arrangement
+    `cli.rename_project` has: **the id never moves, and a rename changes display
+    fields.** That sentence is the whole reason the id exists, because it is what
+    turns renaming from a migration into an edit.
+
+    Three fields, each `None` for *leave it*. The full name and the short name go
+    through :func:`referat.voices.name_complaint`, because both end up in a
+    transcript label — the short one on every line, the full one wherever a
+    legacy file spelled it out. The email goes through
+    :func:`referat.voices.email_complaint` and nowhere else: it is **stored and
+    never sent**, and it must never reach the hotword list, which
+    :meth:`referat.voices.VoicesDB.spellings` guarantees.
+
+    **What propagates, and what deliberately does not.** A changed short name is
+    relabeled into every `transcript.md` whose `speaker_names` carries this id —
+    the one sanctioned edit to that file, through :func:`relabel_transcript`, in
+    both directions as `--forget` uses it. In those same meetings' `notes.md`,
+    **`[[Wikilinks]]` to the old spelling are rewritten and nothing else is**: the
+    brackets are the one place a note is *referring* rather than *saying*, and a
+    find-and-replace across somebody's prose is the same move as spelling a name
+    onto a `SPEAKER_NN` — it reads as authoritative when it is wrong. A note
+    whose prose still uses the old name shows up on the people page as a name
+    nothing is filed under, which is the safety net either way. A rewritten note
+    drops a `synced` meeting back to `notes_written`, exactly as
+    `cli.set_notes_written` does and for the same reason: the docs now hold
+    something older, and the next sync re-renders that block. A Google Doc's own
+    prose is not reached into — the same rule as an orphaned anchor.
+
+    **A short name that would collide inside one meeting is refused**, before
+    anything is written: two people the same transcript calls `Anna` are one
+    label, and every later edit to it would hit both. See
+    :func:`referat.voices.namesake_in`.
+    """
+    db, person, complaint = _lookup(config, who)
+    if person is None:
+        return False, complaint
+    if name is None and short is None and email is None:
+        return False, "nothing to change: give --name, --short or --email"
+
+    new_name = person.name if name is None else name.strip()
+    new_short = person.short if short is None else short.strip()
+    new_email = person.email if email is None else email.strip()
+    if name is not None and (why := voices.name_complaint(new_name)):
+        return False, f"a name {why}"
+    if short is not None and new_short and (why := voices.name_complaint(new_short)):
+        return False, f"a short name {why}"
+    if not new_short:
+        # An emptied short name means "the full name", which is what a record
+        # with no short name of its own has always meant.
+        new_short = new_name
+    if why := voices.email_complaint(new_email):
+        return False, f"an email {why}"
+
+    old_short = person.short
+    old_name = person.name
+    meetings = [
+        m
+        for m in load_meetings(config)
+        if any(voices.person_id(v) == person.id for v in m.speaker_names.values())
+    ]
+    if new_short.casefold() != old_short.casefold():
+        probe = voices.Person(id=person.id, name=new_name, short=new_short)
+        for meeting in meetings:
+            other = voices.namesake_in(meeting, db, probe)
+            if other is not None:
+                return False, (
+                    f"{meeting.id} has {other.name} ({other.id}) in it, whom its "
+                    f"transcript already calls {other.short}; two people with one "
+                    f"label cannot be told apart in one file, so {person.name} "
+                    f"cannot be called that"
+                )
+
+    if (new_name, new_short, new_email) == (old_name, old_short, person.email):
+        return True, f"{person.name} ({person.id}) is unchanged"
+
+    person.name, person.short, person.email = new_name, new_short, new_email
+    db.save()
+
+    relabeled = notes_rewritten = 0
+    if new_short != old_short:
+        # Every spelling a file may carry: the previous short name, and the
+        # bare name a legacy `speaker_names` stored before ids existed. The
+        # values are rewritten to the id on the way, since the record is being
+        # saved anyway and a resolved value is one fewer thing to resolve later.
+        for meeting in meetings:
+            spellings = {old_short} | {
+                value
+                for value in meeting.speaker_names.values()
+                if voices.person_id(value) == person.id and value != person.id
+            }
+            changed = relabel_transcript(
+                meeting.transcript_path, {old: new_short for old in spellings}
+            )
+            relabeled += changed
+            for label, value in list(meeting.speaker_names.items()):
+                if voices.person_id(value) == person.id:
+                    meeting.speaker_names[label] = person.id
+                    voices.set_stored_name(meeting, label, person.id)
+            if _rewrite_wikilinks(meeting, spellings, new_short):
+                notes_rewritten += 1
+                if meeting.status is MeetingStatus.SYNCED:
+                    log.info(
+                        "%s: notes rewritten, so it is no longer synced with its docs; "
+                        "`referat project sync` is what makes it current again",
+                        meeting.id,
+                    )
+                    meeting.status = MeetingStatus.NOTES_WRITTEN
+            meeting.save()
+            log.info("%s: %s is %s now (%d line(s) relabeled)", meeting.id, old_short, new_short, changed)
+
+    said = [f"{person.id} is {person.name}"]
+    if person.short != person.name:
+        said[0] += f", called {person.short}"
+    if person.email:
+        said[0] += f", {person.email}"
+    if new_short != old_short:
+        said.append(
+            f"{relabeled} transcript line(s) relabeled {old_short} -> {new_short} across "
+            f"{len(meetings)} meeting(s); [[{old_short}]] rewritten in {notes_rewritten} "
+            f"note(s), prose left alone"
+        )
+        if notes_rewritten:
+            said.append("a linked Google Doc holds the old name until its next sync")
+    return True, ". ".join(said) + "."
+
+
+def _rewrite_wikilinks(meeting: Meeting, spellings: set[str], new: str) -> bool:
+    """`[[old]]` becomes `[[new]]` in this meeting's `notes.md`. True when the file changed.
+
+    The brackets and their contents, nothing outside them — see
+    :func:`rename_person` for why the prose is left alone. Written through
+    :func:`referat.paths.write_text_atomic`, like the transcript. A missing or
+    unreadable note is `False`, not an error: most meetings have no notes yet.
+    """
+    path = meeting.dir / paths.NOTES_MD
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    pattern = re.compile(
+        WIKILINK_RE_TEMPLATE.format("(?:" + "|".join(re.escape(s) for s in spellings) + ")")
+    )
+    rewritten, count = pattern.subn(f"[[{new}]]", text)
+    if not count:
+        return False
+    paths.write_text_atomic(path, rewritten)
+    return True
+
+
+def run_rename(
+    config: Config,
+    who: str,
+    *,
+    name: str | None,
+    short: str | None,
+    email: str | None,
+) -> int:
+    """`referat person rename <id> [--name] [--short] [--email]` — one line of dispatch."""
+    renamed, message = rename_person(config, who, name=name, short=short, email=email)
+    if not renamed:
+        print(f"referat person: {message}", file=sys.stderr)
+        return 1
+    print(message)
     return 0

@@ -98,6 +98,13 @@ machine and it is no part of any note.
   saying the same thing — and do not edit the transcript to remove it, which is
   `referat debleed`'s job and not yours. If a meeting is visibly full of these,
   say so once in the note rather than silently working around it.
+- **A `SPEAKER_NN` may not be a person at all.** A room microphone also hears
+  the corridor, a door and the meeting next door, and diarization gives that a
+  number like anybody else — fragments, half-words, sentences that answer
+  nothing in the conversation. Do not invent a participant out of one. If it is
+  plainly noise, say so once in the note and leave its lines out of the summary;
+  removing them from the transcript is `referat denoise`'s job (a person marks
+  it, and `transcription.noise` in `meta.json` records what went) and not yours.
 
 **The speech is immutable. The labels are not.** Nothing may ever change a word
 of what was said. A speaker label is metadata that happens to live in this file,
@@ -144,7 +151,7 @@ make.
     "audio_released": false
   },
   "tags": ["kundprojekt"],
-  "speaker_names": {"SPEAKER_01": "Anna"},
+  "speaker_names": {"SPEAKER_01": "anna-karlsson"},
   "referat_version": "0.1.0"
 }
 ```
@@ -180,9 +187,13 @@ person reads. An id in `tags` with no entry in `projects.json` is an *orphan*, l
 behind by a deleted project, and is worth mentioning rather than ignoring.
 
 **`speaker_names` is the authority on who a label is** — the mapping from this
-meeting's `SPEAKER_NN` to a real person. A speaker missing from it is one nobody
-has named yet, and their `snippets` are the clips `referat label` will play when
-somebody does. The `embedding` beside them is the voiceprint that matched, or
+meeting's `SPEAKER_NN` to a real person. Its value is the person's **id** in the
+known-voices database (`anna-karlsson`; an older meeting may hold the bare name
+it was written with), while the transcript renders that person's **short name**
+(`Anna`), which is the spelling to use in a note and in a `[[Wikilink]]`. Two
+people can share a short name and are still two ids; `referat people` lists
+both in full. A speaker missing from it is one nobody has named yet, and their
+`snippets` are the clips `referat label` will play when somebody does. The `embedding` beside them is the voiceprint that matched, or
 would have; `match` records the best candidate even when it was refused, which is
 what the thresholds get tuned on. None of that belongs in a note.
 
@@ -265,7 +276,11 @@ notes by hand:
 
 `[[Wikilinks]]` mark people and projects: `[[Anna]]`, `[[Intake pipeline]]`. They
 have no target on disk — they are what connects notes to each other, and what a
-project digest is assembled around.
+project digest is assembled around. Spell a person the way the transcript's
+label does, which is their short name: that is what `referat person rename`
+finds and rewrites when somebody is renamed, and prose it leaves alone. A
+person's full name lives on their record — `referat people` prints it beside the
+short name — and is not something to work out from a transcript.
 
 ### The action items are parsed, so their shape matters
 

@@ -1473,7 +1473,14 @@ def _transcribe_meeting(meeting: Meeting, config: Config) -> Meeting:
         # transcribed first so its speakers number from SPEAKER_01, so the loopback
         # does not exist yet when the mic finishes. The same fact that makes
         # `merge` a separate step.
-        suppression = bleed.suppress(transcripts, config.bleed, config.speakers.owner_name)
+        # By id since build step 20c: a matched cluster's `name` is the
+        # person's id, and the owner it must be compared against is whoever
+        # the config's name resolves to. Nobody on file yet means no cluster
+        # can have matched them, so an empty owner spares nothing wrongly.
+        owner = voices.owner_person(config)
+        suppression = bleed.suppress(
+            transcripts, config.bleed, owner.id if owner is not None else ""
+        )
         bleed.describe(suppression)
         paths.write_text_atomic(
             meeting.transcript_path,

@@ -135,7 +135,7 @@ def slugify(name: str) -> str:
     return _SLUG_STRIP_RE.sub("-", ascii_only.lower()).strip("-")
 
 
-def _free_id(base: str, taken: Iterable[str]) -> str:
+def free_id(base: str, taken: Iterable[str]) -> str:
     """`base`, or `base-2`, `base-3`, ... — the way a colliding meeting folder is suffixed."""
     used = set(taken)
     candidate, n = base, 2
@@ -413,7 +413,7 @@ class ProjectsDB:
         """Create a project from a display name. Callers validate with :func:`name_complaint`."""
         cleaned = " ".join(name.split())
         project = Project(
-            id=_free_id(slugify(cleaned), self.projects),
+            id=free_id(slugify(cleaned), self.projects),
             name=cleaned,
             created_at=dt.datetime.now().isoformat(timespec="seconds"),
         )

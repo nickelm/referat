@@ -84,9 +84,9 @@ def main() -> int:
     good = scratch_config(root / "good", {"Anna": [a_print("Anna")], "Bo": [a_print("Bo")]})
     db = voices.VoicesDB.load(good)
     check("a good file is not flagged unreadable", not db.unreadable)
-    check("both people load", sorted(db.people) == ["Anna", "Bo"], str(sorted(db.people)))
+    check("both people load", sorted(db.people) == ["anna", "bo"], str(sorted(db.people)))
 
-    db.add("Cleo", [0.2] * 8, "2026-01-02_1000", "SPEAKER_02")
+    db.add(db.new_person("Cleo").id, [0.2] * 8, "2026-01-02_1000", "SPEAKER_02")
     db.save()
     backups = sorted((root / "good" / voices.BACKUPS_DIR).glob("voices-*.json"))
     check("a backup was written before the save", len(backups) == 1)
@@ -98,13 +98,13 @@ def main() -> int:
             str(sorted(kept["people"])),
         )
     now = voices.VoicesDB.load(good)
-    check("the save landed", sorted(now.people) == ["Anna", "Bo", "Cleo"])
+    check("the save landed", sorted(now.people) == ["anna", "bo", "cleo"])
 
     # --- 2. Rotation --------------------------------------------------------
     print("\n=== rotation ===")
     for n in range(voices.BACKUPS_KEPT + 5):
         db = voices.VoicesDB.load(good)
-        db.add(f"P{n}", [0.3] * 8, "2026-01-03_1100", "SPEAKER_03")
+        db.add(db.new_person(f"P{n}").id, [0.3] * 8, "2026-01-03_1100", "SPEAKER_03")
         # The stamp has one-second resolution, so force distinct names rather
         # than sleeping 20 seconds inside a fixture.
         voices._back_up(good.voices_dir() / paths.VOICES_JSON)
@@ -175,7 +175,7 @@ def main() -> int:
     missing = replace(missing, paths=replace(missing.paths, voices_dir=root / "missing"))
     db = voices.VoicesDB.load(missing)
     check("a missing file is not flagged", not db.unreadable)
-    db.add("Dana", [0.4] * 8, "2026-01-04_1200", "SPEAKER_04")
+    db.add(db.new_person("Dana").id, [0.4] * 8, "2026-01-04_1200", "SPEAKER_04")
     db.save()
     check("and saves normally, seeding the folder", (root / "missing" / paths.VOICES_JSON).exists())
 

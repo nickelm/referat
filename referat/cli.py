@@ -88,6 +88,7 @@ NEEDS_CONFIG = (
     "day",
     "debleed",
     "delete",
+    "denoise",
     "devices",
     "hotwords",
     "index",
@@ -95,6 +96,7 @@ NEEDS_CONFIG = (
     "list",
     "notes",
     "people",
+    "person",
     "project",
     "promote",
     "reflow",
@@ -284,6 +286,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit the same people as JSON, for the command center",
     )
 
+    _add_person_parser(subcommands)
+
     subcommands.add_parser(
         "devices",
         help="list the audio devices, and which ones [audio] selects",
@@ -406,6 +410,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="actually remove the lines. Without it, nothing is written",
     )
 
+    denoise = subcommands.add_parser(
+        "denoise",
+        help="mark a diarized speaker as noise, not a person, and remove its lines",
+        description=(
+            "Diarization clusters whatever the microphone hears, the corridor and "
+            "the meeting next door included, and the only way to stop the unnamed "
+            "queue asking about such a cluster used to be naming it - which files "
+            "a voiceprint of a door. This marks one SPEAKER_NN as noise: it is "
+            "never offered a name, no voiceprint is filed, its snippets go, and "
+            "every line under that label is removed from transcript.md. A person "
+            "decides this by listening; nothing in the data checks it. A cluster "
+            "somebody has already named is refused - `referat label --forget` "
+            "comes first. Dry by default: --apply writes, and records every "
+            "removed line under transcription.noise in meta.json first, so the "
+            "removal can be read back."
+        ),
+    )
+    denoise.add_argument("meeting_id", help="e.g. 2026-08-27_1400")
+    denoise.add_argument(
+        "--speaker",
+        required=True,
+        metavar="SPEAKER_NN",
+        help="the cluster that is not a person, as `referat show` lists it",
+    )
+    denoise.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually remove the lines. Without it, nothing is written",
+    )
+
     delete = subcommands.add_parser(
         "delete",
         help="delete a meeting and everything in it",
@@ -467,7 +501,21 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument(
         "--name",
         metavar="NAME",
-        help="the name to give --speaker",
+        help="who --speaker is: an id, a full name or a short name already on file, "
+        "or the full name of somebody new",
+    )
+    label.add_argument(
+        "--short",
+        metavar="NAME",
+        default="",
+        help="for somebody new: what the transcript calls them (default: the full "
+        "name). Refused for a person already on file; `person rename` changes a record",
+    )
+    label.add_argument(
+        "--email",
+        metavar="ADDRESS",
+        default="",
+        help="for somebody new: an address, stored and never sent",
     )
     label.add_argument(
         "--drop-voiceprint",
@@ -548,6 +596,51 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser
 
+
+
+def _add_person_parser(subcommands: argparse._SubParsersAction) -> None:
+    """`referat person <verb>`: the record behind a name, and changing it.
+
+    One verb so far, `rename`, because a person is created by `referat label`
+    and deleted by `referat label --forget`, and what was missing was the edit
+    between them. The people themselves are listed by `referat people`.
+    """
+    person = subcommands.add_parser(
+        "person",
+        help="change what a known person is called",
+        description=(
+            "A person is a record with an id that never moves: a full name, a "
+            "short name the transcript renders, and an optional email that is "
+            "stored and never sent. `referat people` lists them with their ids. "
+            "`rename` changes any of the three; a changed short name is relabeled "
+            "into every transcript the person appears in and into the "
+            "[[Wikilinks]] of those meetings' notes, and nowhere else."
+        ),
+    )
+    verbs = person.add_subparsers(dest="person_command", metavar="<verb>", required=True)
+
+    rename = verbs.add_parser(
+        "rename",
+        help="change a person's full name, short name or email",
+        description=(
+            "The id does not change. A changed short name is relabeled into every "
+            "transcript.md whose speaker_names carries this person and rewritten "
+            "in the [[Wikilinks]] of those meetings' notes.md; prose is left alone, "
+            "and a linked Google Doc holds the old name until its next sync. A "
+            "short name two people in one meeting would share is refused."
+        ),
+    )
+    rename.add_argument("who", help="an id, a full name or a short name on file")
+    rename.add_argument("--name", metavar="NAME", default=None, help="the full name")
+    rename.add_argument(
+        "--short",
+        metavar="NAME",
+        default=None,
+        help="what the transcript calls them; an empty string means the full name",
+    )
+    rename.add_argument(
+        "--email", metavar="ADDRESS", default=None, help="an address; an empty string clears it"
+    )
 
 
 def _add_actions_parser(subcommands: argparse._SubParsersAction) -> None:
@@ -1172,8 +1265,9 @@ def run_show(config: Config, meeting_id: str, as_json: bool = False) -> int:
     for channel, block in sorted((transcription.get("channels") or {}).items()):
         if isinstance(block, dict):
             lines.append(f"  {channel:<10} {_channel_line(block)}")
+    db = voices.VoicesDB.load(config)
     for label, speaker in sorted(_speaker_blocks(transcription).items()):
-        lines.append(f"  {label:<10} {_speaker_line(meeting, label, speaker)}")
+        lines.append(f"  {label:<10} {_speaker_line(meeting, label, speaker, db)}")
     if document["unnamed"]:
         lines.append(
             f"  unnamed    {', '.join(document['unnamed'])} "
@@ -1228,7 +1322,9 @@ def _speaker_blocks(transcription: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _speaker_line(meeting: Meeting, label: str, speaker: dict[str, Any]) -> str:
+def _speaker_line(
+    meeting: Meeting, label: str, speaker: dict[str, Any], db: voices.VoicesDB
+) -> str:
     """What a diarized cluster resolved to, and what the match nearly said.
 
     The candidate and its runner-up are printed whenever they are recorded,
@@ -1241,15 +1337,22 @@ def _speaker_line(meeting: Meeting, label: str, speaker: dict[str, Any]) -> str:
     because it is the authority on who a label is and `referat label` writes it.
     The line then says what the match *would* have called the cluster, which on
     a hand-named speaker is exactly the comparison worth having.
+
+    Both hold an id since build step 20c — or the bare name a file written
+    before it stored — and are rendered through the database, with the id in
+    brackets, so a record and what a person reads are both on the line.
     """
     name = meeting.speaker_names.get(label) or speaker.get("name")
-    parts = [str(name) if name else "unnamed"]
+    parts = [f"{db.display(str(name))} ({voices.person_id(str(name))})" if name else "unnamed"]
     if speaker.get("echo"):
         parts.append("echo")
+    if speaker.get("noise"):
+        parts.append("noise")
     match = speaker.get("match")
     if isinstance(match, dict):
         verdict = "accepted" if match.get("accepted") else "refused"
-        parts.append(f"match {match.get('name') or '?'} {verdict}")
+        candidate = str(match.get("name") or "")
+        parts.append(f"match {db.display(candidate) if candidate else '?'} {verdict}")
         for key, caption in (("score", "score"), ("runner_up", "runner-up")):
             value = match.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -2976,7 +3079,9 @@ def run_reflow(config: Config, meeting_id: str | None) -> int:
 # --- referat relabel --------------------------------------------------------
 
 
-def _relabel_complaint(config: Config, meeting: Meeting, owner: str) -> str:
+def _relabel_complaint(
+    config: Config, meeting: Meeting, owner_id: str, db: voices.VoicesDB
+) -> str:
     """Why this meeting's `ME` lines must be left alone, or `""` to rewrite them.
 
     The pipeline used to render a voiceprint-matched owner as `ME` while
@@ -2997,12 +3102,27 @@ def _relabel_complaint(config: Config, meeting: Meeting, owner: str) -> str:
     mic = voices.channel_speakers(meeting, meeting.mic_path.stem)
     if not mic:
         return "the microphone was never diarized, so its ME lines name nobody"
+    # A noise cluster still counts against the gate, deliberately. Its lines are
+    # gone, but diarization found a second source on that microphone, and the
+    # `ME` lines are exactly the ones diarization attributed to nobody - some of
+    # them may be the same door. Refused, and said for what it is rather than as
+    # an unnamed speaker somebody could go and name.
+    noise = sorted(label for label in mic if voices.is_noise(meeting, label))
+    if noise:
+        return (
+            f"the microphone also clustered noise ({', '.join(noise)}), so its ME "
+            f"lines may be noise too"
+        )
     resolved = {meeting.speaker_names.get(label, "") for label in mic}
     if "" in resolved:
         unnamed = sorted(label for label in mic if not meeting.speaker_names.get(label))
         return f"the microphone still has unnamed speakers ({', '.join(unnamed)})"
-    if resolved != {owner}:
-        others = ", ".join(sorted(name for name in resolved if name != owner))
+    # Compared as ids, so a meeting whose `speaker_names` still holds the bare
+    # name it was written with and one holding the id agree about the owner.
+    if {voices.person_id(value) for value in resolved} != {owner_id}:
+        others = ", ".join(
+            sorted(db.display(value) for value in resolved if voices.person_id(value) != owner_id)
+        )
         return f"the microphone also holds {others}, so its ME lines are ambiguous"
     return ""
 
@@ -3029,14 +3149,21 @@ def run_relabel(config: Config, meeting_id: str | None) -> int:
     from referat.label import relabel_transcript
     from referat.transcribe import ME_LABEL
 
-    owner = config.speakers.owner_name.strip()
-    if not owner:
+    owner_name = config.speakers.owner_name.strip()
+    if not owner_name:
         print(
             "referat relabel: [speakers].owner_name is empty, so there is no name "
             "to spell out. ME is already the only label the owner has.",
             file=sys.stderr,
         )
         return 1
+    # The owner's record decides what the label says and which id the mic must
+    # resolve to. With no record yet, the config's spelling is both - a meeting
+    # written before ids existed stored exactly that name.
+    db = voices.VoicesDB.load(config)
+    person = db.owner(config)
+    owner = person.short if person is not None else owner_name
+    owner_id = person.id if person is not None else voices.person_id(owner_name)
 
     if meeting_id:
         meeting = _resolve_meeting(config, meeting_id, "relabel")
@@ -3055,7 +3182,7 @@ def run_relabel(config: Config, meeting_id: str | None) -> int:
         if not meeting.transcript_path.exists():
             print(f"{meeting.id}: no transcript.md")
             continue
-        why = _relabel_complaint(config, meeting, owner)
+        why = _relabel_complaint(config, meeting, owner_id, db)
         if why:
             print(f"{meeting.id}: left alone - {why}")
             continue
@@ -3079,7 +3206,7 @@ def run_relabel(config: Config, meeting_id: str | None) -> int:
 # --- referat debleed --------------------------------------------------------
 
 
-def _debleed_complaint(meeting: Meeting) -> str:
+def _debleed_complaint(meeting: Meeting, db: voices.VoicesDB) -> str:
     """Why this meeting cannot be de-duplicated from its rendered transcript, or `""`.
 
     The structural gate, and it is the whole reason this command is defensible on
@@ -3104,21 +3231,29 @@ def _debleed_complaint(meeting: Meeting) -> str:
     system = channels.get("system")
     if not isinstance(system, dict) or system.get("silent") or not system.get("segments"):
         return "the loopback channel held no voice, so nothing here was recorded twice"
-    if not _two_channel_names(meeting):
+    if not _two_channel_names(meeting, db):
         return "no name resolves to clusters on both channels, so nothing here is echo"
     return ""
 
 
-def _two_channel_names(meeting: Meeting) -> set[str]:
-    """Names whose clusters appear on more than one channel — the ones recorded twice."""
+def _two_channel_names(meeting: Meeting, db: voices.VoicesDB) -> set[str]:
+    """Transcript labels whose clusters appear on more than one channel - recorded twice.
+
+    Grouped by the person the stored value resolves to, and returned as the
+    **label the transcript carries** - the short name - since that is what the
+    lines are matched on.
+    """
     where: dict[str, set[str]] = {}
+    labels: dict[str, str] = {}
     for channel, entry in (meeting.transcription.get("channels") or {}).items():
         if not isinstance(entry, dict):
             continue
         for label in entry.get("speakers") or {}:
-            if name := meeting.speaker_names.get(label):
-                where.setdefault(name, set()).add(str(channel))
-    return {name for name, channels in where.items() if len(channels) > 1}
+            if value := meeting.speaker_names.get(label):
+                pid = voices.person_id(value)
+                where.setdefault(pid, set()).add(str(channel))
+                labels[pid] = db.label_for(value)
+    return {labels[pid] for pid, channels in where.items() if len(channels) > 1}
 
 
 def run_debleed(config: Config, meeting_id: str | None, *, apply: bool = False) -> int:
@@ -3179,12 +3314,13 @@ def run_debleed(config: Config, meeting_id: str | None, *, apply: bool = False) 
         return 0
 
     settings = config.bleed
+    db = voices.VoicesDB.load(config)
     rewritten = 0
     for meeting in meetings:
         if not meeting.transcript_path.exists():
             print(f"{meeting.id}: no transcript.md")
             continue
-        why = _debleed_complaint(meeting)
+        why = _debleed_complaint(meeting, db)
         if why:
             print(f"{meeting.id}: left alone - {why}")
             continue
@@ -3200,7 +3336,7 @@ def run_debleed(config: Config, meeting_id: str | None, *, apply: bool = False) 
         entries = [
             (i, *parsed) for i, line in enumerate(lines) if (parsed := parse_entry(line))
         ]
-        both = _two_channel_names(meeting)
+        both = _two_channel_names(meeting, db)
         collapsed = _collapse(entries, settings, both, duplicates, tokens)
 
         short = sum(
@@ -3253,7 +3389,16 @@ def run_debleed(config: Config, meeting_id: str | None, *, apply: bool = False) 
             "removed": (earlier if isinstance(earlier, list) else []) + removed,
         }
         meeting.transcription = block
-        meeting.save()
+        # Directly rather than through `Meeting.save`, which never raises - a
+        # rule written for recordings, where the audio is the part that cannot
+        # be reconstructed. Here the record *is* the justification for the
+        # deletion, so a record that failed to land refuses it. Same as
+        # `noise.mark_noise`, which is where this was noticed.
+        try:
+            paths.write_json_atomic(meeting.meta_path, meeting.to_json())
+        except OSError as exc:
+            print(f"referat debleed: could not record the removal in {meeting.meta_path}: {exc}")
+            return 1
 
         doomed = {drop[0] for drop, _keep in collapsed}
         kept_lines = [line for i, line in enumerate(lines) if i not in doomed]
@@ -3309,6 +3454,53 @@ def _collapse(entries, settings, both, duplicates, tokens):
             used.update({a, b})
             break
     return found
+
+
+# --- referat denoise --------------------------------------------------------
+
+
+def run_denoise(config: Config, meeting_id: str, speaker: str, *, apply: bool = False) -> int:
+    """`referat denoise <id> --speaker SPEAKER_NN [--apply]` - a cluster that is not a person.
+
+    Fourth in the family of repairs after `reflow`, `relabel` and `debleed`, and
+    like `debleed` it deletes whole entries, so it is dry by default and writes
+    `meta.json` first. The rules are :mod:`referat.noise`'s and the operation is
+    :func:`referat.noise.mark_noise`; this prints the plan, and `--apply` calls
+    it. The command center's Speakers dialog calls the same function behind a
+    modal that quotes the same :func:`referat.noise.warning`.
+
+    Where it differs from `debleed` is that there is no evidence to weigh. A
+    person listened to the snippets and said *that is the room next door*, and
+    the dry run exists so they can read every line that judgement would remove
+    before it does.
+    """
+    from referat import noise
+
+    meeting = _resolve_meeting(config, meeting_id, "denoise")
+    if meeting is None:
+        return 1
+    decided, why = noise.plan(config, meeting, speaker)
+    if decided is None:
+        print(f"referat denoise: {why}", file=sys.stderr)
+        return 1
+
+    if not apply:
+        print(f"{meeting.id}:")
+        for line in noise.warning(meeting, decided).split("\n"):
+            print(f"  {line}")
+        if decided.entries:
+            print()
+            for _i, at, text in decided.entries:
+                print(f"  - [{at}] {speaker}: {text}")
+        print("\n  Dry run. Use --apply to write.")
+        return 0
+
+    marked, message = noise.mark_noise(config, meeting.id, speaker)
+    if not marked:
+        print(f"referat denoise: {message}", file=sys.stderr)
+        return 1
+    print(f"{meeting.id}: {message}")
+    return 0
 
 
 # --- referat delete ---------------------------------------------------------
@@ -3827,14 +4019,16 @@ def run_notes(config: Config, meeting_id: str, *, sync: bool = True) -> int:
 # --- referat people ---------------------------------------------------------
 
 
-PEOPLE_HEADERS = ("NAME", "PRINTS", "FILED FROM", "APPEARS IN", "PROJECTS")
-PEOPLE_RIGHT_ALIGNED = (1, 2, 3)
+PEOPLE_HEADERS = ("ID", "NAME", "SHORT", "PRINTS", "FILED FROM", "APPEARS IN", "PROJECTS")
+PEOPLE_RIGHT_ALIGNED = (3, 4, 5)
 
 NO_PRINTS = (
     "no voiceprint on file, but a transcript still calls somebody this - a rerun "
     "that renumbered past them, or a hand edit. `referat label <id>` files one "
     "again, or `--forget` takes the name out of the transcripts too"
 )
+"""What :func:`run_people` says under a drifted entry. `referat person rename` is
+not offered here on purpose: there is no record to rename."""
 
 ONLY_ARCHIVED = (
     "every project they are tagged with has been archived. Derived on every read "
@@ -3898,6 +4092,12 @@ def people_document(config: Config) -> dict[str, Any]:
     :func:`referat.label.label_document`: what the owner is *called* is Python's
     to know, and whether that name leads a list is the surface's to decide.
 
+    Each person carries `id`, `name`, `short` and `email` since build step 20c
+    — the record, and `email` is the first field in this document that is
+    contactable personal data rather than a label. It is here because the
+    people page shows it and the table does not; it is still no embedding and
+    no path, which is the rule this document is held to.
+
     `archived` and each person's `inactive` are build step 21's, and they are
     both here rather than one of them: the flag says which section somebody
     belongs in, and the list is what lets the page mark *which* of their projects
@@ -3918,7 +4118,10 @@ def people_document(config: Config) -> dict[str, Any]:
         "archived": sorted(archived),
         "people": [
             {
+                "id": person.id,
                 "name": person.name,
+                "short": person.short,
+                "email": person.email,
                 "prints": person.prints,
                 "in_database": person.in_database,
                 "is_owner": person.is_owner,
@@ -3948,9 +4151,15 @@ def run_people(config: Config, as_json: bool = False) -> int:
         return 0
 
     known = document["projects"]
+    # The email is deliberately not a column. It is the one field here that is
+    # contactable personal data rather than a label, and a table somebody
+    # copies into a message is exactly where it would travel; `--json` and the
+    # people page carry it for a person reading about one person.
     rows = [
         (
+            p["id"],
             p["name"] + (" (you)" if p["is_owner"] else ""),
+            p["short"] if p["short"] != p["name"] else "-",
             str(p["prints"]) if p["in_database"] else "-",
             str(len({f["meeting"] for f in p["filed_from"]})),
             str(len(p["appears_in"])),
@@ -3972,7 +4181,7 @@ def run_people(config: Config, as_json: bool = False) -> int:
         "the meetings the name is used in. Recognition files nothing new, so the "
         "second is usually the larger."
     )
-    drifted = [p["name"] for p in entries if not p["in_database"]]
+    drifted = [f"{p['name']} ({p['id']})" for p in entries if not p["in_database"]]
     if drifted:
         # Named rather than counted, for the reason the hotword cap's drop list is:
         # this is the only place the two files are compared.
@@ -3981,7 +4190,7 @@ def run_people(config: Config, as_json: bool = False) -> int:
     # A footer rather than a sixth column, and rather than a second marker in the
     # PROJECTS cell: that cell already has one vocabulary — a trailing `?` for an
     # orphan — and a second would blunt the one that means something.
-    inactive = [p["name"] for p in entries if p["inactive"]]
+    inactive = [f"{p['name']} ({p['id']})" for p in entries if p["inactive"]]
     if inactive:
         print(f"{', '.join(inactive)}: {ONLY_ARCHIVED}")
     return 0
@@ -4535,6 +4744,8 @@ def _label_complaint(args: argparse.Namespace) -> str | None:
         return "--speaker needs --name"
     if args.name and not args.speaker:
         return "--name is only meaningful with --speaker"
+    if (args.short or args.email) and not args.speaker:
+        return "--short and --email fill in a new person's record and need --speaker"
     if (args.speaker or args.as_json) and not args.meeting_id:
         flag = "--speaker" if args.speaker else "--json"
         return f"{flag} needs a meeting id"
@@ -4657,6 +4868,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "debleed":
         return run_debleed(config, args.meeting_id, apply=args.apply)
 
+    if args.command == "denoise":
+        return run_denoise(config, args.meeting_id, args.speaker, apply=args.apply)
+
     if args.command == "relabel":
         return run_relabel(config, args.meeting_id)
 
@@ -4677,6 +4891,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "people":
         return run_people(config, as_json=args.as_json)
+
+    if args.command == "person":
+        from referat import label as labelling
+
+        assert args.person_command == "rename"
+        return labelling.run_rename(
+            config, args.who, name=args.name, short=args.short, email=args.email
+        )
 
     if args.command == "notes":
         return run_notes(config, args.meeting_id, sync=args.sync)
@@ -4703,7 +4925,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.speaker:
             assert args.meeting_id and args.name
-            return labelling.run_apply(config, args.meeting_id, args.speaker, args.name)
+            return labelling.run_apply(
+                config, args.meeting_id, args.speaker, args.name, args.short, args.email
+            )
         if args.as_json:
             assert args.meeting_id
             return labelling.run_json(config, args.meeting_id)

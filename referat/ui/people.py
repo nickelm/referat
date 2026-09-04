@@ -31,6 +31,15 @@ and nothing else on this machine compares those two files. It gets its own
 section, the way the projects page gives orphaned tag ids one, and for the same
 reason: something quietly disagreeing across three meetings is how you stop being
 able to trust any of it.
+
+**A person is a record since build step 20c**, and this page is keyed by its
+id. What a link hands over is still a *name* — a transcript label is the short
+name and a `[[Wikilink]]` is whatever the note wrote — so :meth:`PeoplePage.select`
+resolves it: an id, then a full name, then a short name, and two people the
+text fits equally are both said rather than one picked. The second thing the
+page writes is a **rename**, through :func:`referat.label.rename_person`, which
+is the operation and holds every rule about what propagates where; the dialog
+here is three fields and nothing else.
 """
 
 from __future__ import annotations
@@ -40,6 +49,9 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -60,8 +72,8 @@ from referat.ui import icons, lists
 
 log = logging.getLogger(__name__)
 
-NAME_ROLE = Qt.ItemDataRole.UserRole
-"""The name a row stands for, so nothing parses the rendered cell back."""
+ID_ROLE = Qt.ItemDataRole.UserRole
+"""The person id a row stands for, so nothing parses the rendered cell back."""
 
 TARGET_ROLE = Qt.ItemDataRole.UserRole + 1
 """The meeting id or project id a row navigates to when it is activated."""
@@ -73,6 +85,11 @@ PRIVACY = (
 )
 
 NOTHING_SELECTED = "Pick somebody."
+
+AMBIGUOUS = (
+    "{name} could be any of: {ids}. Showing the first; pick the other from the list."
+)
+"""Two people the clicked text fits. Said, never silently decided."""
 
 UNKNOWN = (
     "Nothing is filed under {name}.\n\n"
@@ -102,6 +119,13 @@ DRIFTED_NOTE = (
     "nothing under the name. A rerun that renumbered past them, or a hand edit. "
     "Naming them again in that meeting files a print; `referat label --forget` "
     "takes the name out of the transcripts as well."
+)
+
+RENAME_NOTE = (
+    "The id does not change. A new short name is relabeled into every transcript "
+    "this person appears in, and [[Wikilinks]] in those meetings' notes are "
+    "rewritten; prose is left alone, and a linked Google Doc holds the old name "
+    "until its next sync. The email is stored and never sent."
 )
 
 FORGET = (
@@ -206,9 +230,16 @@ class PeoplePage(QWidget):
         self.actions_button.setAutoDefault(False)
         self.actions_button.clicked.connect(self._on_actions)
 
+        # Between the harmless button and the destructive one, which is the
+        # projects page's own order: Rename, Archive, Delete.
+        self.rename_button = QPushButton("Rename...")
+        self.rename_button.setAutoDefault(False)
+        self.rename_button.clicked.connect(self._on_rename)
+
         title_row = QHBoxLayout()
         title_row.addWidget(self.heading, 1)
         title_row.addWidget(self.actions_button)
+        title_row.addWidget(self.rename_button)
         title_row.addWidget(self.forget_button)
 
         self.prints = QTreeWidget()
@@ -278,10 +309,33 @@ class PeoplePage(QWidget):
         self._clear_message()
         self._fill_list()
 
-    def _person(self, name: str | None) -> dict[str, Any] | None:
-        if name is None:
+    def _person(self, pid: str | None) -> dict[str, Any] | None:
+        if pid is None:
             return None
-        return next((p for p in self._document["people"] if p["name"] == name), None)
+        return next((p for p in self._document["people"] if p["id"] == pid), None)
+
+    def _matching(self, text: str) -> list[dict[str, Any]]:
+        """Everybody `text` could mean: by id, else full name, else short name.
+
+        The same order :meth:`referat.voices.VoicesDB.resolve` uses, applied to
+        the document rather than the database because this page may not open
+        `voices.json` — and applied to the drifted entries too, whose only
+        spelling is the one a transcript still uses.
+        """
+        wanted = text.strip()
+        folded = wanted.casefold()
+        people = self._document["people"]
+        if exact := [p for p in people if p["id"] == wanted]:
+            return exact
+        for pick in (
+            lambda p: p["name"] == wanted,
+            lambda p: p["name"].casefold() == folded,
+            lambda p: p["short"] == wanted,
+            lambda p: p["short"].casefold() == folded,
+        ):
+            if hits := [p for p in people if pick(p)]:
+                return hits
+        return []
 
     def _fill_list(self) -> None:
         """Build the list through the search box, then reselect what was selected.
@@ -308,11 +362,14 @@ class PeoplePage(QWidget):
                 nonlocal chosen
                 item = self._row(person)
                 self.people.addItem(item)
-                if person["name"] == wanted:
+                if person["id"] == wanted:
                     chosen = item
 
             for person in self._document["people"]:
-                if needle and needle not in person["name"].casefold():
+                haystack = " ".join(
+                    (person["name"], person["short"], person["id"], person.get("email", ""))
+                ).casefold()
+                if needle and needle not in haystack:
                     continue
                 if not person["in_database"]:
                     drifted.append(person)
@@ -357,19 +414,19 @@ class PeoplePage(QWidget):
         else:
             under = f"no voiceprint, {appears} meeting"
         item = QListWidgetItem(
-            f"{person['name']}{'  (you)' if person['is_owner'] else ''}\n"
+            f"{_shown(person)}{'  (you)' if person['is_owner'] else ''}\n"
             f"{under}{'s' if appears != 1 else ''}"
         )
-        item.setData(NAME_ROLE, person["name"])
+        item.setData(ID_ROLE, person["id"])
         item.setIcon(self._person_icon)
         return item
 
     def _on_row_changed(self, item: QListWidgetItem | None, _previous: object) -> None:
         if self._loading:
             return
-        name = str(item.data(NAME_ROLE)) if item is not None and item.data(NAME_ROLE) else None
-        self._selected = name
-        self._fill_detail(name)
+        pid = str(item.data(ID_ROLE)) if item is not None and item.data(ID_ROLE) else None
+        self._selected = pid
+        self._fill_detail(pid)
 
     def set_actions(self, document: dict[str, Any]) -> None:
         """Take the open-item counts per person from the window's action document.
@@ -387,9 +444,24 @@ class PeoplePage(QWidget):
         self._open_actions = counts
         self._fill_detail(self._selected)
 
+    def _open_for(self, person: dict[str, Any] | None) -> int:
+        """Open items owned by either spelling of this person.
+
+        A note writes whatever the transcript called somebody, which is the
+        short name, and an older note may carry the full one; the two are
+        summed rather than one chosen, since an item is owned by a name and
+        both names are theirs.
+        """
+        if person is None:
+            return 0
+        spellings = {person["short"], person["name"]}
+        return sum(self._open_actions.get(name, 0) for name in spellings)
+
     def _on_actions(self) -> None:
-        if self._selected:
-            self.actions_requested.emit(self._selected)
+        # The Actions tab filters by the owner string a note wrote, which is
+        # the short name — what the transcript called them.
+        if (person := self._person(self._selected)) is not None:
+            self.actions_requested.emit(person["short"])
 
     def _fill_detail(self, name: str | None) -> None:
         """Fill the right-hand pane from the document. Never from the widgets."""
@@ -398,7 +470,8 @@ class PeoplePage(QWidget):
         self.appearances.clear()
         self.projects.clear()
 
-        open_items = self._open_actions.get(name or "", 0)
+        person = self._person(name)
+        open_items = self._open_for(person)
         self.actions_button.setText(
             f"Action items ({open_items})" if open_items else "Action items"
         )
@@ -406,21 +479,23 @@ class PeoplePage(QWidget):
         # place, which is the same rule Forget and the recorder's three follow.
         self.actions_button.setEnabled(bool(open_items))
 
-        person = self._person(name)
         if person is None:
             self.forget_button.setEnabled(False)
+            self.rename_button.setEnabled(False)
             self.heading.setText(name or NOTHING_SELECTED)
             # A name the window was handed by a link and nobody answers to. The
             # honest answer, which is also information about whatever said it.
             self.subheading.setText(UNKNOWN.format(name=name) if name else "")
             return
 
-        self.heading.setText(person["name"] + ("  (you)" if person["is_owner"] else ""))
+        self.heading.setText(_shown(person) + ("  (you)" if person["is_owner"] else ""))
         self.subheading.setText(self._summary(person))
         # Nothing to delete from the database, and `forget_person` would refuse it
         # in those words anyway. Disabled rather than hidden, as everywhere else
-        # here: a button that moves is a button you have to look for.
+        # here: a button that moves is a button you have to look for. Rename
+        # follows the same rule: a drifted name has no record to rename.
         self.forget_button.setEnabled(person["in_database"])
+        self.rename_button.setEnabled(person["in_database"])
 
         for filing in person["filed_from"]:
             item = QTreeWidgetItem(
@@ -462,11 +537,16 @@ class PeoplePage(QWidget):
         appears = len(person["appears_in"])
         if not person["in_database"]:
             return DRIFTED_NOTE
+        # The record first: the id is what `--forget` and `person rename` take,
+        # and the email is the one field no other surface shows.
+        record = f"id {person['id']}"
+        if person.get("email"):
+            record += f", {person['email']}"
         if person["inactive"]:
-            return INACTIVE_NOTE
+            return f"{record}. {INACTIVE_NOTE}"
         return (
-            f"{person['prints']} voiceprint(s) filed from {filed} meeting(s); the name "
-            f"appears in {appears}. Recognition files nothing new, so the second is "
+            f"{record}. {person['prints']} voiceprint(s) filed from {filed} meeting(s); the "
+            f"name appears in {appears}. Recognition files nothing new, so the second is "
             f"usually the larger."
         )
 
@@ -477,16 +557,29 @@ class PeoplePage(QWidget):
 
         Called by the window when a label or a `[[Wikilink]]` is clicked. It
         refreshes first, because the click may be the first thing that has
-        happened on this tab and the document behind it may never have been read.
+        happened on this tab and the document behind it may never have been read
+        — and resolves *after* the refresh, since what the text means depends on
+        the directory just read. Two people it fits equally: the first is shown
+        and both are named, which is information about the note rather than a
+        decision made on its behalf.
         """
-        self._selected = name.strip()
         # Cleared, or a name hidden by a leftover filter would look like a name
         # nobody is filed under — which is the one message on this page that must
         # never be shown wrongly.
         self.search.blockSignals(True)
         self.search.clear()
         self.search.blockSignals(False)
+        self._selected = None
         self.refresh()
+        hits = self._matching(name)
+        # An unmatched name is kept as the selection so the detail pane says
+        # so in `UNKNOWN`'s words; `_person` finds nothing under it.
+        self._selected = hits[0]["id"] if hits else name.strip()
+        self._fill_list()
+        if len(hits) > 1:
+            self._complain(
+                AMBIGUOUS.format(name=name.strip(), ids=", ".join(p["id"] for p in hits))
+            )
 
     def _on_print_activated(self, item: QTreeWidgetItem, _column: int) -> None:
         self.meeting_requested.emit(str(item.data(0, TARGET_ROLE)))
@@ -531,13 +624,39 @@ class PeoplePage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        forgotten, message = label.forget_person(self.config, person["name"])
+        forgotten, message = label.forget_person(self.config, person["id"])
         if not forgotten:
             self._complain(message)
             return
         log.info("%s", message)
         self._selected = None
         self.refresh()
+
+    def _on_rename(self) -> None:
+        """Change what a person is called, through the one guarded function.
+
+        Three fields prefilled with the record, and every rule — what a name
+        may be, what an email may be, what propagates where, a short name that
+        would collide inside one meeting — is :func:`referat.label.rename_person`'s
+        and its refusal is shown unedited. The selection survives, because the
+        id does.
+        """
+        person = self._person(self._selected)
+        if person is None:
+            return
+        dialog = RenameDialog(self, person)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name, short, email = dialog.values()
+        renamed, message = label.rename_person(
+            self.config, person["id"], name=name, short=short, email=email
+        )
+        if not renamed:
+            self._complain(message)
+            return
+        log.info("%s", message)
+        self.refresh()
+        self._complain(message)
 
     # --- Messages -----------------------------------------------------------
 
@@ -549,6 +668,52 @@ class PeoplePage(QWidget):
     def _clear_message(self) -> None:
         self.message.clear()
         self.message.hide()
+
+
+def _shown(person: dict[str, Any]) -> str:
+    """The full name, and the short name after it when the two differ."""
+    if person["short"] and person["short"] != person["name"]:
+        return f"{person['name']} ({person['short']})"
+    return person["name"]
+
+
+class RenameDialog(QDialog):
+    """Three fields over one record. Every rule lives in `label.rename_person`."""
+
+    def __init__(self, parent: QWidget, person: dict[str, Any]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Rename {person['name']}")
+        self.name = QLineEdit(person["name"])
+        self.short = QLineEdit(person["short"] if person["short"] != person["name"] else "")
+        self.short.setPlaceholderText("blank: the full name")
+        self.email = QLineEdit(person.get("email", ""))
+        self.email.setPlaceholderText("optional")
+
+        form = QFormLayout()
+        form.addRow("Id", QLabel(person["id"]))
+        form.addRow("Full name", self.name)
+        form.addRow("Short name", self.short)
+        form.addRow("Email", self.email)
+
+        note = QLabel(RENAME_NOTE)
+        note.setWordWrap(True)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+        self.resize(460, self.sizeHint().height())
+
+    def values(self) -> tuple[str, str, str]:
+        """What was typed: full name, short name (blank for the full name), email."""
+        return self.name.text().strip(), self.short.text().strip(), self.email.text().strip()
 
 
 def _heading(text: str) -> QListWidgetItem:

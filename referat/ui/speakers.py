@@ -31,6 +31,26 @@ speakers WASAPI is looping back into `system.wav`: a person's earlier speech
 would be captured into the meeting being recorded, transcribed, diarized and
 rendered as if the far end had said it. The transcript is evidence of what was
 said, and this is the one way a UI could quietly write something into one.
+
+**The third answer is *this is not a person*** — build step 20b. The snippets
+are how somebody tells that a cluster is the corridor rather than a colleague,
+and they survive exactly as long as the cluster is unnamed, so this dialog is
+where that judgement is actually made and where the button for it belongs. It
+drives :func:`referat.noise.mark_noise`, behind a modal that quotes
+:func:`referat.noise.warning` — the same text `referat denoise` prints as its dry
+run — because it deletes lines from a transcript, and the deletion is the part
+this project is most careful about. Nothing about it touches the voices
+database.
+
+**A person is a record since build step 20c**, and the dialog renders records
+rather than strings: `label_document` hands over `known`, one `{id, name,
+short, email}` per person, and `gallery.scoped` and `gallery.rest` are ids into
+it. A chip shows the full name and fills the field with it — or with the id,
+when two people on file share that full name, because a name that resolves to
+two records is one :func:`referat.label.name_speaker` refuses and the chip
+should not offer a refusal. Somebody new is typed as a full name, with an
+optional short name in the second field; nothing here derives one from the
+other, for the reason `label._file` gives.
 """
 
 from __future__ import annotations
@@ -48,13 +68,14 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
-from referat import cli
+from referat import cli, noise
 from referat import label as labelling
 from referat.config import Config
 from referat.state import State
@@ -89,6 +110,18 @@ NO_EMBEDDING = (
 
 RECORDING = "Not while a meeting is recording: the snippets would be captured into it."
 
+NOISE_BUTTON = "Not a person: mark as noise…"
+"""The third answer, and the ellipsis is honest: it asks before it acts."""
+
+NOISE_TIP = (
+    "A door, the corridor, the meeting next door. Marking a cluster as noise removes "
+    "its lines from the transcript, deletes its snippets and stops it being offered a "
+    "name. It files no voiceprint. Listen first: nothing checks this for you."
+)
+
+NOISE_ASK = "Remove them?"
+"""What the modal adds beneath `noise.warning`, which says everything else."""
+
 CHIP_ROWS = 70
 """How little vertical room the gallery may be squeezed into, in pixels.
 
@@ -115,6 +148,9 @@ a disabled control in dark mode. The shape is the whole difference: a row of
 push buttons reads as a row of *commands*, and these are a gallery of names to
 pick from."""
 
+SHORT_PLACEHOLDER = "Short name for a new person (optional)"
+"""The second field. Blank means the full name, and it is refused for somebody on file."""
+
 UNTAGGED = (
     "This meeting carries no project, so every known name is offered. Tagging it "
     "first narrows the list to the people that project has met."
@@ -139,10 +175,14 @@ class SpeakerDialog(QDialog):
         """The tray app, for one question only: is a meeting being recorded right now."""
         self.document = document
         self.meeting_id = str(document["meeting"])
-        self.named = False
-        """Whether anything was actually filed, which is what the window refreshes on."""
+        self.changed = False
+        """Whether anything was written — a name filed, or a cluster marked as noise.
+
+        What the window refreshes on. Both change the transcript and the unnamed
+        count, so the window cannot tell them apart and does not need to.
+        """
         self._who = _summaries(document.get("people") or [])
-        """Name to a one-line *who is this already*, for the chip tooltips."""
+        """Id to a one-line *who is this already*, for the chip tooltips."""
 
         self.setWindowTitle(f"Speakers - {self.meeting_id}")
         self.resize(720, 520)
@@ -194,8 +234,22 @@ class SpeakerDialog(QDialog):
         self.field = QLineEdit()
         self.field.setPlaceholderText("Who was that?")
         self.field.returnPressed.connect(self._on_apply)
+        self.short_field = QLineEdit()
+        self.short_field.setPlaceholderText(SHORT_PLACEHOLDER)
+        self.short_field.returnPressed.connect(self._on_apply)
         self.apply_button = QPushButton("Name this speaker")
         self.apply_button.clicked.connect(self._on_apply)
+
+        # Flat and on its own row under the name field: it is the answer for
+        # the one speaker in ten that is not a speaker, and a button of equal
+        # weight beside *Name this speaker* would read as a coin flip between
+        # two ordinary outcomes. It needs no embedding, so it stays enabled where
+        # the name field is not.
+        self.noise_button = QPushButton(NOISE_BUTTON)
+        self.noise_button.setFlat(True)
+        self.noise_button.setAutoDefault(False)
+        self.noise_button.setToolTip(NOISE_TIP)
+        self.noise_button.clicked.connect(self._on_noise)
 
         self.message = QLabel()
         self.message.setWordWrap(True)
@@ -208,8 +262,13 @@ class SpeakerDialog(QDialog):
         self.nudge.setWordWrap(True)
 
         name_row = QHBoxLayout()
-        name_row.addWidget(self.field, 1)
+        name_row.addWidget(self.field, 2)
+        name_row.addWidget(self.short_field, 1)
         name_row.addWidget(self.apply_button)
+
+        noise_row = QHBoxLayout()
+        noise_row.addStretch(1)
+        noise_row.addWidget(self.noise_button)
 
         detail = QVBoxLayout()
         detail.addWidget(self.heading)
@@ -221,6 +280,7 @@ class SpeakerDialog(QDialog):
         detail.addWidget(self.chip_scroll, 1)
         detail.addWidget(self.show_all)
         detail.addLayout(name_row)
+        detail.addLayout(noise_row)
         detail.addWidget(self.message)
         self.detail = QWidget()
         self.detail.setLayout(detail)
@@ -245,6 +305,10 @@ class SpeakerDialog(QDialog):
         self.setLayout(layout)
 
         self._fill()
+
+    def _records(self) -> dict[str, dict[str, Any]]:
+        """Id to record, read off the document each time so a reload is seen."""
+        return {str(r["id"]): r for r in self.document.get("known") or []}
 
     # --- The list of speakers ------------------------------------------------
 
@@ -318,7 +382,9 @@ class SpeakerDialog(QDialog):
         self.lines.setVisible(not clips)
 
         self.field.clear()
+        self.short_field.clear()
         self.field.setEnabled(speaker["has_embedding"])
+        self.short_field.setEnabled(speaker["has_embedding"])
         self.apply_button.setEnabled(speaker["has_embedding"])
         if not speaker["has_embedding"]:
             # A field here would be a field guaranteed to be refused.
@@ -330,7 +396,7 @@ class SpeakerDialog(QDialog):
     # --- The gallery ---------------------------------------------------------
 
     def _ordered(self, speaker: dict[str, Any]) -> list[str]:
-        """The names to offer, in the order to offer them.
+        """The ids to offer, in the order to offer them.
 
         The scoping is :func:`referat.people.gallery`'s and arrives decided; the
         only thing decided here is that the owner leads for a **microphone**
@@ -346,7 +412,7 @@ class SpeakerDialog(QDialog):
             # An untagged meeting has nothing to scope on, and the full gallery is
             # what it gets. A missing tag must never cost a name.
             names = [*names, *(n for n in gallery["rest"] if n not in names)]
-        owner = self.document["owner"]
+        owner = self.document.get("owner_id", "")
         if owner and speaker["channel"] == "mic" and owner in names:
             names.remove(owner)
             names.insert(0, owner)
@@ -364,20 +430,33 @@ class SpeakerDialog(QDialog):
             if (widget := item.widget()) is not None:
                 widget.deleteLater()
 
-        owner = self.document["owner"]
-        for name in self._ordered(speaker):
-            chip = QPushButton(name)
+        owner = self.document.get("owner_id", "")
+        records = self._records()
+        # Full names two records share: their chips fill the id instead, since
+        # the name alone is one `name_speaker` would refuse as ambiguous.
+        shared = {
+            r["name"].casefold()
+            for r in records.values()
+            if sum(1 for o in records.values() if o["name"].casefold() == r["name"].casefold()) > 1
+        }
+        for pid in self._ordered(speaker):
+            record = records.get(pid) or {"id": pid, "name": pid, "short": pid}
+            shown = record["name"]
+            if record["short"] and record["short"] != record["name"]:
+                shown = f"{shown} ({record['short']})"
+            chip = QPushButton(shown)
             chip.setAutoDefault(False)
-            if name == owner and speaker["channel"] == "mic":
+            if pid == owner and speaker["channel"] == "mic":
                 chip.setToolTip("You. This voice came out of your own microphone.")
-            elif summary := self._who.get(name):
+            elif summary := self._who.get(pid):
                 # A tooltip and deliberately **not** a link to the people page.
                 # A chip's click is committed to filling the field, and this
                 # dialog is modal over that page anyway — the question somebody
                 # actually has while naming is *who is this already*, which a
                 # tooltip answers without moving them somewhere else.
                 chip.setToolTip(summary)
-            chip.clicked.connect(lambda _checked=False, n=name: self._pick(n))
+            fill = pid if record["name"].casefold() in shared else record["name"]
+            chip.clicked.connect(lambda _checked=False, n=fill: self._pick(n))
             chip.setEnabled(speaker["has_embedding"])
             chip.setStyleSheet(CHIP_STYLE)
             chip.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -447,7 +526,11 @@ class SpeakerDialog(QDialog):
         self.apply_button.setEnabled(False)
         try:
             named, message = labelling.name_speaker(
-                self.config, self.meeting_id, speaker["speaker"], name
+                self.config,
+                self.meeting_id,
+                speaker["speaker"],
+                name,
+                self.short_field.text().strip(),
             )
         finally:
             self.apply_button.setEnabled(True)
@@ -456,11 +539,64 @@ class SpeakerDialog(QDialog):
             return
 
         log.info("%s", message)
-        self.named = True
+        self.changed = True
         labelling.stop_playback()
         self._reload()
         # After the reload, or `_fill` selecting the next speaker would clear it.
         # Naming somebody has no other visible trace in here: the row simply goes.
+        self._report(message)
+
+    # --- Noise ---------------------------------------------------------------
+
+    def _on_noise(self) -> None:
+        """Mark the selected cluster as not a person, after saying what that removes.
+
+        The plan is read first and shown whole — every line count, the snippets,
+        the fact that nothing checks the judgement — in `noise.warning`'s own
+        words, which are also `referat denoise`'s dry run. A refusal (a named
+        cluster, a meeting mid-transcription) arrives before the modal, as the
+        sentence `noise.complaint` wrote, and the dialog stays open on it.
+
+        The confirmation is here and not in `mark_noise`, exactly as the people
+        page's is outside `forget_person`: it is a question asked of a person,
+        and the CLI asks it with `--apply` instead.
+        """
+        speaker = self._selected()
+        if speaker is None:
+            return
+        from referat.meeting import resolve_meeting
+
+        meeting, why = resolve_meeting(self.config, self.meeting_id)
+        if meeting is None:
+            self._complain(why)
+            return
+        decided, why = noise.plan(self.config, meeting, speaker["speaker"])
+        if decided is None:
+            self._complain(why)
+            return
+        answer = QMessageBox.question(
+            self,
+            "Mark as noise",
+            f"{noise.warning(meeting, decided)}\n\n{NOISE_ASK}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.noise_button.setEnabled(False)
+        try:
+            marked, message = noise.mark_noise(self.config, self.meeting_id, speaker["speaker"])
+        finally:
+            self.noise_button.setEnabled(True)
+        if not marked:
+            self._complain(message)
+            return
+
+        log.info("%s", message)
+        self.changed = True
+        labelling.stop_playback()
+        self._reload()
         self._report(message)
 
     def _reload(self) -> None:
@@ -518,22 +654,25 @@ class SpeakerDialog(QDialog):
 
 
 def _summaries(entries: list[dict[str, Any]]) -> dict[str, str]:
-    """A one-line *who is this already* per name, for the chip tooltips.
+    """A one-line *who is this already* per id, for the chip tooltips.
 
     Phase 5's answer to "clicking a name in a speaker chip opens that page": it
-    does not, and this is what it does instead. See :meth:`_fill_chips`.
+    does not, and this is what it does instead. See :meth:`_fill_chips`. The
+    email is on the line when there is one — it is the field most likely to
+    tell two namesakes apart at a glance, and a tooltip goes nowhere.
     """
     return {
-        person["name"]: (
+        person["id"]: (
             f"{person['prints']} voiceprint(s), {len(person['appears_in'])} meeting(s), "
             f"{len(person['tags'])} project(s)"
+            + (f" - {person['email']}" if person.get("email") else "")
         )
         for person in entries
     }
 
 
 def open_for(parent: QWidget, config: Config, meeting_id: str, app: Any) -> bool:
-    """Run the dialog over one meeting. True when a name was filed.
+    """Run the dialog over one meeting. True when anything was written.
 
     Resolving the meeting and building the document happen here rather than in
     the dialog, so the two ways this can be empty — no such meeting, and nothing
@@ -559,4 +698,4 @@ def open_for(parent: QWidget, config: Config, meeting_id: str, app: Any) -> bool
         log.warning("could not read the people for the chip tooltips", exc_info=True)
     dialog = SpeakerDialog(parent, config, document, app)
     dialog.exec()
-    return dialog.named
+    return dialog.changed

@@ -649,8 +649,8 @@ class CommandCenter(QMainWindow):
         # Disabled rather than hidden when there is nobody left to name, for the
         # reason the three recording buttons are: a button that moves is a button
         # you have to look for. The count is the listing's own `unnamed`, which is
-        # `voices.unknown_speakers` — so an echo cluster is not offered here
-        # either, and this enables on exactly what the dialog would show.
+        # `voices.unknown_speakers` — so an echo or noise cluster is not offered
+        # here either, and this enables on exactly what the dialog would show.
         self.label_button.setEnabled(bool(self._unnamed(self._selected)))
         meeting = self._meeting(self._selected)
         live = meeting is not None and meeting["status"] in ("recording", "transcribing")
@@ -716,9 +716,9 @@ class CommandCenter(QMainWindow):
         does: `_rebuild` destroys every `QTreeWidgetItem`, and a transition
         arriving through the shell's `Bridge` can run it while the dialog is up.
 
-        Refreshes only when a name was actually filed. Unlike the tag picker there
-        is nothing a dismissed dialog can have created — naming is the only write
-        it makes, and it makes it immediately.
+        Refreshes only when something was actually written. Unlike the tag picker
+        there is nothing a dismissed dialog can have created — a name and a noise
+        verdict are its only writes, and it makes each immediately.
         """
         meeting_id = self._selected
         if meeting_id is None:

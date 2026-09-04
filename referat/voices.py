@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from referat import paths
+from referat import paths, projects
 from referat.config import Config
 
 if TYPE_CHECKING:
@@ -60,7 +60,17 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+"""`voices.json`'s own version, so a later shape can be migrated rather than guessed.
+
+**2 since build step 20c**: a person is a record keyed by an id, where version 1
+keyed a list of prints by a bare name. Moved because the key changed *meaning*
+— the same rule `projects.py` states about its own version — and because the
+one lossy direction matters here more than anywhere: a version-1 reader handed
+a version-2 file finds no list under any key and loads **nobody**, silently. A
+version-1 file is read by this code without being rewritten; see
+:meth:`VoicesDB.load`.
+"""
 
 BACKUPS_DIR = "backups"
 BACKUPS_KEPT = 15
@@ -145,7 +155,6 @@ def latest_backup(config: Config) -> Path | None:
     copies = sorted(folder.glob(f"{Path(paths.VOICES_JSON).stem}-*.json"))
     return copies[-1] if copies else None
 
-"""`voices.json`'s own version, so a later shape can be migrated rather than guessed."""
 
 SPEAKER_RE = re.compile(r"^speaker_\d+$", re.IGNORECASE)
 RESERVED_NAMES = ("ME", "REMOTE")
@@ -191,6 +200,45 @@ def name_complaint(name: str) -> str | None:
     if ":" in cleaned or "\n" in cleaned:
         return "must not contain ':' or a line break — it goes into a transcript label"
     return None
+
+
+def email_complaint(email: str) -> str | None:
+    """What is wrong with `email` as an address, or None. Empty is fine.
+
+    Deliberately shallow — one `@` with something on both sides and no
+    whitespace. The field is **read by a person and sent nowhere**: Referat has
+    no mail path and must not grow one, so the only thing worth refusing is a
+    value that plainly is not an address, which is what a typo into the wrong
+    field looks like.
+    """
+    cleaned = email.strip()
+    if not cleaned:
+        return None
+    if any(c.isspace() for c in cleaned):
+        return "must not contain whitespace"
+    user, at, host = cleaned.partition("@")
+    if not at or not user or "." not in host or host.startswith(".") or host.endswith("."):
+        return f"does not look like an address: {cleaned!r}"
+    return None
+
+
+def person_id(value: str) -> str:
+    """The id a stored name stands for: a legacy `speaker_names` value, or an id already.
+
+    Before build step 20c `voices.json` was keyed by a bare name and
+    `speaker_names` stored that name; since it, both hold an id. The two are
+    told apart by not telling them apart: an id is :func:`referat.projects.slugify`
+    of the name it was made from, and `slugify` is idempotent on its own output,
+    so `Lars Klein`, `lars-klein` and `LARS-KLEIN` all resolve to `lars-klein`.
+    That is what lets every file written before the change be read without
+    being rewritten — the same move `MeetingStatus` makes for `stopped` and
+    `done`, and for the same reason.
+
+    The one case it cannot serve is a person created **after** a namesake, whose
+    id carries a `-2`: a legacy value never names them, because they did not
+    exist when it was written, so the plain slug is the right answer for it.
+    """
+    return projects.slugify(value) or value
 
 
 # --- The database -----------------------------------------------------------
@@ -239,16 +287,80 @@ class Voiceprint:
 
 
 @dataclass
-class VoicesDB:
-    """Names mapped to the embeddings that have been filed under them.
+class Person:
+    """One person on file: an identity, two spellings, an address, and their prints.
 
-    A *list* per person, deliberately not an average: the same person on a
-    different headset, a bad connection or a cold lands somewhere else in the
-    space, and averaging those together would blur the one thing being matched on.
+    **The id is the identity and the names are display fields**, which is
+    exactly what a project already is in `projects.json` and for the same
+    reason: a rename touches one record, and no `meta.json`, no transcript and
+    no doc is disturbed by it. Two people who share a full name are two ids —
+    `john-smith` and `john-smith-2` — which is the answer to the question of
+    whether names must be unique: they need not be, because they are not the key.
+
+    `name` is the full name and `short` is what the transcript renders, which is
+    the one place a person's name is prose rather than a record. Two people may
+    share a short name; a transcript saying `Anna:` in two different meetings is
+    no worse than it was before there were full names, and `referat people` shows
+    both in full. `email` is **stored and never sent** — Referat has no mail path
+    and must not grow one; the field is for a person reading the page, and
+    :func:`referat.hotwords.collect` must never see it.
+
+    A *list* of prints per person, deliberately not an average: the same person
+    on a different headset, a bad connection or a cold lands somewhere else in
+    the space, and averaging those together would blur the one thing being
+    matched on.
+    """
+
+    id: str
+    name: str
+    short: str = ""
+    email: str = ""
+    prints: list[Voiceprint] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.name = self.name.strip()
+        self.short = self.short.strip() or self.name
+        self.email = self.email.strip()
+
+    def record(self) -> dict[str, str]:
+        """The four display fields, for a document. Never the prints."""
+        return {"id": self.id, "name": self.name, "short": self.short, "email": self.email}
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "short": self.short,
+            "email": self.email,
+            "prints": [p.to_json() for p in self.prints],
+        }
+
+    @classmethod
+    def from_json(cls, pid: str, raw: dict[str, Any]) -> Person:
+        prints = [
+            p
+            for entry in (raw.get("prints") or [])
+            if isinstance(entry, dict) and (p := Voiceprint.from_json(entry)) is not None
+        ]
+        return cls(
+            id=pid,
+            name=str(raw.get("name") or pid),
+            short=str(raw.get("short") or ""),
+            email=str(raw.get("email") or ""),
+            prints=prints,
+        )
+
+
+@dataclass
+class VoicesDB:
+    """People keyed by id, each with the embeddings that have been filed under them.
+
+    Keyed by **id** since build step 20c and by bare name before it; the file is
+    read in either shape and written in the new one. See :class:`Person` for why
+    the key is neither name.
     """
 
     path: Path
-    people: dict[str, list[Voiceprint]] = field(default_factory=dict)
+    people: dict[str, Person] = field(default_factory=dict)
     unreadable: bool = False
     """The file is there but would not parse, so this object is empty by accident.
 
@@ -297,16 +409,43 @@ class VoicesDB:
             db.unreadable = True
             return db
 
-        for name, entries in (raw.get("people") or {}).items():
-            if not isinstance(entries, list):
+        for key, value in (raw.get("people") or {}).items():
+            if isinstance(value, dict):
+                # Version 2: a record under an id.
+                person = Person.from_json(str(key), value)
+            elif isinstance(value, list):
+                # Version 1: a list of prints under a bare name. Read as a
+                # record whose id is the slug of that name and whose full and
+                # short names are both the name, exactly as `MeetingStatus`
+                # maps `stopped` and `done` on load. **The file is not
+                # rewritten** by reading it; the next save writes version 2.
+                prints = [
+                    p
+                    for entry in value
+                    if isinstance(entry, dict) and (p := Voiceprint.from_json(entry)) is not None
+                ]
+                if not prints:
+                    continue
+                person = Person(id=person_id(str(key)), name=str(key), prints=prints)
+            else:
                 continue
-            prints = [
-                p
-                for entry in entries
-                if isinstance(entry, dict) and (p := Voiceprint.from_json(entry)) is not None
-            ]
-            if prints:
-                db.people[str(name)] = prints
+            if person.id in db.people:
+                # Two legacy names that slugify alike — `Anna` and `anna` — would
+                # be two people merged into one voiceprint set on load, which is
+                # the single worst failure this database has and the one build
+                # step 20c exists to prevent. Refused as unreadable: reading still
+                # degrades to *nobody is known*, and no write can land on it.
+                log.error(
+                    "%s: %r and another entry both resolve to the id %r; "
+                    "refusing to read a database that would merge two people",
+                    path,
+                    key,
+                    person.id,
+                )
+                db.people.clear()
+                db.unreadable = True
+                return db
+            db.people[person.id] = person
         log.debug("loaded %d known voice(s) from %s", len(db.people), path)
         return db
 
@@ -338,19 +477,128 @@ class VoicesDB:
         _back_up(self.path)
         payload: dict[str, object] = {
             "version": SCHEMA_VERSION,
-            "people": {
-                name: [p.to_json() for p in prints]
-                for name, prints in sorted(self.people.items())
-            },
+            "people": {pid: person.to_json() for pid, person in sorted(self.people.items())},
         }
         paths.write_json_atomic(self.path, payload)
 
-    def names(self) -> list[str]:
-        return sorted(self.people)
+    # --- Reading ------------------------------------------------------------
 
-    def add(self, name: str, embedding: np.ndarray, meeting: str, speaker: str) -> None:
-        """File one embedding under `name`. Does not save; the caller decides when."""
-        self.people.setdefault(name, []).append(
+    def ordered(self) -> list[Person]:
+        """Everybody, by full name and then by id, so namesakes sit together."""
+        return sorted(self.people.values(), key=lambda p: (p.name.casefold(), p.id))
+
+    def ids(self) -> list[str]:
+        """Every id, in :meth:`ordered` order."""
+        return [person.id for person in self.ordered()]
+
+    def names(self) -> list[str]:
+        """Every full name, sorted. A display list; the gallery and the match use ids."""
+        return sorted((person.name for person in self.people.values()), key=str.casefold)
+
+    def spellings(self) -> list[str]:
+        """Every way a person is written — full name and short name — and never the email.
+
+        What :func:`referat.hotwords.collect` reads. Whisper may hear either
+        spelling, so both go on the list when they differ; an address is not a
+        word anybody says and must not be told to a speech model.
+        """
+        out: list[str] = []
+        for person in self.ordered():
+            for term in (person.name, person.short):
+                if term and term not in out:
+                    out.append(term)
+        return out
+
+    def get(self, pid: str) -> Person | None:
+        return self.people.get(pid)
+
+    def display(self, value: str) -> str:
+        """The full name behind a stored id or legacy name, or the value itself.
+
+        The value itself when nobody is filed under it, which is what drift
+        looks like — a `speaker_names` entry whose person has since been
+        forgotten — and is shown rather than hidden for the reason the people
+        page gives.
+        """
+        person = self.people.get(person_id(value))
+        return person.name if person is not None else value
+
+    def label_for(self, value: str) -> str:
+        """What the transcript calls the person behind a stored id or legacy name.
+
+        The short name, or the value itself when nobody is filed under it.
+        """
+        person = self.people.get(person_id(value))
+        return person.short if person is not None else value
+
+    def resolve(self, text: str) -> tuple[Person | None, str]:
+        """The person `text` means, or `(None, "")` for nobody, or `(None, why)`.
+
+        In order: an id, a full name, a short name — each compared exactly and
+        then case-insensitively. A full or short name two people share is
+        **ambiguous and refused in words that list the ids**, rather than picking
+        the first: choosing between two Annas on somebody's behalf is filing a
+        voice under the wrong person, which is the failure this record exists to
+        prevent. A number typed at the prompt never reaches this; the prompt
+        turns it into an id first.
+        """
+        wanted = text.strip()
+        if not wanted:
+            return None, ""
+        if (person := self.people.get(wanted)) is not None:
+            return person, ""
+        folded = wanted.casefold()
+        for pick in (
+            lambda p: p.name == wanted,
+            lambda p: p.name.casefold() == folded,
+            lambda p: p.short == wanted,
+            lambda p: p.short.casefold() == folded,
+        ):
+            hits = [p for p in self.ordered() if pick(p)]
+            if len(hits) == 1:
+                return hits[0], ""
+            if hits:
+                ids = ", ".join(p.id for p in hits)
+                return None, f"{wanted} could be any of {ids}; say which"
+        return None, ""
+
+    def owner(self, config: Config) -> Person | None:
+        """The person `[speakers].owner_name` names, or None when nobody does yet.
+
+        None also for an ambiguous owner name — logged, because the owner is the
+        one person every meeting is scoped to, and an owner nothing can resolve
+        is a configuration to fix rather than a guess to make.
+        """
+        wanted = config.speakers.owner_name.strip()
+        if not wanted:
+            return None
+        person, why = self.resolve(wanted)
+        if why:
+            log.warning("[speakers].owner_name: %s", why)
+        return person
+
+    # --- Writing ------------------------------------------------------------
+
+    def new_person(self, name: str, short: str = "", email: str = "") -> Person:
+        """Create a record with a fresh id. Does not save; the caller decides when.
+
+        The id is :func:`referat.projects.slugify` of the full name plus the
+        same `-2` collision suffix a project gets, which is a rule this codebase
+        has exactly one implementation of. The caller has already run
+        :func:`name_complaint` over the names; this does not repeat it.
+        """
+        pid = projects.free_id(projects.slugify(name) or "person", self.people)
+        person = Person(id=pid, name=name, short=short, email=email)
+        self.people[pid] = person
+        return person
+
+    def add(self, pid: str, embedding: np.ndarray, meeting: str, speaker: str) -> None:
+        """File one embedding under the person `pid`. Does not save.
+
+        The person must exist — see :meth:`new_person` — because a print filed
+        under an id nobody is recorded against would be a voice with no name.
+        """
+        self.people[pid].prints.append(
             Voiceprint(
                 embedding=np.asarray(embedding, dtype=np.float32),
                 meeting=meeting,
@@ -359,9 +607,10 @@ class VoicesDB:
             )
         )
 
-    def forget(self, name: str) -> int:
+    def forget(self, pid: str) -> int:
         """Delete a person outright and report how many embeddings went with them."""
-        return len(self.people.pop(name, []))
+        person = self.people.pop(pid, None)
+        return len(person.prints) if person is not None else 0
 
     def drop(self, meeting: str, speaker: str) -> dict[str, int]:
         """Remove the voiceprints filed from one cluster of one meeting.
@@ -383,17 +632,18 @@ class VoicesDB:
         labels, which this must not do, because those labels are right.
         """
         removed: dict[str, int] = {}
-        for name, prints in list(self.people.items()):
+        for pid, person in list(self.people.items()):
+            prints = person.prints
             keep = [p for p in prints if not (p.meeting == meeting and p.speaker == speaker)]
             if len(keep) == len(prints):
                 continue
             if not keep:
                 raise ValueError(
-                    f"{name} has no other voiceprint, so this would delete them "
-                    f"entirely; `referat label --forget {name}` is what does that"
+                    f"{person.name} has no other voiceprint, so this would delete them "
+                    f"entirely; `referat label --forget {pid}` is what does that"
                 )
-            removed[name] = len(prints) - len(keep)
-            self.people[name] = keep
+            removed[pid] = len(prints) - len(keep)
+            person.prints = keep
         return removed
 
 
@@ -433,7 +683,13 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 @dataclass(frozen=True)
 class Match:
-    """The best name for one cluster, and whether it was good enough to use."""
+    """The best person for one cluster, and whether it was good enough to use.
+
+    `name` holds the person's **id** since build step 20c, and keeps its key in
+    `meta.json` because every `match` block already written has one and a
+    reader that renders it resolves it through :meth:`VoicesDB.display` either
+    way — a legacy name and an id go through the same :func:`person_id`.
+    """
 
     name: str
     score: float
@@ -473,9 +729,9 @@ def match(embedding: np.ndarray, db: VoicesDB, threshold: float, margin: float) 
     *score* instead, so the bar is never lower for having less to compare against.
     """
     scored = [
-        (max(cosine(embedding, p.embedding) for p in prints), name)
-        for name, prints in db.people.items()
-        if prints
+        (max(cosine(embedding, p.embedding) for p in person.prints), pid)
+        for pid, person in db.people.items()
+        if person.prints
     ]
     if not scored:
         return None
@@ -615,6 +871,18 @@ class Cluster:
     suppression thresholds, and it is inert now that the one thing that reads it
     refuses.
     """
+    noise: bool = False
+    """Whether a person said this cluster is not a person — see :mod:`referat.noise`.
+
+    A second verdict beside :attr:`echo` rather than a widening of it, because
+    the two are reached differently and a later reader must be able to tell
+    which: `echo` is measured against the other channel, `noise` is a human
+    judgement made by listening, and nothing in the data checks it. They share
+    the defence — :func:`unknown_speakers` skips both and
+    :func:`referat.label.apply_name` refuses both — and nothing else. Never set
+    by the pipeline; only :func:`mark_stored_noise` writes it, and only at a
+    person's request.
+    """
 
     def to_json(self) -> dict[str, Any]:
         meta: dict[str, Any] = {"snippets": self.snippets}
@@ -624,6 +892,8 @@ class Cluster:
             meta["name"] = self.name
         if self.echo:
             meta["echo"] = True
+        if self.noise:
+            meta["noise"] = True
         if self.match is not None:
             meta["match"] = self.match.to_json()
         return meta
@@ -642,8 +912,10 @@ def identify(
 ) -> dict[str, str]:
     """Name what can be named on one channel, and cut snippets for what cannot.
 
-    Returns the `SPEAKER_NN -> name` mapping that was accepted, and fills
-    `transcript.speakers` with one :class:`Cluster` per speaker on the way.
+    Returns the `SPEAKER_NN -> short name` mapping that was accepted — what the
+    transcript renders — and fills `transcript.speakers` with one
+    :class:`Cluster` per speaker on the way, each carrying the person's **id**
+    in `Cluster.name`, which is what `speaker_names` records.
 
     `renaming` is :func:`referat.diarize.assign`'s map from pyannote's own labels
     to the `SPEAKER_NN` the transcript uses. Carrying the embeddings through it is
@@ -701,8 +973,10 @@ def _identify(
         if embedding is not None:
             cluster.match = match(embedding, db, settings.match_threshold, settings.match_margin)
             if cluster.match is not None and cluster.match.accepted:
+                # The cluster records the *id*, which is what `speaker_names`
+                # stores; the transcript gets the short name, which is prose.
                 cluster.name = cluster.match.name
-                names[label] = cluster.match.name
+                names[label] = db.label_for(cluster.match.name)
         if not cluster.name:
             # Only the ones nobody can name yet need audio kept for them.
             cluster.snippets = cut_snippets(
@@ -754,6 +1028,12 @@ def unknown_speakers(meeting: Meeting) -> list[str]:
     command center's speaker dialog, `referat list`'s unnamed column, the tray's
     post-transcription notification and `label.run_json`'s gallery, because all
     five ask this function.
+
+    **Nor is a noise cluster.** A person listened and said it is not a person —
+    a door, the corridor, the meeting next door — and its lines are out of the
+    transcript by :func:`referat.noise.mark_noise`. It is the way out of the
+    *Speakers nobody has named* queue for a speaker nobody will ever name, and it
+    is per meeting because the numbering is.
     """
     channels = (meeting.transcription.get("channels") or {}).values()
     labels = {
@@ -761,9 +1041,37 @@ def unknown_speakers(meeting: Meeting) -> list[str]:
         for channel in channels
         if isinstance(channel, dict)
         for label, cluster in (channel.get("speakers") or {}).items()
-        if not (isinstance(cluster, dict) and cluster.get("echo"))
+        if not (isinstance(cluster, dict) and (cluster.get("echo") or cluster.get("noise")))
     }
     return sorted(labels - set(meeting.speaker_names))
+
+
+def namesake_in(meeting: Meeting, db: VoicesDB, person: Person, ignore: str = "") -> Person | None:
+    """Somebody *else* in this meeting whom the transcript would call by the same short name.
+
+    A transcript label is the short name and nothing more, so two people who
+    share one cannot be told apart inside a single file — and `forget` and
+    `rename` rewrite labels by that name across the meetings `speaker_names`
+    says a person is in. Two Annas in different meetings are fine; two Annas in
+    **one** meeting would make every later label edit hit both. So
+    :func:`referat.label.apply_name` refuses the second Anna into a meeting that
+    already has one, and :func:`referat.label.rename_person` refuses a short
+    name that would create the same situation retroactively.
+
+    `ignore` is the label being named, so a speaker being *re*-filed does not
+    collide with themself.
+    """
+    for label, value in meeting.speaker_names.items():
+        if label == ignore:
+            continue
+        other = db.get(person_id(value))
+        if (
+            other is not None
+            and other.id != person.id
+            and other.short.casefold() == person.short.casefold()
+        ):
+            return other
+    return None
 
 
 def speaker_channel(meeting: Meeting, speaker: str) -> str:
@@ -809,6 +1117,35 @@ def is_echo(meeting: Meeting, speaker: str) -> bool:
     """
     cluster = _stored_cluster(meeting, speaker)
     return bool(cluster and cluster.get("echo"))
+
+
+def is_noise(meeting: Meeting, speaker: str) -> bool:
+    """Whether `meta.json` records this cluster as noise rather than a person.
+
+    :func:`is_echo`'s counterpart for the other verdict, read off the stored
+    record for the same reason: it was a person's decision, and re-deriving it
+    is not possible even in principle.
+    """
+    cluster = _stored_cluster(meeting, speaker)
+    return bool(cluster and cluster.get("noise"))
+
+
+def mark_stored_noise(meeting: Meeting, speaker: str) -> bool:
+    """Flag one cluster as noise in the channel's `speakers` block. Does not save.
+
+    False when there is no such cluster. Clears the stored snippet list the way
+    :func:`referat.bleed.mark_clusters` does, because the caller deletes the
+    files and a record of paths that no longer resolve is a small lie every later
+    reader has to work around once. The embedding stays — inert, since both
+    readers of it refuse a noise cluster — and no name is touched, because
+    :func:`referat.noise.complaint` refuses a named cluster before this is reached.
+    """
+    entry = _stored_cluster(meeting, speaker)
+    if entry is None:
+        return False
+    entry["noise"] = True
+    entry["snippets"] = []
+    return True
 
 
 def _stored_cluster(meeting: Meeting, speaker: str) -> dict[str, Any] | None:
@@ -943,17 +1280,6 @@ def _bootstrap_owner(
     if cluster.embedding is None:
         log.debug("%s: the mic cluster has no embedding; not adding one", meeting.id)
         return False
-    if cluster.name and cluster.name != owner:
-        # Already recognised as somebody else. Believe the match over the config:
-        # filing their voice under the owner's name is the one outcome worth
-        # refusing outright.
-        log.warning(
-            "%s: the microphone was identified as %s, not %s; not adding an owner voiceprint",
-            meeting.id,
-            cluster.name,
-            owner,
-        )
-        return False
 
     db = VoicesDB.load(config)
     if db.unreadable:
@@ -971,7 +1297,46 @@ def _bootstrap_owner(
             db.path,
         )
         return False
-    db.add(owner, cluster.embedding, meeting.id, cluster.label)
+    person, why = db.resolve(owner)
+    if why:
+        # Two people the owner's name fits equally. Not a guess to make on a
+        # transcription thread: the owner is the one person every meeting is
+        # scoped to, and the config is where this gets fixed.
+        log.error("%s: not adding an owner voiceprint -- %s", meeting.id, why)
+        return False
+    if cluster.name and (person is None or cluster.name != person.id):
+        # Already recognised as somebody else. Believe the match over the config:
+        # filing their voice under the owner's name is the one outcome worth
+        # refusing outright.
+        log.warning(
+            "%s: the microphone was identified as %s, not %s; not adding an owner voiceprint",
+            meeting.id,
+            db.display(cluster.name),
+            owner,
+        )
+        return False
+    if person is None:
+        # The first meeting on a fresh database: the owner's record is created
+        # from the config's spelling, full and short alike, and grows a full
+        # name the day `referat person rename` gives it one.
+        person = db.new_person(owner)
+    db.add(person.id, cluster.embedding, meeting.id, cluster.label)
     db.save()
-    log.info("added an owner voiceprint for %s from %s of %s", owner, cluster.label, meeting.id)
+    log.info(
+        "added an owner voiceprint for %s (%s) from %s of %s",
+        person.name,
+        person.id,
+        cluster.label,
+        meeting.id,
+    )
     return True
+
+
+def owner_person(config: Config) -> Person | None:
+    """The owner's record, or None when nobody on file answers to `[speakers].owner_name`.
+
+    A fresh load each call, for the reason :func:`referat.hotwords.collect`
+    reads the database live: a `--forget` or a rename must be seen by the next
+    caller, and there is no cache to go stale.
+    """
+    return VoicesDB.load(config).owner(config)

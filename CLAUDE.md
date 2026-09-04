@@ -561,10 +561,11 @@ which reads its documents by calling the same functions rather than by spawning:
 `config`, `list`, `show <id>`,
 `transcript <id>`, `rerun <id>`,
 `label <id>`, `status`,
-`devices`, `hotwords`, `people`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
+`devices`, `hotwords`, `people`, `person rename <id>`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
 `project <verb>`, `tag`, `untag`, `state`,
 `promote <id>`,
-`reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `delete <id>`. **All of
+`reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `denoise <id> --speaker
+<label>`, `delete <id>`. **All of
 them are built**, `project link-doc`, `project unlink-doc` and `project sync`
 included since step 13 — they were deliberately absent from the parser until
 then rather than present and answering "not built yet".
@@ -585,10 +586,11 @@ of it back, which is deliberately the opposite of `apply_tags` — a tag picker
 renders a subset of the projects, so a replacement there could drop a tag it
 never drew, while a glossary is edited as the whole list.
 
-`reflow`, `relabel` and `debleed` are the three repairs, and they are the same
-shape: all exist because a rendering rule changed after transcripts had already
-been written whose audio has since been released, so no `rerun` can regenerate
-them. All write nothing when there is nothing to change. `reflow` and `relabel`
+`reflow`, `relabel`, `debleed` and `denoise` are the four repairs. The first
+three are the same shape: all exist because a rendering rule changed after
+transcripts had already been written whose audio has since been released, so no
+`rerun` can regenerate them. All four write nothing when there is nothing to
+change. `reflow` and `relabel`
 are idempotent; **`debleed` is convergent instead**, and that is a real
 difference rather than a quibble — its pairing is greedy and disjoint, so
 removing one line can leave two others adjacent that were not before. On
@@ -634,6 +636,50 @@ repeats stops looking for them. That meeting's correction belongs in its
 `notes.md`, which is where the immutability rule points corrections anyway. The
 command still earns its place: the dry run is the only way to see the problem in a
 rendered file, and the next such transcript may have a far better ratio.
+
+**`denoise` is the fourth repair and the second exception, built at step 20b on
+2026-09-04.** A room microphone hears the corridor, a door and the meeting next
+door, and diarization gives that a `SPEAKER_NN` like anybody else — `2026-09-03`
+had one — so until then the only way out of the *Speakers nobody has named* queue
+for a cluster nobody will ever name was to give it a name, which files a
+voiceprint of a door. `referat denoise <id> --speaker SPEAKER_NN [--apply]` marks
+one cluster as **not a person**: it is never offered a name again, no voiceprint
+is filed, its snippets go, and every line under that label is removed from
+`transcript.md`. It inherits `debleed`'s four conditions rather than re-arguing
+them — dry by default, `meta.json` first with every removed line kept verbatim
+under `transcription.noise`, accumulating across passes, a repair beside the
+other three — and `referat/noise.py` is where they live.
+
+**Where it differs from `debleed` is the part to hold onto: there is no evidence.**
+`debleed` decides by coverage in time and text against the other channel and
+refuses when the evidence is thin; nothing in the data distinguishes a quiet
+neighbour from a quiet participant, so **a person marks it and the machine never
+infers it** — no heuristic, no "clusters under N seconds", and there must never
+be one, because the cost of being wrong is deleting somebody's actual words.
+That is *nothing is inferred from a transcript* applied to the one operation
+where a shortcut would be most tempting. It follows that the judgement is made by
+listening, and the snippets are how: they survive exactly as long as a cluster is
+unnamed, so the command center's Speakers dialog carries the button — *Not a
+person: mark as noise…*, behind a modal quoting the same `noise.warning` the CLI
+prints as its dry run — and the verb at the prompt is the same `noise.mark_noise`
+printed.
+
+**Two flags, not one.** `Cluster.noise` sits beside `Cluster.echo` rather than
+widening it: `echo` means something specific and true — *this is the loopback
+coming back* — and was reached by measurement, while `noise` is a human
+judgement, and a later reader must be able to tell which was made. They share
+the defence and nothing else: `voices.unknown_speakers` skips both and
+`label.apply_name` refuses both. **A named cluster is refused**, since that is a
+person somebody identified and marking them noise would delete a recognised
+person's words — `label --forget <name>` comes first. And it is per meeting,
+always, because `SPEAKER_NN` numbering is per meeting and dismissing *a number*
+globally would silence a different person next week. `meta.json` is written
+through `write_json_atomic` directly rather than `Meeting.save`, which never
+raises: that is right for a recording, where the audio is the part that cannot
+be reconstructed, and wrong here, where the record *is* the justification for
+the deletion — a record that failed to land refuses the deletion outright.
+`debleed` had gone through `save` and inherited the hole; it was closed the same
+way the same day.
 
 **`relabel` is deliberately narrow**, because the label it is replacing means two
 things and only one of them is repairable. It spells the owner's name into `ME:`
@@ -848,10 +894,13 @@ the verbatim transcript. The prompt is a versioned file, so it is refined by
 editing Markdown rather than by changing code.
 
 **`/cleanup` is also where transcription errors get corrected**, since by the
-immutability rule they cannot be corrected where they happened. The meetings
-folder's `CLAUDE.md` carries a *Known people and terms* section, and a meeting
-tagged with a project carries that project's `glossary` as well; both are lists
-of what things are actually called. An exact match against either is normalized
+immutability rule they cannot be corrected where they happened. This paragraph
+used to say the meetings folder's `CLAUDE.md` carries a *Known people and
+terms* section; **it does not, and neither does the template or the prompt** —
+found on 2026-09-04 while cross-referencing step 20c's full names against it,
+and recorded in `TODO.md` rather than quietly built. A meeting tagged with a
+project carries that project's `glossary`, which is the list of what things are
+actually called that does exist. An exact match against either is normalized
 silently. A **near miss is corrected and flagged in the note itself** —
 `Elmqvist (assumed transcription error: "Elmquist")`, once, at first use —
 because a silently applied guess is the same failure as putting a name on a
@@ -936,9 +985,12 @@ prototype, with nothing at risk. Phase 2 is the first thing this window writes,
 and it writes **tags and only tags**: an untagged inbox behind an *Untagged only*
 toggle, a search box, and a tag picker that also creates a project inline. Phase
 3 is the second, and it writes **names and only names**, through a *Speakers…*
-button beside *Tags…*. Nothing in `referat/ui/` writes any other `meta.json` key,
-and neither dialog implements a rule: the picker drives `cli.apply_tags` and the
-speaker dialog drives `label.name_speaker`.
+button beside *Tags…* — until step 20b, when the same dialog grew the third
+answer beside *name* and *leave*, a cluster marked as **noise** through
+`noise.mark_noise`, which is a second verdict on a cluster and the lines under
+it and still no other key. Neither dialog implements a rule: the picker drives
+`cli.apply_tags` and the speaker dialog drives `label.name_speaker` and
+`noise.mark_noise`.
 
 **Phase 4 is the third, and it writes no `meta.json` key at all** — it writes
 `projects.json`, through the five guarded functions above, and it is where the
@@ -1071,6 +1123,77 @@ the primitive. The same split as `name_speaker` over `apply_name`, made for the
 fourth time. The confirmation is deliberately *outside* the operation: `--forget`
 reads `input()` and answers no on EOF, which is a question asked of a terminal,
 and a window asks the same question with a modal. Neither asks it twice.
+
+**A person is a record, from build step 20c on 2026-09-04: an id, a full name,
+a short name and an email.** The database used to be keyed by a bare name, and
+the problem was already on the shelf: the tenth person called Anna would have
+been indistinguishable from the first, and `voices.match` compares *keys* — two
+people filed under one name would silently merge into one voiceprint set, which
+is the single worst failure this system has. So a person became exactly what a
+project already is: `{id, name, short, email}` keyed by `id`, the id being
+`projects.slugify` of the full name plus the same `-2` collision suffix, which
+is a rule this codebase has one implementation of. **Two John Smiths are two
+ids**, and that is the answer to whether names must be unique — they need not
+be, because they are not the key. `SCHEMA_VERSION` moved to 2, because the key
+changed meaning; a version-1 file is read without being rewritten — a bare name
+loads as `{id: slugify(name), name, short: name}`, exactly as `MeetingStatus`
+maps `stopped` and `done` — and the next save writes version 2. Two legacy
+names that slugify alike are refused as unreadable rather than merged, which is
+the one failure the whole change exists to prevent, and the twenty-eight names
+on this machine were checked to be distinct before any of it was trusted.
+
+**Which file holds which half is the same split `tags` already makes.**
+`voices.json`, `meta.json`'s `speaker_names` and the per-channel `name` and
+`match.name` hold the **id**, because they are records; `transcript.md` holds
+the **short name**, because it is prose. `voices.person_id` is how a value in
+`speaker_names` is read — `slugify` is idempotent on its own output, so a legacy
+`Lars Klein` and an id `lars-klein` resolve alike, and no meeting on disk was
+migrated. `voices.identify` therefore returns the short name for the renderer
+while stamping the id onto the cluster, and `bleed.suppress` is handed the
+owner's id rather than the config's spelling.
+
+**Renaming fell out of the id, which is why it was not built before it.** *The
+id never moves and a rename changes a display field* — the sentence step 13
+wrote about projects, transferred line for line. `label.rename_person` is the
+tenth guarded function, `referat person rename <id> --name --short --email` is
+it printed and *Rename…* on the people page is it in process, and every rule
+lives in it: what a name may be (both go through `name_complaint`, since both
+end up in a label), what an email may be (`email_complaint`, shallow on
+purpose), and **what propagates**. A changed short name is relabeled into every
+`transcript.md` whose `speaker_names` carries the id — `relabel_transcript`, the
+one sanctioned edit to that file, in both directions as `--forget` uses it — and
+in those same meetings' `notes.md` **the `[[Wikilinks]]` to the old spelling
+are rewritten and nothing else is.** The brackets are the one place a note is
+*referring* rather than *saying*; a find-and-replace across somebody's prose is
+the same move as spelling a name onto a `SPEAKER_NN`, authoritative when wrong.
+Prose still using the old name surfaces on the people page as a name nothing is
+filed under, which is the safety net either way. A rewritten note drops a
+`synced` meeting to `notes_written` from the function that *knows* the notes
+changed, as `cli.set_notes_written` does, so the next sync re-renders the block;
+a Google Doc's own prose is never reached into.
+
+**Two refusals hold the transcript honest.** A short name is the whole of a
+label, so two people one file calls `Anna` are one label and every later edit
+to it — a forget, a rename — would hit both. `voices.namesake_in` is the
+question, and it is asked in two places: `name_speaker` refuses the second Anna
+into a meeting that already has one, and `rename_person` refuses a short name
+that would create the same situation retroactively. And a name two people on
+file share is refused *by id* rather than resolved to the first — `VoicesDB.resolve`
+tries id, then full name, then short name, and an ambiguous hit names the
+candidates. A chip in the speaker dialog therefore fills the id for a shared
+full name, since the name alone would be a refusal the chip offered.
+
+**The email is stored and never sent, and the one place it must not reach is
+the hotword list.** `hotwords.collect` now reads `VoicesDB.spellings()` — the
+full name and the short name where they differ, because Whisper may hear either
+— and that method does not return the address, so the merge that reads the
+database live cannot be told to listen for one. The `people` table does not
+print it either; `--json` and the people page do, for a person reading about one
+person. Nothing derives a short name from a full one: *Lars* out of *Lars
+Klein* is a guess about a name on every line of a transcript, so somebody new is
+typed as a full name with an optional `--short`, and the record is edited
+afterwards. `scripts/person_fixture.py` drives all of it against a synthetic
+version-1 database and three synthetic meetings, and never reads the real one.
 
 **The window writes notes and deletes meetings, from 2026-09-03.** Those were
 two of the four things the sidebar could do and the command center could not, so
@@ -1487,7 +1610,8 @@ functions the CLI calls — `cli.list_document`, `cli.show_document`,
 `cli.promote_warning`, `cli.link_doc`, `cli.unlink_doc`, `cli.sync_project`,
 `cli.doc_candidates`, `audio_state`,
 `meeting.format_duration`, `index.meeting_title`, `voices.unknown_speakers`,
-`label.label_document`, `label.name_speaker`, `label.forget_person` — and spawning a subprocess of its
+`label.label_document`, `label.name_speaker`, `label.forget_person`,
+`label.rename_person` — and spawning a subprocess of its
 own CLI would buy nothing
 but an interpreter start per refresh.
 
@@ -1589,10 +1713,11 @@ meeting's `notes.md` translated into a Google Doc. `referat/digest.py` is the
 translator and the diff, `referat/gdocs.py` is the client, and
 `referat/markdown.py` is the subset both it and `ui/richtext.py` read.
 
-**The consent has not been given yet**, so nothing has been written into a real
-document: the network half renders and passes an offline simulator rather than
-having run. Said plainly rather than left, the way step 23 said it about its two
-buttons.
+**The consent was given on 2026-09-04**, at a terminal through the paste flow,
+and the token lives at `[paths].google_token_file`; four projects carry a doc and
+three meetings had reached `synced` by that afternoon. This paragraph said the
+opposite for half a day after it stopped being true — a written claim about
+what has run is a fact with a date on it, like the `createTab` note below.
 
 **A project is a label, not a container.** It is a thread of work spanning many
 meetings — the thing `/cleanup` already writes `[[Wikilinks]]` for — and a
@@ -1913,12 +2038,15 @@ and rewrites none of them.
 (the lifecycle, below), `pauses` (list of
 `{start, end}` in elapsed seconds), `audio`, `transcription`, `tags` (the project
 ids this meeting carries), `speaker_names`
-(`SPEAKER_NN` to the name it was resolved to), `referat_version`. The per-channel
+(`SPEAKER_NN` to the **id** of the person it was resolved to — the bare name, in
+a meeting written before build step 20c, which resolves to the same id), `referat_version`. The per-channel
 `speakers` block maps each `SPEAKER_NN` to its embedding, its snippet offsets,
 the `name` it resolved to, and the `match` that decided — recorded even when it
 was refused, because the near-misses are the only material for calibrating the
 thresholds. `speaker_names` is the authority on who a label is; the per-channel
-`name` follows it, and `referat label --forget` clears both.
+`name` follows it, and `referat label --forget` clears both. Both hold the
+person's id since step 20c, and `match.name` does too; `transcript.md` holds the
+short name, because it is prose.
 
 The `transcription` block also carries `bleed`, what `referat/bleed.py` decided:
 the status, and **every** microphone cluster with the two coverages that judged
@@ -1929,6 +2057,14 @@ recorded beside the verdict, so a transcript suppressed under old thresholds is
 distinguishable from one suppressed under new. Nothing about it is written into
 `transcript.md`: that file is prose about what was said, and this is the pipeline
 saying what it did.
+
+Two more keys in that block are what the *repairs* did rather than the pipeline,
+and both are records of deletions kept so the deletion can be read back:
+`debleed` — `{at, settings, removed: [...]}` — and, since step 20b, `noise`,
+keyed by label, each `{at, channel, removed: [{at, text}, ...]}`. Both
+`removed` lists accumulate across passes. The per-channel cluster a `noise`
+entry refers to also carries `noise: true` beside where `echo: true` would be,
+and both flags mean the cluster is never offered a name.
 
 `digest` is what has been pushed into which Google Doc, **keyed by `gdoc_id`**,
 each entry `{tab_id, notes_sha256, written_at}`. Keyed by doc rather than being

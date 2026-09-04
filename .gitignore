@@ -29,20 +29,20 @@ logs/
 # but a .lnk dragged in to look at should never be committed.
 *.lnk
 
-# The VS Code extension's build tree. `dist/` and `build/` above are
-# unanchored and already cover the esbuild output; these are the rest.
+# What the VS Code extension used to leave behind. It was deleted at build step
+# 23, and these three lines stay: a node_modules or a .vsix appearing in this
+# repository now would be somebody starting it again, and the point of deleting
+# it was that there is one UI.
 node_modules/
 out/
 *.vsix
 
 # Editors / OS
-# Three files under .vscode are tracked: settings.json pins the interpreter to
-# the project venv, and launch.json + tasks.json are what F5 needs to run the
-# extension from source until step 12 packages it.
+# One file under .vscode is tracked: settings.json, which pins the interpreter to
+# the project venv. launch.json and tasks.json went with the extension at step
+# 23 — they existed only to run it from source under F5.
 .vscode/*
 !.vscode/settings.json
-!.vscode/launch.json
-!.vscode/tasks.json
 .idea/
 Thumbs.db
 desktop.ini

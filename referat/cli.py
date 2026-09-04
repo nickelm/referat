@@ -1335,8 +1335,8 @@ def run_transcript(config: Config, meeting_id: str, as_json: bool = False) -> in
     return 0
 
 
-PROJECT_HEADERS = ("ID", "NAME", "MEETINGS", "DOCS", "ARCHIVED")
-PROJECT_RIGHT_ALIGNED = (2, 3)
+PROJECT_HEADERS = ("ID", "NAME", "MEETINGS", "DOCS", "PENDING", "ARCHIVED")
+PROJECT_RIGHT_ALIGNED = (2, 3, 4)
 
 
 def project_document(config: Config) -> dict[str, Any]:
@@ -1446,6 +1446,10 @@ def run_project_list(config: Config, as_json: bool = False) -> int:
             p["name"],
             str(p["meetings"]),
             str(len(p["docs"])) if p["docs"] else "-",
+            # Blank rather than `0` for a project with no docs: there is nowhere
+            # for it to be behind, which is a different thing from being current.
+            (str(p["pending"]) if p["pending"] else "-") if p["docs"] else "",
+
             # The date rather than a tick, and the same date-or-dash shape DOCS
             # already has one column along. A tick column would be the one thing
             # on a page carrying no information; when a project stopped is worth

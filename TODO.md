@@ -1331,6 +1331,17 @@ attached. Everything else in this sub-section stands.
       `q = "mimeType='application/vnd.google-apps.document' and name contains
       '<query>' and trashed=false"`, `orderBy=modifiedTime desc`, printed as a
       numbered list in the CLI and as a live QuickPick in the extension
+- [x] **"Tabs cannot be created through the API" was true and is not any more.**
+      Built on that assumption on 2026-09-04 and corrected the same day:
+      `addDocumentTab`, `deleteTab` and `updateDocumentTabProperties` all exist.
+      Found by listing the request types rather than by re-reading this box,
+      which is the general lesson — a claim about somebody else's API is a fact
+      with a date on it, and this one had been carried in four files.
+      `--new-tab` and a checkbox in the dialog add one; a created document has
+      its tab named from `[digest].new_tab_name` and given a `TITLE` line. Never
+      automatic, because adding a tab is a visible change to somebody's document
+      — the same rule that stops one being *picked* automatically.
+      Original note follows.
 - [x] After selecting an existing doc, look for a tab whose
       `tabProperties.title` is `Meetings`. **Tabs cannot be created through the
       API** — there is no `createTab` request — so if it is missing, open

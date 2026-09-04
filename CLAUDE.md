@@ -1757,12 +1757,22 @@ reasonable if something says what they are called.
 **Linking is create-or-select, and the tab is the awkward half.** `referat
 project link-doc <id>` *appends* a doc reference and `unlink-doc <id> <gdoc_id>`
 removes one, since a project may carry several. *Create new
-doc* calls `documents.create` titled `<Project> Meeting Digest` and writes into
-that doc's default tab. *Select existing doc* searches Drive with `files.list`
-filtered to Google Docs by name, then looks for a tab titled `Meetings` —
-**tabs cannot be created through the API**, there is no `createTab` request, so
-a doc without one is opened in the browser with an instruction to add it and a
-re-check. Either way `gdoc_id` and `tab_id` are stored, and **every write is
+doc* calls `documents.create` titled `<Project> Meeting Digest`, **renames its
+tab** to `[digest].new_tab_name` and gives it a `TITLE` line — the one case where
+writing a heading is not touching somebody else's prose, since the document is a
+second old and Referat made it. *Select existing doc* searches Drive with
+`files.list` filtered to Google Docs by name, or takes a pasted link, and then
+picks a tab.
+
+**"Tabs cannot be created through the API" was true and stopped being true.**
+Four files said so, on the strength of there being no `createTab` request; the
+API has since gained `addDocumentTab`, `deleteTab` and
+`updateDocumentTabProperties`, which was found by listing the request types
+rather than by reading the note again. So a document with no suitable tab is no
+longer sent to a browser: `--new-tab`, or a checkbox in the dialog, adds one.
+Never automatically — adding a tab is a visible change to somebody's document,
+which is the same rule that stops one being *picked* automatically. This is the
+general case of a claim about somebody else's API being a fact with a date on it. Either way `gdoc_id` and `tab_id` are stored, and **every write is
 located by that `tab_id`**: `documents.get` always passes
 `includeTabsContent=True`, and every `batchUpdate` request carries `tabId` in
 its `Location` or `Range`. A request without one silently targets the first tab,
@@ -1809,7 +1819,20 @@ this machine and are rendered as bold text with the brackets stripped. The
 translator is pure and imports nothing from Google, so the part carrying all the
 index arithmetic is testable offline.
 
-**Each block opens with a Heading 3 line, `YYYY-MM-DD — <title>`**, the title
+**A block's heading level is `[digest].heading_level` and defaults to 1**, so
+the date line is Heading 1 and `notes.md`'s own `##` and `###` land as Heading 2
+and Heading 3. It was Heading 3 unconditionally until 2026-09-04, on the
+reasoning that a block sits inside a document with its own outline above it —
+true of a doc where Referat is a guest, and wrong for the ordinary case where it
+has a tab to itself and the result was a document whose outline started three
+levels down. `[digest].newest_first` is the other presentation knob: it decides
+where a **new** block is inserted and never moves an existing one, because
+rearranging a document somebody may have written between two blocks is a larger
+thing than adding to one — a sync that finds them running the other way says so
+and leaves them. `sync --rerender` is how a change to either reaches blocks
+already written, since none of their notes moved and nothing else would notice.
+
+**Each block opens with a heading line, `YYYY-MM-DD — <title>`**, the title
 being the H1 of `notes.md` falling back to the meeting id — the same rule as
 `referat index`, sharing that helper. `notes.md`'s own `##` and `###` therefore
 land as Heading 4 and Heading 5 beneath it. The Docs API cannot insert an

@@ -151,6 +151,14 @@ def _free_id(base: str, taken: Iterable[str]) -> str:
 class DocRef:
     """One Google Doc a project's digest is written into. Build step 13 fills these in.
 
+    **`gdoc_id` and `tab_id` are the identity; `doc_title` and `tab_name` are
+    display text.** Neither title is ever used to find anything, which is what
+    makes renaming a document or a tab safe and moving one around Drive
+    irrelevant — an id is minted once and does not move. They are stored so a
+    list can be read without a network call, and corrected by a sync when they
+    have changed, rather than going on saying what things were called on the day
+    they were linked.
+
     `tab_id` is stored rather than derived because **every** write has to be
     located by it: a `batchUpdate` request carrying no `tabId` silently targets
     the first tab of the document, which is how a meeting ends up in somebody's
@@ -160,6 +168,7 @@ class DocRef:
     gdoc_id: str
     tab_id: str = ""
     tab_name: str = ""
+    doc_title: str = ""
     linked_at: str = ""
 
     def to_json(self) -> dict[str, Any]:
@@ -167,6 +176,7 @@ class DocRef:
             "gdoc_id": self.gdoc_id,
             "tab_id": self.tab_id,
             "tab_name": self.tab_name,
+            "doc_title": self.doc_title,
             "linked_at": self.linked_at,
         }
 
@@ -180,6 +190,7 @@ class DocRef:
             gdoc_id=gdoc_id,
             tab_id=str(raw.get("tab_id", "")),
             tab_name=str(raw.get("tab_name", "")),
+            doc_title=str(raw.get("doc_title", "")),
             linked_at=str(raw.get("linked_at", "")),
         )
 

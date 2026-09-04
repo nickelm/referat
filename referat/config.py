@@ -233,6 +233,62 @@ class BleedConfig:
 
 
 @dataclass(frozen=True)
+class DigestConfig:
+    """How a meeting is laid out inside a Google Doc. Presentation, and only that.
+
+    Nothing here changes what is sent — that is `notes.md` and nothing else,
+    whatever these say. They decide how it reads once it arrives, which is a
+    question about somebody's document rather than about Referat, and so is
+    exactly the kind of thing that belongs in a config file rather than being
+    decided in code.
+    """
+
+    newest_first: bool = False
+    """Put each new meeting at the *top* of the tab rather than in date order.
+
+    Off by default because chronological is what a digest of meetings usually
+    wants: the doc reads as the history of a thread of work. On, it reads as a
+    feed — the thing you opened it for is the thing at the top.
+
+    **It changes where a *new* block is inserted and never moves an existing
+    one.** Referat does not rearrange a document somebody may have written
+    around; a sync that finds the blocks in the other order says so and leaves
+    them alone. So this is worth setting before a doc fills up, and switching it
+    afterwards gives a doc with a boundary in it rather than a mess.
+    """
+
+    heading_level: int = 1
+    """The heading level of a block's date line. The note's own sit under it.
+
+    `1` means the date line is Heading 1, `notes.md`'s `##` becomes Heading 2 and
+    its `###` becomes Heading 3 — which is what a tab given over to meeting notes
+    wants, since the block *is* the top-level structure there.
+
+    It was 3 until 2026-09-04, on the reasoning that a block sits inside a
+    document with its own headings above it. True of a doc where Referat is a
+    guest and wrong for the ordinary case, where it has a tab to itself and the
+    result was a document whose outline started three levels down and whose
+    headings were rendered small.
+
+    Clamped to 1-4 on load, because the note's `###` lands two levels below this
+    and Docs stops at Heading 6.
+    """
+
+    new_tab_name: str = "AI Meeting Notes"
+    """What Referat calls the tab it creates in a document it creates.
+
+    Only ever applied to a **new** document. An existing one keeps whatever its
+    tabs are called, and Referat picks one rather than renaming anything of
+    somebody else's — see `CLAUDE.md`.
+
+    Named rather than left as Google's `Tab 1`, which says nothing, and named
+    something that says *who writes here*: a person opening the document should
+    be able to tell at a glance which tab is theirs to edit freely and which one
+    is being reconciled by a machine.
+    """
+
+
+@dataclass(frozen=True)
 class CleanupConfig:
     """Running `/cleanup`, which is the only LLM work in this project."""
 
@@ -260,6 +316,7 @@ class Config:
     hotkeys: HotkeysConfig = field(default_factory=HotkeysConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
+    digest: DigestConfig = field(default_factory=DigestConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     speakers: SpeakersConfig = field(default_factory=SpeakersConfig)
     bleed: BleedConfig = field(default_factory=BleedConfig)
@@ -350,6 +407,7 @@ _SECTIONS: dict[str, type] = {
     "speakers": SpeakersConfig,
     "bleed": BleedConfig,
     "cleanup": CleanupConfig,
+    "digest": DigestConfig,
     "app": AppConfig,
 }
 

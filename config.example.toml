@@ -243,3 +243,25 @@ claude_binary = ""
 [app]
 # DEBUG | INFO | WARNING | ERROR
 log_level = "INFO"
+
+[digest]
+# How a meeting is laid out inside a Google Doc. Presentation only: none of this
+# changes what is sent, which is notes.md and nothing else.
+#
+# Put each new meeting at the top of the tab rather than in date order. Off means
+# the doc reads as the history of a thread of work; on means it reads as a feed,
+# with the thing you opened it for at the top.
+#
+# It decides where a NEW block goes and never moves an existing one -- Referat
+# does not rearrange a document somebody may have written around. A sync that
+# finds the blocks running the other way says so and leaves them. So set it
+# before a doc fills up.
+# newest_first = false
+# The heading level of a block's date line; the note's own headings sit under it.
+# 1 means the date line is Heading 1 and notes.md's ## and ### become Heading 2
+# and Heading 3, which is what a tab given over to meeting notes wants. Use 3 if
+# a block sits inside somebody else's outline instead. Clamped to 1-4.
+# heading_level = 1
+# What Referat calls the tab it creates in a document it creates, and the default
+# for `link-doc --new-tab`. Never applied to a tab somebody else made.
+# new_tab_name = "AI Meeting Notes"

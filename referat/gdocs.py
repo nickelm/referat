@@ -35,7 +35,7 @@ import logging
 import re
 import sys
 import webbrowser
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 from referat import paths
@@ -396,7 +396,21 @@ def tab_content(tab: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
     return content, end - 1
 
 
-def read_tab(config: Config, gdoc_id: str, tab_id: str) -> tuple[list[dict[str, Any]], int, str]:
+class TabRead(NamedTuple):
+    """One tab, read. A named tuple because it grew to four things.
+
+    `tab_title` and `doc_title` come back so a caller can correct what it has
+    stored: both are display text, both can be changed by anybody with the
+    document open, and neither is what anything is addressed by.
+    """
+
+    content: list[dict[str, Any]]
+    body_end: int
+    tab_title: str
+    doc_title: str
+
+
+def read_tab(config: Config, gdoc_id: str, tab_id: str) -> TabRead:
     """The content, `body_end` and current *title* of one stored tab.
 
     **Found by id and never by title**, which is what makes renaming a tab safe:
@@ -417,7 +431,12 @@ def read_tab(config: Config, gdoc_id: str, tab_id: str) -> tuple[list[dict[str, 
             f"since the link is by tab id. Unlink and link it again."
         )
     content, end = tab_content(tab)
-    return content, end, (tab.get("tabProperties") or {}).get("title", "")
+    return TabRead(
+        content,
+        end,
+        (tab.get("tabProperties") or {}).get("title", ""),
+        document.get("title", ""),
+    )
 
 
 def search_docs(config: Config, query: str, limit: int = 20) -> list[dict[str, str]]:
@@ -457,12 +476,25 @@ def search_docs(config: Config, query: str, limit: int = 20) -> list[dict[str, s
 # --- Writing ----------------------------------------------------------------
 
 
-def create_doc(config: Config, title: str) -> tuple[str, str, str]:
-    """A new document, and the id and name of the tab a digest goes into.
+def create_doc(config: Config, title: str, tab_name: str = "") -> tuple[str, str, str]:
+    """A new document, its tab named, with a Title line at the top of that tab.
 
     The tab id is **read back** out of a `documents.get` rather than assumed: a
     new document has exactly one tab, but its id is Google's to choose, and every
     later write is located by it.
+
+    **The tab is renamed, which this could not do until 2026-09-04.** The design
+    was written when the Docs API had no tab operations at all, and a document
+    Referat created was left with Google's `Tab 1` -- a name that says nothing,
+    in the one place Referat owns the document outright and so has no business
+    leaving it unnamed. `updateDocumentTabProperties` exists now (so do
+    `addDocumentTab` and `deleteTab`), and `[digest].new_tab_name` is what it is
+    called.
+
+    The Title line is the same argument. A document opens on an untitled tab
+    otherwise, and this is the one case where writing a heading is not touching
+    somebody else's prose: the document is one second old and Referat made it.
+    **Only ever on creation** -- an existing document is never given one.
     """
     try:
         created = docs(config).documents().create(body={"title": title}).execute()
@@ -476,8 +508,89 @@ def create_doc(config: Config, title: str) -> tuple[str, str, str]:
     tabs = document.get("tabs") or []
     if not tabs:
         raise GoogleError(f"created {gdoc_id} but it reports no tabs, which should not happen")
-    properties = tabs[0].get("tabProperties") or {}
-    return gdoc_id, properties.get("tabId", ""), properties.get("title", "")
+    tab_id = (tabs[0].get("tabProperties") or {}).get("tabId", "")
+
+    heading = title + chr(10)
+    requests: list[dict[str, Any]] = [
+        {
+            "insertText": {
+                "location": {"tabId": tab_id, "index": 1},
+                "text": heading,
+            }
+        },
+        {
+            "updateParagraphStyle": {
+                "range": {
+                    "tabId": tab_id,
+                    "startIndex": 1,
+                    "endIndex": 1 + len(heading.encode("utf-16-le")) // 2,
+                },
+                "paragraphStyle": {"namedStyleType": "TITLE"},
+                "fields": "namedStyleType",
+            }
+        },
+    ]
+    if tab_name:
+        requests.append(
+            {
+                "updateDocumentTabProperties": {
+                    "tabProperties": {"tabId": tab_id, "title": tab_name},
+                    "fields": "title",
+                }
+            }
+        )
+    # Not fatal: a document that exists with a dull tab name is better than one
+    # that was created and then reported as a failure, since the create is the
+    # half that cannot be retried without leaving litter in somebody's Drive.
+    try:
+        apply(config, gdoc_id, requests)
+    except GoogleError:
+        log.warning("created %s but could not name or title its tab", gdoc_id, exc_info=True)
+
+    document = get_document(config, gdoc_id)
+    tab = find_tab(document, tab_id=tab_id)
+    properties = (tab or {}).get("tabProperties") or {}
+    return gdoc_id, tab_id, properties.get("title", "")
+
+
+def add_tab(config: Config, gdoc_id: str, title: str) -> tuple[str, str]:
+    """Add a root-level tab to an existing document. Returns `(tab_id, title)`.
+
+    **This was impossible when step 13 was designed and is not any more.** Four
+    files said "tabs cannot be created through the API -- there is no `createTab`
+    request", which was true and is now false: `addDocumentTab`, `deleteTab` and
+    `updateDocumentTabProperties` all exist. The old refusal sent somebody to a
+    browser to do by hand the one thing Referat could not do for them.
+
+    Still **never** automatic. Adding a tab to somebody's document is a visible
+    change to it, so it happens on `--new-tab` or a ticked box and never as a
+    fallback when a lookup came up empty -- which is the same rule that stops a
+    tab being *picked* automatically. The response carries the new id, and it is
+    read from there rather than guessed at.
+    """
+    try:
+        result = (
+            docs(config)
+            .documents()
+            .batchUpdate(
+                documentId=gdoc_id,
+                body={"requests": [{"addDocumentTab": {"tabProperties": {"title": title}}}]},
+            )
+            .execute()
+        )
+    except GoogleError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise GoogleError(_explain(exc, f"adding a tab called {title!r}")) from exc
+
+    for reply in result.get("replies") or []:
+        properties = (reply.get("addDocumentTab") or {}).get("tabProperties") or {}
+        if properties.get("tabId"):
+            return properties["tabId"], properties.get("title", title)
+    # The reply is the only place the new id is; without it there is a tab in
+    # somebody's document that Referat cannot address, and guessing at the last
+    # tab in a re-read would be a guess about somebody's document.
+    raise GoogleError(f"added a tab to {gdoc_id} but Google did not say what its id is")
 
 
 def apply(config: Config, gdoc_id: str, requests: list[dict[str, Any]]) -> None:

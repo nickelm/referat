@@ -2,6 +2,85 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-04 (tenth) — Seven pieces of feedback, and an API that had moved
+
+All seven from using the digests for an afternoon. One of them turned out to be
+a claim this codebase had been carrying, in four files, that was no longer true.
+
+### "Tabs cannot be created through the API" was true and stopped being true
+
+Step 13 was designed around it: there is no `createTab` request, so a document
+without a suitable tab was sent to a browser with an instruction to add one by
+hand. Asked to name a created document's tab something useful, the first thing to
+check was whether that was possible — and listing the batchUpdate request types
+turned up **`addDocumentTab`, `deleteTab` and `updateDocumentTabProperties`**.
+
+So a created document now has its tab named from `[digest].new_tab_name`
+(defaulting to *AI Meeting Notes*) and a `TITLE` line at the top of it — the one
+case where writing a heading is not touching somebody else's prose, since the
+document is a second old and Referat made it. An existing document can be given a
+new tab with `--new-tab` or a checkbox. **Never automatically**: adding a tab is a
+visible change to somebody's document, which is the same rule that already stops
+a tab being *picked* automatically.
+
+The general lesson is worth more than the feature. A claim about somebody else's
+API is a fact with a date on it, and this one had been repeated until it read
+like a property of the problem. It was checked by asking the API, which took one
+command.
+
+### Layout is three settings now, and the old default was wrong
+
+`[digest].heading_level` defaults to **1**, so a block's date line is Heading 1
+and the note's `##` and `###` land as Heading 2 and Heading 3. It was Heading 3
+unconditionally, on the reasoning that a block sits inside a document with its own
+outline above it — true where Referat is a guest, and wrong for the ordinary case
+where it has a tab to itself, which produced a document whose outline started
+three levels down and whose headings were rendered small.
+
+That made the three heading kinds need renaming: `H3`/`H4`/`H5` baked the answer
+into the vocabulary. They are `TOP`, `MID` and `LOW` now — a role rather than a
+level — which is what made the setting expressible.
+
+`[digest].newest_first` puts each new meeting at the top of the tab. It decides
+where a **new** block goes and never moves an existing one: rearranging a document
+somebody may have written between two blocks is a much larger thing than adding to
+one, so a sync that finds them running the other way says so and leaves them.
+
+`sync --rerender` redraws every block, which is how a change to either reaches
+the blocks already written — none of their notes moved, so nothing else would
+notice. Both live documents were re-rendered at Heading 1 with it.
+
+### The doc list, and getting to the document
+
+The list showed the *tab* name, so every row read as a fragment of a name. It
+shows the **document's** title with the tab in brackets, and rows carry an
+**Open in browser** button and open on double-click. `DocRef` gained `doc_title`
+beside `tab_name`; both are display text, both are corrected by a sync, and
+neither is what anything is addressed by.
+
+That last part is also the answer to *can I move these around Drive?* — yes.
+Referat stores the document id and the tab id, and Google mints both once and
+never moves them, so renaming a document, renaming a tab, and moving a document
+into or out of any folder or shared drive all leave the link working. Only
+deleting the tab breaks it.
+
+### A bug this found in yesterday's work
+
+The rename-detection added yesterday reported a changed **document** title as
+"the tab is now called ...". Two different facts sharing one sentence, and a
+wrong sentence about a document somebody is looking at is worse than no sentence.
+They are separate now.
+
+### Verified
+
+Three linked documents, all three re-read and their titles corrected: a document
+Referat created, one it created that had its tab renamed by hand to *AI Meeting
+Notes*, and one of somebody else's with 22,974 characters of prose in it. The
+heading levels in the two with blocks read Heading 1, 2, 3 in the live documents.
+`newest_first` has five new cases through the offline simulator — into an empty
+tab, a later meeting on top, an earlier one underneath, three at once, and a doc
+already laid out the other way, which is reported and not rearranged.
+
 ## 2026-09-04 (ninth) — Phase 7: the digests reach the window
 
 Asked for as *"is the GDoc functionality integrated into the UI? I would like to

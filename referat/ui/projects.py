@@ -60,7 +60,8 @@ import logging
 import threading
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -79,7 +80,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from referat import cli, progress
+from referat import cli, gdocs, progress
 from referat.config import Config
 from referat.projects import clean_terms
 from referat.ui import docs as docs_dialog
@@ -261,10 +262,16 @@ class ProjectsPage(QWidget):
         self.docs.setMaximumHeight(88)
         self.docs.setAlternatingRowColors(True)
         self.docs.currentItemChanged.connect(lambda *_: self._refresh_doc_buttons())
+        self.docs.itemDoubleClicked.connect(self._on_open_doc)
 
         self.link_button = QPushButton("Link doc...")
         self.link_button.setAutoDefault(False)
         self.link_button.clicked.connect(self._on_link_doc)
+        self.open_doc_button = QPushButton("Open in browser")
+        self.open_doc_button.setAutoDefault(False)
+        self.open_doc_button.clicked.connect(
+            lambda: self._on_open_doc(self.docs.currentItem())
+        )
         self.unlink_button = QPushButton("Unlink")
         self.unlink_button.setAutoDefault(False)
         self.unlink_button.clicked.connect(self._on_unlink_doc)
@@ -312,6 +319,7 @@ class ProjectsPage(QWidget):
         docs_row = QHBoxLayout()
         docs_row.setContentsMargins(0, 0, 0, 0)
         docs_row.addStretch(1)
+        docs_row.addWidget(self.open_doc_button)
         docs_row.addWidget(self.link_button)
         docs_row.addWidget(self.unlink_button)
         docs_row.addWidget(self.sync_button)
@@ -887,10 +895,20 @@ class ProjectsPage(QWidget):
         """
         self.docs.clear()
         for doc in project["docs"]:
+            # **The document's title leads, not the tab's.** A row answers
+            # "which document is this project written into", and the tab is the
+            # detail underneath it -- it was the other way round for one
+            # afternoon and every row read as a fragment of a name.
             tab = doc["tab_name"] or doc["tab_id"] or "(no tab recorded)"
-            item = QListWidgetItem(icons.glyph("link", self._icon_color()), f"{tab}")
+            name = doc["doc_title"] or doc["gdoc_id"]
+            item = QListWidgetItem(
+                icons.glyph("link", self._icon_color()), f"{name}  ({tab})"
+            )
             item.setData(ID_ROLE, doc["gdoc_id"])
-            item.setToolTip(f"{doc['gdoc_id']}\ntab {doc['tab_id']}")
+            item.setToolTip(
+                f"{name}\ntab {tab}  [{doc['tab_id']}]\n{doc['gdoc_id']}\n\n"
+                "Double-click to open it in your browser."
+            )
             self.docs.addItem(item)
         if not project["docs"]:
             item = QListWidgetItem(DOCS_UNLINKED)
@@ -910,12 +928,27 @@ class ProjectsPage(QWidget):
         linked = bool(project and project["docs"])
         selected = self.docs.currentItem()
         has_doc = bool(selected and selected.data(ID_ROLE))
+        self.open_doc_button.setEnabled(has_doc)
         self.link_button.setEnabled(project is not None and not self._syncing)
         self.unlink_button.setEnabled(has_doc and not self._syncing)
         self.sync_button.setEnabled(linked and not self._syncing)
 
     def _icon_color(self) -> str:
         return self.palette().windowText().color().name()
+
+    def _on_open_doc(self, item: QListWidgetItem | None) -> None:
+        """Open the selected document in the browser. The one thing here that leaves Qt.
+
+        `QDesktopServices` rather than `webbrowser`, because this is the UI layer
+        and that is the toolkit's own answer -- and because the portability rule
+        in :mod:`referat.ui` is about not reaching past Qt when Qt has one.
+        Enabled only on a real row: the placeholder saying there is no document
+        carries no id, which is the same test *Unlink* uses.
+        """
+        gdoc_id = item.data(ID_ROLE) if item is not None else None
+        if not gdoc_id:
+            return
+        QDesktopServices.openUrl(QUrl(gdocs.doc_url(gdoc_id)))
 
     def _on_link_doc(self) -> None:
         """Ask which document and which tab, then link and backfill on a thread."""

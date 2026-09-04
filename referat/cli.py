@@ -754,6 +754,13 @@ def _add_project_parser(subcommands: argparse._SubParsersAction) -> None:
         "address bar; a `?tab=` in it is taken as --tab. A bare id works too",
     )
     link_doc_parser.add_argument(
+        "--new-tab",
+        action="store_true",
+        dest="new_tab",
+        help="add a new tab to that document rather than using one it already has, "
+        "named by --tab or by [digest].new_tab_name",
+    )
+    link_doc_parser.add_argument(
         "--tab",
         metavar="TITLE_OR_ID",
         default="",
@@ -810,6 +817,13 @@ def _add_project_parser(subcommands: argparse._SubParsersAction) -> None:
     sync.add_argument("project_id")
     sync.add_argument(
         "--prune", action="store_true", help="also remove blocks for meetings no longer tagged"
+    )
+    sync.add_argument(
+        "--rerender",
+        action="store_true",
+        help="redraw every block, not only the ones whose notes have changed. "
+        "How a change to [digest].heading_level or the block layout reaches the "
+        "blocks already written, since none of their notes moved",
     )
     sync.add_argument(
         "--dry-run",
@@ -1621,7 +1635,13 @@ def run_project(config: Config, args: argparse.Namespace) -> int:
 
     if args.verb == "sync":
         return _report(
-            sync_project(config, args.project_id, prune=args.prune, dry_run=args.dry_run),
+            sync_project(
+                config,
+                args.project_id,
+                prune=args.prune,
+                dry_run=args.dry_run,
+                rerender=args.rerender,
+            ),
             "project sync",
         )
 
@@ -1694,6 +1714,7 @@ def run_project_link_doc(config: Config, args: argparse.Namespace) -> int:
             args.project_id,
             gdoc_id=gdoc_id,
             tab=args.tab,
+            new_tab=args.new_tab,
             title=args.title,
             sync=args.sync,
         ),
@@ -2040,6 +2061,7 @@ def link_doc(
     *,
     gdoc_id: str = "",
     tab: str = "",
+    new_tab: bool = False,
     title: str = "",
     sync: bool = True,
 ) -> Outcome:
@@ -2080,13 +2102,22 @@ def link_doc(
                     f"or the Share button's link, or the id out of the middle of one.",
                 )
             gdoc_id = parsed_id
-            found, tab_complaint = _resolve_tab(config, gdoc_id, tab or parsed_tab)
-            if found is None:
-                return Outcome(False, tab_complaint)
-            tab_id, tab_name = found
+            if new_tab:
+                # Asked for explicitly and never chosen for somebody: adding a
+                # tab is a visible change to their document.
+                tab_id, tab_name = gdocs.add_tab(
+                    config, gdoc_id, tab or config.digest.new_tab_name
+                )
+                doc_title = gdocs.get_document(config, gdoc_id).get("title", "")
+            else:
+                found, tab_complaint = _resolve_tab(config, gdoc_id, tab or parsed_tab)
+                if found is None:
+                    return Outcome(False, tab_complaint)
+                tab_id, tab_name, doc_title = found
         else:
+            doc_title = title or f"{project.name} Meeting Digest"
             gdoc_id, tab_id, tab_name = gdocs.create_doc(
-                config, title or f"{project.name} Meeting Digest"
+                config, doc_title, config.digest.new_tab_name
             )
     except gdocs.GoogleError as exc:
         return Outcome(False, str(exc))
@@ -2099,13 +2130,15 @@ def link_doc(
             gdoc_id=gdoc_id,
             tab_id=tab_id,
             tab_name=tab_name,
+            doc_title=doc_title,
             linked_at=dt.datetime.now().isoformat(timespec="seconds"),
         )
     )
     db.save()
 
     lines = [
-        f"Linked {project.id} to {gdocs.doc_url(gdoc_id)}",
+        f"Linked {project.id} to {doc_title or gdoc_id}",
+        f"  {gdocs.doc_url(gdoc_id)}",
         f"  tab: {tab_name or tab_id}",
     ]
     if sync:
@@ -2116,7 +2149,9 @@ def link_doc(
     return Outcome(True, "\n".join(lines))
 
 
-def _resolve_tab(config: Config, gdoc_id: str, wanted: str) -> tuple[tuple[str, str] | None, str]:
+def _resolve_tab(
+    config: Config, gdoc_id: str, wanted: str
+) -> tuple[tuple[str, str, str] | None, str]:
     """Which tab of an existing document a project's digest goes into.
 
     `wanted` is a tab id (`t.0`, or the one a share link carried) or a tab
@@ -2141,11 +2176,12 @@ def _resolve_tab(config: Config, gdoc_id: str, wanted: str) -> tuple[tuple[str, 
     """
     document = gdocs.get_document(config, gdoc_id)
     tabs = gdocs.tab_titles(document)
+    doc_title = document.get("title", "")
 
     if wanted:
         for title, tab_id, _ in tabs:
             if wanted == tab_id or wanted.strip().casefold() == title.strip().casefold():
-                return (tab_id, title), ""
+                return (tab_id, title, doc_title), ""
         return None, (
             f"that document has no tab {wanted!r}.\n{_tab_list(tabs)}\n"
             f"Name one with: referat project link-doc <project-id> "
@@ -2154,15 +2190,15 @@ def _resolve_tab(config: Config, gdoc_id: str, wanted: str) -> tuple[tuple[str, 
 
     for title, tab_id, _ in tabs:
         if title.strip() == gdocs.MEETINGS_TAB:
-            return (tab_id, title), ""
+            return (tab_id, title, doc_title), ""
 
     return None, (
         f"that document has no tab called {gdocs.MEETINGS_TAB!r}, so there is nothing to "
         f"write into without being told which tab you mean.\n{_tab_list(tabs)}\n"
-        f"Pick one with --tab, or add a tab named {gdocs.MEETINGS_TAB} in Docs and run this "
-        f"again. The Docs API cannot create a tab, which is why this is a browser job.\n"
-        f"  {gdocs.doc_url(gdoc_id)}\n"
+        f"Pick one with --tab, or make a new one with --new-tab:\n"
         f"  referat project link-doc <project-id> --doc {gdoc_id} --tab \"<title or id>\"\n"
+        f"  referat project link-doc <project-id> --doc {gdoc_id} --new-tab\n"
+        f"  {gdocs.doc_url(gdoc_id)}\n"
         f"Nothing was written."
     )
 
@@ -2213,6 +2249,7 @@ def sync_project(
     *,
     prune: bool = False,
     dry_run: bool = False,
+    rerender: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> Outcome:
     """Reconcile every doc of one project against the meetings tagged with it.
@@ -2257,31 +2294,48 @@ def sync_project(
     db = projects.ProjectsDB.load(config)
 
     lines: list[str] = []
-    renamed: list[tuple[str, str, str]] = []
+    renamed: list[tuple[str, str, str, str]] = []
     ok = True
     for doc in project.docs:
         say(f"reading {doc.gdoc_id}")
         try:
-            content, body_end, live_title = gdocs.read_tab(config, doc.gdoc_id, doc.tab_id)
+            read = gdocs.read_tab(config, doc.gdoc_id, doc.tab_id)
         except gdocs.GoogleError as exc:
             lines.append(f"{doc.gdoc_id}: {exc}")
             ok = False
             continue
 
-        if live_title and live_title != doc.tab_name:
-            # The link is by tab id, so a rename costs nothing but the display
-            # text -- corrected here rather than left saying what the tab was
-            # called on the day it was linked.
-            renamed.append((doc.gdoc_id, doc.tab_name, live_title))
-            doc.tab_name = live_title
+        content, body_end = read.content, read.body_end
+        # **Both titles are display text and neither is addressed by anything**,
+        # so a rename of either costs nothing but this record -- corrected here
+        # rather than left saying what things were called on the day they were
+        # linked. Kept apart because the two are different sentences: reporting a
+        # changed *document* title as "the tab is now called ..." was a real bug
+        # for one run, and a wrong sentence about a document somebody is looking
+        # at is worse than no sentence.
+        if read.doc_title and read.doc_title != doc.doc_title:
+            renamed.append(("document", doc.gdoc_id, doc.doc_title, read.doc_title))
+            doc.doc_title = read.doc_title
+        if read.tab_title and read.tab_title != doc.tab_name:
+            renamed.append(("tab", doc.gdoc_id, doc.tab_name, read.tab_title))
+            doc.tab_name = read.tab_title
 
         anchors = digest.scan_anchors(content, body_end)
         stored = {
             m.id: (m.digest.get(doc.gdoc_id) or {}).get("notes_sha256", "")
             for m in meetings
         }
-        plan = digest.plan(anchors, wanted, stored, body_end, prune=prune)
-        lines.append(_sync_report(project, doc, plan, dry_run=dry_run))
+        plan = digest.plan(
+            anchors, wanted, stored, body_end,
+            prune=prune, newest_first=config.digest.newest_first,
+            rerender=rerender,
+        )
+        lines.append(
+            _sync_report(
+                project, doc, plan, dry_run=dry_run,
+                newest_first=config.digest.newest_first,
+            )
+        )
         if dry_run or not plan.ops:
             continue
 
@@ -2332,6 +2386,7 @@ def sync_project(
                         tab_id=doc.tab_id,
                         at=op.at,
                         delete_to=op.end if op.kind == digest.REPLACE else None,
+                        heading_level=config.digest.heading_level,
                     ),
                 )
             except gdocs.GoogleError as exc:
@@ -2371,21 +2426,33 @@ def sync_project(
         if store.unreadable or stored_project is None:
             log.warning("not recording the renamed tab(s): %s could not be read", store.path)
         else:
-            moved = {gdoc_id: title for gdoc_id, _was, title in renamed}
             for stored_doc in stored_project.docs:
-                if stored_doc.gdoc_id in moved:
-                    stored_doc.tab_name = moved[stored_doc.gdoc_id]
+                for what, gdoc_id, _was, now in renamed:
+                    if stored_doc.gdoc_id != gdoc_id:
+                        continue
+                    if what == "tab":
+                        stored_doc.tab_name = now
+                    else:
+                        stored_doc.doc_title = now
             store.save()
-    for _gdoc_id, was, now in renamed:
+    for what, _gdoc_id, was, now in renamed:
         # Reported on a dry run too -- what is being suppressed above is the
         # write, not the fact.
-        lines.append(f"  the tab is now called {now!r} (it was {was!r})")
+        lines.append(
+            f"  the {what} is now called {now!r}"
+            + (f" (it was {was!r})" if was else "")
+        )
 
     return Outcome(ok, "\n".join(lines))
 
 
 def _sync_report(
-    project: projects.Project, doc: projects.DocRef, plan: digest.Plan, *, dry_run: bool
+    project: projects.Project,
+    doc: projects.DocRef,
+    plan: digest.Plan,
+    *,
+    dry_run: bool,
+    newest_first: bool = False,
 ) -> str:
     """What one document's plan says, in the words somebody reads.
 
@@ -2396,12 +2463,21 @@ def _sync_report(
     inserts = sum(1 for op in plan.ops if op.kind == digest.INSERT)
     replaces = sum(1 for op in plan.ops if op.kind == digest.REPLACE)
     deletes = sum(1 for op in plan.ops if op.kind == digest.DELETE)
-    head = f"{doc.tab_name or doc.tab_id} in {gdocs.doc_url(doc.gdoc_id)}"
+    head = f"{doc.doc_title or doc.gdoc_id}, tab {doc.tab_name or doc.tab_id}"
     verb = "would add" if dry_run else "adding"
     parts = [f"{verb} {inserts}", f"re-rendering {replaces}"]
     if deletes:
         parts.append(f"removing {deletes}")
     lines = [f"{head}\n  {', '.join(parts)}"]
+    if plan.misordered:
+        order = "newest first" if newest_first else "oldest first"
+        other = "oldest first" if newest_first else "newest first"
+        lines.append(
+            f"  the blocks already here run {other} and [digest].newest_first asks for "
+            f"{order}. Left alone -- rearranging a document somebody may have written "
+            f"between is a larger thing than adding to one. New blocks go where the "
+            f"setting asks."
+        )
     if plan.orphans:
         names = ", ".join(sorted(plan.orphans))
         lines.append(

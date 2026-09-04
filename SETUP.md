@@ -943,8 +943,8 @@ window included, uses the stored token.
 
 ### 13d. Linking, in the window
 
-The projects page in the command center has **Link doc...**, **Unlink** and
-**Sync now** under the Google Docs list, which is the easy path and the one to
+The projects page in the command center has **Open in browser**, **Link doc...**,
+**Unlink** and **Sync now** under the Google Docs list, which is the easy path and the one to
 use. *Link doc...* asks whether to create a document or attach one you already
 have; for the second, paste its link, press *Look up its tabs*, and pick the tab.
 Nothing is preselected unless the link carried a `?tab=` or the document has a
@@ -954,18 +954,18 @@ The consent in 13c is the one thing the window cannot do, by design: it needs a
 terminal. Do that once at a prompt and the window uses the stored token from then
 on.
 
+Each row shows the **document's** title with its tab in brackets, and
+double-clicking one opens it in your browser.
+
 The rest of this section is the same thing at the prompt.
 
 ### 13e. Linking, and which tab
 
 ```powershell
-# create a new doc titled "<Project> Meeting Digest", and backfill it
 referat project link-doc my-project --create
-
-# attach one you already have -- paste the share link or the address bar
 referat project link-doc my-project --doc "https://docs.google.com/document/d/<id>/edit?tab=t.0"
-
-# or find it by name first
+referat project link-doc my-project --doc "<link>" --tab "Meeting Notes"
+referat project link-doc my-project --doc "<link>" --new-tab
 referat project link-doc my-project --search "Weekly notes"
 ```
 
@@ -976,18 +976,20 @@ one of them -- that tab is the one Referat will use. So the shortest correct way
 to link an existing document is to open it, click the tab you want, and copy the
 address.
 
-Otherwise say which tab with `--tab`, by title or by id:
-
-```powershell
-referat project link-doc my-project --doc "<link>" --tab "Meeting Notes"
-```
-
-With neither, Referat looks for a tab named `Meetings` and, finding none, **lists
-the tabs the document actually has** with their ids and stops without writing
-anything. It will not fall back to the first tab -- not even when there is only
-one. A single-tab document is not an ambiguity about *which* tab; it is a
+Otherwise `--tab` names one by title or by id, and `--new-tab` adds a fresh one
+called `[digest].new_tab_name`. With none of those, Referat looks for a tab named
+`Meetings` and, finding none, **lists the tabs the document actually has** and
+stops without writing anything. It will not fall back to the first tab, not even
+when there is only one: that is not an ambiguity about *which* tab, it is a
 question about whether you want a digest written into the middle of your own
-prose, and that is a question with an owner.
+prose.
+
+**Renaming things afterwards is safe.** Referat stores the document id and the
+tab id, and Google mints both once and never moves them. So you can rename the
+document, rename the tab, and **move the document anywhere in Drive** -- into a
+folder, into a shared drive, out of one -- and the link still works. The titles
+Referat shows are display text and a sync corrects them when they have changed.
+Only *deleting* the tab breaks a link, and it says so.
 
 **You can write in the same tab.** Each block is bracketed by a small gray
 `[referat:<id>]` ... `[/referat:<id>]` pair, and Referat only ever replaces what
@@ -996,10 +998,30 @@ yours and stays. Do not delete one of those markers: a block missing its closing
 marker falls back to the older rule -- it owns everything down to the next block
 -- and the next sync re-renders it to put the marker back.
 
-Linking ends by running a sync, which is what makes attaching an existing
-document backfill every meeting already tagged.
+Linking ends by running a sync, which backfills every meeting already tagged.
 
-### 13f. Syncing
+### 13f. How a block is laid out
+
+Three settings under `[digest]` in `config.toml`, all presentation and none of
+them changing what is sent:
+
+- **`newest_first`** puts each new meeting at the top of the tab rather than in
+  date order. It decides where a *new* block goes and never moves an existing
+  one -- Referat does not rearrange a document you may have written around, so a
+  sync that finds the blocks running the other way says so and leaves them.
+  Worth setting before a doc fills up.
+- **`heading_level`** is where a block's date line sits, and defaults to `1`: the
+  date line is Heading 1 and your notes' `##` and `###` become Heading 2 and
+  Heading 3. Set it to `3` if a block is going into a tab that already has an
+  outline of its own.
+- **`new_tab_name`** is what a tab Referat *creates* is called. It never renames
+  a tab you made.
+
+Changing either of the first two only affects blocks written afterwards, since
+nothing about the existing notes has moved. `referat project sync <id>
+--rerender` redraws every block, which is how the change reaches them.
+
+### 13g. Syncing
 
 ```powershell
 referat project sync my-project --dry-run   # say what would change, write nothing
@@ -1017,7 +1039,7 @@ see a sync is owed without making a network call.
 `referat project unlink-doc my-project <gdoc-id>` stops writing there. It does
 not delete anything: every block stays exactly where it is.
 
-### 13g. Before you share a digest doc with anybody
+### 13h. Before you share a digest doc with anybody
 
 Read the `notes.md` files that will land in it first. A shared document is a much
 wider blast radius than a synced folder, what goes into it is whatever `/cleanup`

@@ -37,6 +37,7 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -108,6 +109,12 @@ class LinkDocDialog(QDialog):
         self.tabs.setEnabled(False)
         self.tabs.currentIndexChanged.connect(lambda _index: self._refresh_ok())
 
+        self.new_tab = QCheckBox(
+            f"Add a new tab called {config.digest.new_tab_name!r} instead"
+        )
+        self.new_tab.setEnabled(False)
+        self.new_tab.toggled.connect(self._on_new_tab)
+
         self.status = QLabel()
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
@@ -135,6 +142,7 @@ class LinkDocDialog(QDialog):
         layout.addWidget(self.lookup_button)
         layout.addWidget(QLabel("Tab"))
         layout.addWidget(self.tabs)
+        layout.addWidget(self.new_tab)
         layout.addWidget(same_tab)
         layout.addWidget(self.status)
         layout.addStretch(1)
@@ -149,12 +157,26 @@ class LinkDocDialog(QDialog):
     def _on_mode(self) -> None:
         creating = self.create.isChecked()
         self.created_title.setEnabled(creating)
-        for widget in (self.link, self.lookup_button, self.tabs):
+        for widget in (self.link, self.lookup_button):
             widget.setEnabled(not creating)
+        if creating:
+            self.tabs.setEnabled(False)
+            self.new_tab.setEnabled(False)
+            self.new_tab.setChecked(False)
         if creating:
             self.status.clear()
         else:
             self._on_link_changed(self.link.text())
+        self._refresh_ok()
+
+    def _on_new_tab(self, checked: bool) -> None:
+        """Ticking it means the tab combo no longer decides anything.
+
+        Adding a tab is a **visible change to somebody else's document**, so it
+        is never what happens when a lookup finds nothing suitable -- the same
+        rule that stops a tab being *picked* automatically. It is a box you tick.
+        """
+        self.tabs.setEnabled(bool(self._tabs) and not checked)
         self._refresh_ok()
 
     def _on_link_changed(self, text: str) -> None:
@@ -208,7 +230,8 @@ class LinkDocDialog(QDialog):
         self.tabs.clear()
         for title, tab_id, depth in tabs:
             self.tabs.addItem(f"{'    ' * depth}{title or '(untitled)'}", tab_id)
-        self.tabs.setEnabled(bool(tabs))
+        self.tabs.setEnabled(bool(tabs) and not self.new_tab.isChecked())
+        self.new_tab.setEnabled(True)
 
         # **The tab is chosen and never guessed**, which is the CLI's rule and is
         # not relaxed just because a combo makes a default cheap. Two things may
@@ -246,6 +269,11 @@ class LinkDocDialog(QDialog):
         if self.create.isChecked():
             ok.setEnabled(True)
             return
+        if self.new_tab.isChecked():
+            # A new tab needs no choice from the combo -- there is nothing yet
+            # to choose from.
+            ok.setEnabled(bool(self._gdoc_id) and not self._looking_up)
+            return
         ok.setEnabled(
             bool(self._gdoc_id)
             and self.tabs.isEnabled()
@@ -258,9 +286,17 @@ class LinkDocDialog(QDialog):
     def result_link(self) -> dict[str, Any]:
         """The three answers, as :func:`referat.cli.link_doc`'s keywords."""
         if self.create.isChecked():
-            return {"gdoc_id": "", "tab": "", "title": self.created_title.text().strip()}
+            return {
+                "gdoc_id": "",
+                "tab": "",
+                "new_tab": False,
+                "title": self.created_title.text().strip(),
+            }
+        if self.new_tab.isChecked():
+            return {"gdoc_id": self._gdoc_id, "tab": "", "new_tab": True, "title": ""}
         return {
             "gdoc_id": self._gdoc_id,
             "tab": self.tabs.currentData() or "",
+            "new_tab": False,
             "title": "",
         }

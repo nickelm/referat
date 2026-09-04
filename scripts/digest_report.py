@@ -150,7 +150,7 @@ def check_against_richtext(meeting_id: str, source: str, block: digest.Block) ->
     mine = [
         utf16_slice(block.text, p.start, p.end).strip()
         for p in block.paras
-        if p.kind not in (digest.ANCHOR, digest.H3)
+        if p.kind not in (digest.ANCHOR, digest.TOP)
     ]
     mine = [line for line in mine if line]
     # richtext keeps the H1 that the block deliberately drops.
@@ -432,6 +432,59 @@ def check_reconciler() -> None:
     print(f"  {'ok  ' if ok else 'MISS'} a legacy block re-renders into a closed one")
     if not ok:
         fail(f"legacy re-render: got {got!r}")
+
+    # --- newest_first ------------------------------------------------------
+    def run_order(name, existing, wanted_ids, expected, *, newest_first):
+        content, document, body_end = tab(existing)
+        anchors = digest.scan_anchors(content, body_end)
+        plan = digest.plan(
+            anchors,
+            {i: "sha" for i in wanted_ids},
+            {i: "sha" for i in existing},
+            body_end,
+            newest_first=newest_first,
+        )
+        got = simulate(document, plan.ops)
+        want = "".join(block_text(i) for i in expected)
+        ok = got == want
+        print(f"  {'ok  ' if ok else 'MISS'} {name}"
+              f"{' (misordered)' if plan.misordered else ''}")
+        if not ok:
+            fail(f"{name}: got {got!r}, expected {want!r}")
+
+    run_order(
+        "newest first: into an empty tab",
+        [], [ids[0], ids[1]], [ids[1], ids[0]], newest_first=True,
+    )
+    run_order(
+        "newest first: a later meeting goes on top",
+        [ids[2]], [ids[2], ids[3]], [ids[3], ids[2]], newest_first=True,
+    )
+    run_order(
+        "newest first: an earlier meeting goes underneath",
+        [ids[2]], [ids[1], ids[2]], [ids[2], ids[1]], newest_first=True,
+    )
+    run_order(
+        "newest first: three at once, into an empty tab",
+        [], [ids[0], ids[1], ids[2]], [ids[2], ids[1], ids[0]], newest_first=True,
+    )
+    run_order(
+        "oldest first is unchanged",
+        [ids[1]], [ids[0], ids[1], ids[2]], [ids[0], ids[1], ids[2]], newest_first=False,
+    )
+
+    # A doc laid out the other way is reported and never rearranged.
+    content, _, body_end = tab([ids[0], ids[1]])
+    anchors = digest.scan_anchors(content, body_end)
+    p_new = digest.plan(anchors, {i: "s" for i in ids[:2]}, {i: "s" for i in ids[:2]},
+                        body_end, newest_first=True)
+    p_old = digest.plan(anchors, {i: "s" for i in ids[:2]}, {i: "s" for i in ids[:2]},
+                        body_end, newest_first=False)
+    ok = p_new.misordered and not p_old.misordered and not p_new.ops
+    print(f"  {'ok  ' if ok else 'MISS'} an oldest-first doc is reported, not rearranged")
+    if not ok:
+        fail("misordered detection: "
+             f"newest_first={p_new.misordered}, oldest_first={p_old.misordered}, ops={p_new.ops}")
 
     # A block with no `digest` entry at all counts as stale rather than current:
     # it means another copy of Referat wrote the doc, or the meta.json was lost.

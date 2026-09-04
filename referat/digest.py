@@ -118,22 +118,36 @@ ANCHOR_POINTS = 8
 
 # --- Paragraph kinds --------------------------------------------------------
 
-ANCHOR, H3, H4, H5, PARAGRAPH, ITEM = "anchor", "h3", "h4", "h5", "paragraph", "item"
+ANCHOR, PARAGRAPH, ITEM = "anchor", "paragraph", "item"
+TOP, MID, LOW = "top", "mid", "low"
+"""The three heading kinds, named by their **role** rather than by a level.
 
-NAMED_STYLES = {
-    ANCHOR: "NORMAL_TEXT",
-    H3: "HEADING_3",
-    H4: "HEADING_4",
-    H5: "HEADING_5",
-    PARAGRAPH: "NORMAL_TEXT",
-    ITEM: "NORMAL_TEXT",
-}
-"""Each paragraph kind's Docs named style.
-
-The date line is Heading 3, so the note's own `##` lands as Heading 4 and `###`
-as Heading 5 beneath it -- the block keeps its internal shape while sitting one
-level down inside a document that has its own headings above it.
+They used to be `h3`, `h4` and `h5`, which baked the answer into the vocabulary
+and made `[digest].heading_level` impossible to express. `TOP` is the block's
+date line, `MID` is what the note writes as `##`, `LOW` is `###`.
 """
+
+MAX_HEADING = 6
+"""Docs stops at Heading 6, so `LOW` is clamped there rather than sent invalid."""
+
+
+def named_styles(top: int) -> dict[str, str]:
+    """Each paragraph kind's Docs named style, given where the date line sits.
+
+    `top` is `[digest].heading_level`: at 1 the block's own heading is Heading 1
+    and the note's `##` and `###` land as Heading 2 and Heading 3, which is what
+    a tab given over to meeting notes wants. At 3 they land as 4 and 5, which is
+    what a block sitting inside somebody else's outline wants and what this did
+    unconditionally until 2026-09-04.
+    """
+    return {
+        ANCHOR: "NORMAL_TEXT",
+        TOP: f"HEADING_{min(top, MAX_HEADING)}",
+        MID: f"HEADING_{min(top + 1, MAX_HEADING)}",
+        LOW: f"HEADING_{min(top + 2, MAX_HEADING)}",
+        PARAGRAPH: "NORMAL_TEXT",
+        ITEM: "NORMAL_TEXT",
+    }
 
 
 @dataclass(frozen=True)
@@ -284,13 +298,13 @@ def render_block(meeting_id: str, date: str, title: str, notes_md: str) -> Block
     # the gray into whatever paragraph a later edit merges it with.
     spans.append(Span(start, start + u16(anchor), "anchor"))
 
-    add(f"{date} — {title}", H3)
+    add(f"{date} — {title}", TOP)
 
     for kind, source in parts:
         if kind == markdown.HEADING:
             hashes, _, heading = source.partition(" ")
             line, line_spans = _inline(heading)
-            add(line, H5 if len(hashes) >= 3 else H4, line_spans)
+            add(line, LOW if len(hashes) >= 3 else MID, line_spans)
         elif kind == markdown.ITEM:
             # The `- ` comes off by position rather than by a second match:
             # `markdown.blocks` wrote it, in exactly this shape. It must not
@@ -354,7 +368,7 @@ def check_block(block: Block) -> str:
     """
     for para in block.paras:
         line = block.text[_slice(block.text, para.start, para.end)].rstrip("\n")
-        if para.kind in (H3, H4, H5) and line.startswith("#"):
+        if para.kind in (TOP, MID, LOW) and line.startswith("#"):
             return f"a {para.kind} paragraph still carries its hashes: {line!r}"
         if para.kind == ITEM and (line.startswith("- ") or line.startswith("* ")):
             return f"a list item still carries its bullet marker: {line!r}"
@@ -382,7 +396,12 @@ _RESET_FIELDS = "bold,italic,underline,strikethrough,fontSize,foregroundColor,we
 
 
 def requests_for(
-    block: Block, *, tab_id: str, at: int, delete_to: int | None = None
+    block: Block,
+    *,
+    tab_id: str,
+    at: int,
+    delete_to: int | None = None,
+    heading_level: int = 1,
 ) -> list[dict[str, Any]]:
     """One block as one `batchUpdate` body. Pure dict construction.
 
@@ -417,6 +436,7 @@ def requests_for(
     has to revisit this, which is why it is written here rather than assumed.
     """
     requests: list[dict[str, Any]] = []
+    styles = named_styles(heading_level)
 
     def span_range(start: int, end: int) -> dict[str, Any]:
         return {"tabId": tab_id, "startIndex": at + start, "endIndex": at + end}
@@ -444,7 +464,7 @@ def requests_for(
             {
                 "updateParagraphStyle": {
                     "range": span_range(start, end),
-                    "paragraphStyle": {"namedStyleType": NAMED_STYLES[kind]},
+                    "paragraphStyle": {"namedStyleType": styles[kind]},
                     "fields": "namedStyleType",
                 }
             }
@@ -608,6 +628,15 @@ class Plan:
 
     ops: list[Op] = field(default_factory=list)
     orphans: list[str] = field(default_factory=list)
+    misordered: bool = False
+    """The blocks already there run the other way from `[digest].newest_first`.
+
+    Reported and never acted on. Rearranging a document is a much larger thing
+    than adding to one -- somebody may have written between two blocks, and
+    moving one would take their paragraph with it or leave it stranded. So a
+    sync says the order disagrees and leaves it, which is the same answer it
+    gives an orphaned block and for the same reason.
+    """
 
     def __bool__(self) -> bool:
         return bool(self.ops)
@@ -620,6 +649,8 @@ def plan(
     body_end: int,
     *,
     prune: bool = False,
+    newest_first: bool = False,
+    rerender: bool = False,
 ) -> Plan:
     """Reconcile one tab against the meetings that belong in it.
 
@@ -636,7 +667,10 @@ def plan(
       another copy of Referat or the `meta.json` was lost, and re-rendering is
       the answer that converges. An **unclosed** block counts as stale for a
       sharper reason: until it is replaced it still owns whatever somebody wrote
-      under it, so upgrading it is the fix rather than a tidy-up.
+      under it, so upgrading it is the fix rather than a tidy-up. `rerender`
+      makes every block stale, which is how a change to *how* a block is drawn
+      -- `[digest].heading_level`, say -- reaches the ones already written,
+      since none of their notes changed and nothing else would notice.
     * **orphan** -- an anchor for a meeting that no longer carries this tag.
       **Reported and left alone.** The doc may be shared and somebody may have
       written around that block, so removing it is an explicit `--prune` rather
@@ -658,9 +692,18 @@ def plan(
     for meeting_id in sorted(wanted):
         anchor = by_id.get(meeting_id)
         if anchor is None:
-            following = [a.start for a in anchors if a.meeting_id > meeting_id]
+            # Where a missing block goes is the whole of what `newest_first`
+            # decides: before the first block that should come *after* it in the
+            # wanted order, or at the end when there is none. Ids sort
+            # chronologically by construction, so "after" is a string compare
+            # either way round and nothing here parses a date.
+            following = [
+                a.start
+                for a in anchors
+                if (a.meeting_id < meeting_id if newest_first else a.meeting_id > meeting_id)
+            ]
             ops.append(Op(INSERT, meeting_id, min(following) if following else body_end))
-        elif stored.get(meeting_id) != wanted[meeting_id] or not anchor.closed:
+        elif rerender or stored.get(meeting_id) != wanted[meeting_id] or not anchor.closed:
             ops.append(Op(REPLACE, meeting_id, anchor.start, anchor.end))
 
     for anchor in anchors:
@@ -669,9 +712,27 @@ def plan(
             if prune:
                 ops.append(Op(DELETE, anchor.meeting_id, anchor.start, anchor.end))
 
-    ops.sort(key=lambda op: (op.at, op.meeting_id), reverse=True)
+    # The tie-break follows the wanted order too. Two blocks landing at one index
+    # are applied later-first when the doc reads oldest-first, and earlier-first
+    # when it reads newest-first -- either way the one that ends up on top is the
+    # one inserted last.
+    ops.sort(key=lambda op: (op.at, op.meeting_id if not newest_first else _invert(op.meeting_id)),
+             reverse=True)
     _assert_descending(ops)
-    return Plan(ops, orphans)
+
+    present = [a.meeting_id for a in anchors if a.meeting_id in wanted]
+    misordered = bool(present) and present != sorted(present, reverse=newest_first)
+    return Plan(ops, orphans, misordered)
+
+
+def _invert(meeting_id: str) -> str:
+    """A sort key that orders ids backwards, for the newest-first tie-break.
+
+    Ids are ASCII digits, dashes and underscores, so complementing each byte
+    inverts the ordering exactly. Cheaper and more obviously correct than
+    threading a `reverse` through the one place a tuple key is built.
+    """
+    return "".join(chr(0x7F - ord(character)) for character in meeting_id)
 
 
 def _assert_descending(ops: list[Op]) -> None:

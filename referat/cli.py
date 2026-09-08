@@ -60,6 +60,7 @@ from referat import (
     index,
     paths,
     projects,
+    recap,
     status,
     voices,
 )
@@ -99,6 +100,7 @@ NEEDS_CONFIG = (
     "person",
     "project",
     "promote",
+    "recap",
     "reflow",
     "relabel",
     "rerun",
@@ -543,6 +545,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     day.add_argument(
         "day", nargs="?", default="", help="the date, YYYY-MM-DD (default: today)"
+    )
+
+    recap_cmd = subcommands.add_parser(
+        "recap",
+        help="write a short brief on one project, from the notes of every meeting tagged with it",
+        description=(
+            "Assembles the notes.md of every meeting carrying the project's tag, "
+            "oldest first, into a bundle, and spawns the official claude binary "
+            "with /recap in the meetings folder to write recaps/<project-id>.md: "
+            "where the project stands, and what needs discussing. Regenerated "
+            "from scratch every time; it overwrites. Read it minutes before the "
+            "meeting it is for."
+        ),
+    )
+    recap_cmd.add_argument("project_id", help="the project's id, as `referat project list` shows it")
+    recap_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="assemble the bundle and say which meetings are in it, without running claude",
+    )
+    recap_cmd.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="print the recap document — the file, its frontmatter and whether it is "
+        "stale — and write nothing",
     )
 
     _add_actions_parser(subcommands)
@@ -1116,8 +1144,18 @@ def pending(document: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return {
         "untagged": [m for m in meetings if not m["tags"]],
         "unnamed": [m for m in meetings if m["unnamed"]],
+        # A meeting at `transcribed` that already has a `notes.md` is one whose
+        # transcript was regenerated *after* the notes were written: `rerun`
+        # writes `transcribed` and touches no note, and nothing else leaves a
+        # note beside a meeting in that state. Its notes describe a transcript
+        # that no longer exists, so it is queued again -- which is what makes
+        # *Notes for all...* rewrite them. Read off the lifecycle, not the file.
         "notes": [
-            m for m in meetings if m["transcript"] and not m["notes"] and not m["staged"]
+            m
+            for m in meetings
+            if m["transcript"]
+            and not m["staged"]
+            and (not m["notes"] or m["status"] == "transcribed")
         ],
     }
 
@@ -1268,6 +1306,7 @@ def run_show(config: Config, meeting_id: str, as_json: bool = False) -> int:
     db = voices.VoicesDB.load(config)
     for label, speaker in sorted(_speaker_blocks(transcription).items()):
         lines.append(f"  {label:<10} {_speaker_line(meeting, label, speaker, db)}")
+    lines += _removal_lines(transcription)
     if document["unnamed"]:
         lines.append(
             f"  unnamed    {', '.join(document['unnamed'])} "
@@ -1275,6 +1314,35 @@ def run_show(config: Config, meeting_id: str, as_json: bool = False) -> int:
         )
     print("\n".join(lines))
     return 0
+
+
+def _removal_lines(transcription: dict[str, Any]) -> list[str]:
+    """What the two deleting repairs took out of the transcript, one line each.
+
+    `debleed` and `denoise` both keep every removed entry verbatim in
+    `meta.json` so the deletion can be read back, and until 2026-09-06 only
+    `--json` and the `noise` word on a cluster's line said so at the prompt. A
+    count and a date are what somebody reading the record at a prompt wants;
+    the lines themselves are in the file.
+    """
+    out: list[str] = []
+    debleed = transcription.get("debleed")
+    if isinstance(debleed, dict):
+        removed = debleed.get("removed")
+        n = len(removed) if isinstance(removed, list) else 0
+        out.append(f"  debleed    {n} line(s) removed, last pass {debleed.get('at') or '?'}")
+    noise = transcription.get("noise")
+    if isinstance(noise, dict):
+        for label, entry in sorted(noise.items()):
+            if not isinstance(entry, dict):
+                continue
+            removed = entry.get("removed")
+            n = len(removed) if isinstance(removed, list) else 0
+            out.append(
+                f"  noise      {label}: {n} line(s) removed on {entry.get('at') or '?'}"
+                + (f" ({entry['channel']})" if entry.get("channel") else "")
+            )
+    return out
 
 
 CHANNEL_NUMBERS = ("avg_logprob", "compression_ratio", "no_speech_prob", "voiced_seconds")
@@ -3113,6 +3181,16 @@ def _relabel_complaint(
             f"the microphone also clustered noise ({', '.join(noise)}), so its ME "
             f"lines may be noise too"
         )
+    # And an echo cluster, for the same reason and said for what it is rather
+    # than as an unnamed speaker somebody could go and name: the loopback came
+    # back into this microphone, and the `ME` lines are exactly the ones
+    # diarization attributed to nobody - some of them may be the far end.
+    echo = sorted(label for label in mic if voices.is_echo(meeting, label))
+    if echo:
+        return (
+            f"the microphone also clustered the loopback coming back "
+            f"({', '.join(echo)}), so its ME lines may be echo too"
+        )
     resolved = {meeting.speaker_names.get(label, "") for label in mic}
     if "" in resolved:
         unnamed = sorted(label for label in mic if not meeting.speaker_names.get(label))
@@ -4267,6 +4345,194 @@ def run_day(config: Config, day: str = "") -> int:
     )
 
 
+# --- referat recap ----------------------------------------------------------
+
+
+NO_RECAP_PROJECT = "no project has that id; `referat project list` shows them"
+
+
+def _recap_project(config: Config) -> tuple[projects.ProjectsDB, str]:
+    """The projects file and its complaint, if it will not parse.
+
+    The read ending of the one-sentence-three-endings rule: a recap looks a
+    project up and writes nothing into `projects.json`, so an unreadable file
+    is told it cannot look one up, as `referat project glossary` is.
+    """
+    db = projects.ProjectsDB.load(config)
+    complaint = _unreadable_complaint(db.path, CANNOT_LOOK_UP) if db.unreadable else ""
+    return db, complaint
+
+
+def recap_document(
+    config: Config, project_id: str, document: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """`referat recap <id> --json`: the recap as written, and whether it still holds.
+
+    What the projects page renders, and what anything scripting this from
+    outside Python reads. **Pure over a `list_document` when it is handed one**,
+    as :func:`actions_document` is; loading one itself otherwise.
+
+    `series` is every meeting tagged with the project and in the meetings
+    folder, oldest first, saying which of them have notes — the ones a pass
+    reads now, whatever the file was written from. `meetings` is what the file
+    *was* written from, out of its frontmatter. `stale` and `reasons` are the
+    difference, derived here on every read by :func:`referat.recap.stale_reasons`
+    and stored nowhere. A recap that does not exist is not stale, it is absent,
+    and `exists` says which.
+
+    `complaint` is the reason nothing else here can be trusted: an unreadable
+    `projects.json`, or an id no project answers to.
+    """
+    db, complaint = _recap_project(config)
+    project = db.projects.get(project_id)
+    if not complaint and project is None:
+        complaint = NO_RECAP_PROJECT
+    path = recap.recap_path(config, project_id)
+    if document is None:
+        document = list_document(config)
+    entries = recap.series(document, project_id) if not complaint else []
+
+    text = ""
+    exists = False
+    try:
+        text = path.read_text(encoding="utf-8")
+        exists = True
+    except OSError:
+        pass
+    front, body = recap.parse(text) if exists else (None, "")
+    reasons = recap.stale_reasons(entries, front, project_id) if exists and not complaint else []
+    return {
+        "project": project_id,
+        "name": project.name if project is not None else "",
+        "path": str(path),
+        "complaint": complaint,
+        "exists": exists,
+        "generated": front.generated if front is not None else "",
+        "meetings": list(front.meetings) if front is not None else [],
+        "series": [
+            {
+                "id": entry.id,
+                "started_at": entry.started_at,
+                "title": entry.title,
+                "duration": entry.duration,
+                "notes": entry.has_notes,
+            }
+            for entry in entries
+        ],
+        "stale": bool(reasons),
+        "reasons": reasons,
+        "markdown": text,
+        "body": body,
+    }
+
+
+def write_recap(config: Config, project_id: str, *, dry_run: bool = False) -> Outcome:
+    """Write one project's recap by spawning `/recap`. The only implementation.
+
+    `referat recap` is this printed and the projects page's button is this on
+    the notes queue, which is the arrangement every write in this project has.
+    In the shape of :func:`write_day_summary` and thinner still: a project has
+    no lifecycle a recap could move, so nothing is recorded afterwards, and the
+    staleness a surface shows is derived on read rather than written here.
+
+    **Four refusals, then the pass.** The projects file must parse — the read
+    ending of the unreadable-file sentence. The id must be a project's. At least
+    one tagged meeting must have notes, or the pass would spend a subprocess to
+    write a brief about nothing. And the bundle is written *before* claude is
+    spawned and removed in a `finally` whatever happens, so that no bundle
+    outlives its pass — it is a copy of every note in the series, sitting in a
+    folder a sync client sees, and it earns its place for two minutes and not
+    a day.
+
+    **Two checks after the pass, because `expect.exists()` cannot tell a
+    rewritten recap from the one that was already there.** The file's sha is
+    taken before and after: unchanged means claude exited cleanly and wrote
+    nothing, which is a failure. And the frontmatter it wrote is compared with
+    the bundle's: a copy the prompt got wrong is reported as a partial success
+    with the disagreement named, since the recap is on disk and readable, and
+    it will show as stale for a reason a person can then see rather than for
+    one they would have to diff two files to find.
+
+    `dry_run` assembles and reports without spending a subprocess, and writes
+    nothing at all — not even the bundle.
+    """
+    db, complaint = _recap_project(config)
+    if complaint:
+        return Outcome(False, complaint)
+    project = db.projects.get(project_id)
+    if project is None:
+        return Outcome(False, f"{project_id}: {NO_RECAP_PROJECT}")
+
+    entries = recap.series(list_document(config), project_id)
+    noted = [entry for entry in entries if entry.has_notes]
+    without = [entry.id for entry in entries if not entry.has_notes]
+    if not noted:
+        if entries:
+            return Outcome(
+                False,
+                f"no meeting tagged {project_id} has notes yet ({', '.join(without)}); "
+                f"write some with `referat notes <id>` and a recap will have something to read",
+            )
+        return Outcome(False, f"no meeting is tagged {project_id}; `referat tag <meeting> {project_id}` first")
+
+    bundle_text, front = recap.assemble(project_id, project.name, noted)
+    folded = ", ".join(entry.id for entry in noted)
+    left_out = f"; {len(without)} tagged meeting{'s' if len(without) != 1 else ''} without notes left out ({', '.join(without)})" if without else ""
+    if dry_run:
+        return Outcome(
+            True,
+            f"would recap {project.name} from {len(noted)} meeting{'s' if len(noted) != 1 else ''}: "
+            f"{folded}{left_out}. {len(bundle_text.split())} words in the bundle; nothing was run",
+        )
+
+    from referat import notes
+
+    target = recap.recap_path(config, project_id)
+    bundle = recap.bundle_path(config, project_id)
+    before = digest.notes_sha256(target)
+    try:
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        bundle.write_text(bundle_text, encoding="utf-8")
+    except OSError as exc:
+        return Outcome(False, f"could not write the bundle at {bundle}: {exc}")
+    try:
+        written, message = notes.generate_recap(
+            config, project_id, bundle=bundle, expect=target, meetings=len(noted)
+        )
+    finally:
+        try:
+            bundle.unlink(missing_ok=True)
+        except OSError:
+            log.warning("could not remove the recap bundle %s", bundle, exc_info=True)
+    if not written:
+        return Outcome(False, message)
+    if digest.notes_sha256(target) == before:
+        return Outcome(False, f"claude exited cleanly but left {target.name} exactly as it was")
+
+    message = f"{message}: {folded}{left_out}"
+    try:
+        found, _ = recap.parse(target.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return Outcome(True, f"{message}, but it could not be read back: {exc}")
+    if found is None:
+        return Outcome(True, f"{message}, but it carries no frontmatter, so it will show as stale")
+    if disagreement := found.differs_from(front):
+        return Outcome(
+            True,
+            f"{message}, but its frontmatter does not match the bundle's ({disagreement}), "
+            f"so it will show as stale",
+        )
+    return Outcome(True, message)
+
+
+def run_recap(config: Config, project_id: str, *, dry_run: bool = False, as_json: bool = False) -> int:
+    """`referat recap <project-id> [--dry-run] [--json]`."""
+    if as_json:
+        print(json.dumps(recap_document(config, project_id), indent=2, ensure_ascii=False))
+        return 0
+    return _report(write_recap(config, project_id, dry_run=dry_run), "recap")
+
+
 def actions_document(
     config: Config, document: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -4333,7 +4599,12 @@ def actions_document(
         {"meeting": mid, "key": key, "seen": db.get(mid, key).seen}
         for mid, key in sorted(db.known() - live)
     ]
-    owner = config.speakers.owner_name.strip()
+    # The record's short name where the owner is on file, since that is what a
+    # transcript label -- and so a note's owner -- calls them; the config's
+    # spelling otherwise. A `person rename --short` on the owner therefore
+    # reaches the dashboard without the config changing.
+    owner_record = voices.owner_person(config)
+    owner = owner_record.short if owner_record is not None else config.speakers.owner_name.strip()
     open_items = [i for i in items if not i["done"] and not i["dismissed"]]
     return {
         "owner": owner,
@@ -4885,6 +5156,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "day":
         return run_day(config, args.day)
+
+    if args.command == "recap":
+        return run_recap(config, args.project_id, dry_run=args.dry_run, as_json=args.as_json)
 
     if args.command == "actions":
         return run_actions(config, args)

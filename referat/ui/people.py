@@ -656,6 +656,9 @@ class PeoplePage(QWidget):
             return
         log.info("%s", message)
         self.refresh()
+        # Refilled directly rather than trusting the reselection to fire,
+        # for the reason the projects page gives on its own Rename button.
+        self._fill_detail(self._selected)
         self._complain(message)
 
     # --- Messages -----------------------------------------------------------

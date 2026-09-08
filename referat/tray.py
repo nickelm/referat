@@ -461,6 +461,13 @@ def main() -> int:
     try:
         config = load_config()
     except ConfigError as exc:
+        # Under pythonw.exe the print below goes nowhere, and this used to
+        # return before any logging existed -- so an autostarted tray with an
+        # unparseable config simply never appeared, with no record of why. The
+        # log file's path does not depend on the config, so logging is set up
+        # at the default level for the one line that says what stopped it.
+        setup_logging("INFO")
+        log.error("referat-tray cannot start: %s", exc)
         print(f"referat-tray: {exc}", file=sys.stderr)
         return 1
 

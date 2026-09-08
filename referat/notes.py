@@ -228,6 +228,43 @@ def generate_day_summary(config: Config, day: str) -> tuple[bool, str]:
     )
 
 
+def recap_progress_key(project_id: str) -> str:
+    """The :mod:`referat.progress` key for one project's recap pass.
+
+    Its own namespace for the reason :func:`day_progress_key` has one, and one
+    more: a project id is a slug, and nothing stops a slug from being spelled
+    like a meeting id.
+    """
+    return f"{progress.RECAP}:{project_id}"
+
+
+def generate_recap(
+    config: Config, project_id: str, *, bundle: Path, expect: Path, meetings: int
+) -> tuple[bool, str]:
+    """Run `/recap <project-id>` over a bundle already on disk. The spawn and nothing else.
+
+    The third caller of :func:`_spawn`. Everything that makes this a *recap* —
+    which meetings, in what order, with which shas, and whether the file that
+    comes back matches the bundle it was given — is :mod:`referat.recap`'s and
+    :func:`referat.cli.write_recap`'s, and this function knows only that the
+    bundle must be there before the pass starts. That is checked rather than
+    assumed, because a `/recap` handed no bundle is told to stop, and a clean
+    exit with no file would then be reported as though claude had refused —
+    when the caller had.
+    """
+    if not bundle.is_file():
+        return False, f"no bundle at {bundle} for /recap to read; nothing was run"
+    return _spawn(
+        config,
+        prompt=f"/recap {project_id}",
+        key=recap_progress_key(project_id),
+        kind=progress.RECAP,
+        title=project_id,
+        expect=expect,
+        what=f"a recap of {project_id} ({meetings} meeting{'s' if meetings != 1 else ''})",
+    )
+
+
 def _spawn(
     config: Config,
     *,

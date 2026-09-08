@@ -41,6 +41,11 @@ def setup_logging(level: str = "INFO", *, console: bool = True) -> Path:
 
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    # Under pythonw.exe `sys.stderr` is None and the warnings module drops
+    # everything silently, so pyannote's and torch's deprecation warnings --
+    # the first sign of an API about to move -- were never in the one record
+    # that exists. Routed through the `py.warnings` logger, into the file.
+    logging.captureWarnings(True)
     for handler in list(root.handlers):
         root.removeHandler(handler)
         handler.close()

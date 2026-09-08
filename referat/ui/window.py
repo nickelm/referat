@@ -370,6 +370,14 @@ class CommandCenter(QMainWindow):
         self.actions_page.meeting_requested.connect(self.open_meeting)
         self.actions_page.person_requested.connect(self.open_person)
         self.projects = ProjectsPage(self.app.config)
+        # The recap's own links and its button. A citation opens the meeting it
+        # came from, a name opens the person, and *Recap...* joins the claude
+        # queue rather than growing a worker on the projects page: one rate
+        # limit, one folder, which is the argument that made it a queue at all.
+        self.projects.meeting_requested.connect(self.open_meeting)
+        self.projects.person_requested.connect(self.open_person)
+        self.projects.external_requested.connect(self._on_external_link)
+        self.projects.recap_requested.connect(self._on_recap)
         self.people = PeoplePage(self.app.config)
         self.people.meeting_requested.connect(self.open_meeting)
         self.people.project_requested.connect(self.open_project)
@@ -890,12 +898,26 @@ class CommandCenter(QMainWindow):
         """
         self._enqueue_notes([(progress.DAY, day)])
 
+    def _on_recap(self, project_id: str) -> None:
+        """Queue a `/recap` for one project, on the same worker the notes use.
+
+        The projects page's *Recap...* lands here rather than on that page's own
+        doc-job thread, because a recap is a `claude` pass and not a network
+        call: it is the third kind of job on this queue for the reason the day
+        summary was the second. The result reaches the page the way every
+        outcome does — `App.notify`, then a refresh — and the page re-reads the
+        recap document when it is drawn.
+        """
+        self._enqueue_notes([(progress.RECAP, project_id)])
+
     def _job_key(self, kind: str, target: str) -> str:
         """The :mod:`referat.progress` key for one queued job, whichever kind it is."""
         from referat import notes as notes_module
 
         if kind == progress.DAY:
             return notes_module.day_progress_key(target)
+        if kind == progress.RECAP:
+            return notes_module.recap_progress_key(target)
         return notes_module.progress_key(target)
 
     def _enqueue_notes(self, jobs: list[tuple[str, str]]) -> None:
@@ -968,10 +990,12 @@ class CommandCenter(QMainWindow):
                 kind, target = self._notes_queue.get_nowait()
             except queue.Empty:
                 return
-            what = "Day summary" if kind == progress.DAY else "Notes"
+            what = {progress.DAY: "Day summary", progress.RECAP: "Recap"}.get(kind, "Notes")
             try:
                 if kind == progress.DAY:
                     outcome = cli.write_day_summary(self.app.config, target)
+                elif kind == progress.RECAP:
+                    outcome = cli.write_recap(self.app.config, target)
                 else:
                     outcome = cli.write_notes(self.app.config, target)
                 self.app.notify(

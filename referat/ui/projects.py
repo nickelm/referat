@@ -75,6 +75,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QTextBrowser,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -85,7 +86,7 @@ from referat import cli, gdocs, progress
 from referat.config import Config
 from referat.projects import clean_terms
 from referat.ui import docs as docs_dialog
-from referat.ui import icons, lists
+from referat.ui import icons, lists, viewer
 
 log = logging.getLogger(__name__)
 
@@ -146,6 +147,47 @@ ORPHAN_NOTE = (
 
 DISCARD = "Discard the unsaved changes to {name}?"
 
+RECAP = "Recap..."
+RECAP_NONE = (
+    "*No recap yet. Recap... reads the notes of every meeting tagged with this "
+    "project and writes a short brief: where it stands, and what needs discussing. "
+    "Read it minutes before the meeting.*"
+)
+RECAP_NO_NOTES = "*None of this project's meetings has notes yet, so there is nothing to recap.*"
+RECAP_UNTAGGED = "*No meeting is tagged with this project yet.*"
+RECAP_CURRENT = "Current - written {generated} from {meetings}."
+RECAP_STALE = "Stale - written {generated} from {meetings}. {reason}"
+RECAP_QUEUED = "Queued - the activity tab shows the pass."
+"""What the line beside *Recap...* says. Stale is a fact derived in Python on
+every read and shown here, never acted on: the recap stays, and the button
+beside it is how it is rewritten."""
+
+
+def _recap_label(meeting: dict[str, Any]) -> str:
+    """`2026-09-03T11:01:13` as `2026-09-03 11:01`, for a citation's link text.
+
+    The date is kept, unlike the day summary's labels, because a recap spans
+    weeks and the date is the one thing that says how old an open item is; the
+    time is kept because two meetings of one project can fall on one day.
+    """
+    started = meeting.get("started_at", "")
+    return f"{started[:10]} {started[11:16]}".strip() or meeting["id"]
+
+
+def recap_markdown(document: dict[str, Any]) -> str:
+    """A recap as the pane renders it: citations and names as links.
+
+    The same two rewrites :func:`referat.ui.dashboard.day_markdown` makes,
+    through the same functions in :mod:`referat.ui.viewer`, so a citation means
+    the same thing on both pages. No project prefix, since every bullet here is
+    about the one project the page is showing. The guest list for
+    :func:`referat.ui.viewer.link_meetings` is the recap's own `series`, so a
+    citation of a meeting outside it stays plain text — which is what a
+    citation the prompt should not have written looks like.
+    """
+    labels = {meeting["id"]: _recap_label(meeting) for meeting in document.get("series", ())}
+    return viewer.link_people(viewer.link_meetings(document.get("body", ""), labels))
+
 
 class ProjectsPage(QWidget):
     """Every project, one editable at a time, over the merged hotword list."""
@@ -158,6 +200,23 @@ class ProjectsPage(QWidget):
     and for the same reason: `Shell.notify` once ran a whole refresh on a
     transcription thread and corrupted the heap three times.
     """
+
+    recap_requested = Signal(str)
+    """A project id whose recap should be written. The window queues it.
+
+    Not run on this page's own doc-job thread, deliberately: a recap is a
+    `claude` pass, and every `claude` pass on this machine goes through the
+    window's one-worker queue — one rate limit, one folder. This page only asks.
+    """
+
+    meeting_requested = Signal(str)
+    """A meeting id cited in the recap: `[2026-09-03_1101]` was clicked."""
+
+    person_requested = Signal(str)
+    """A `[[Wikilink]]` in the recap: a name was clicked."""
+
+    external_requested = Signal(QUrl)
+    """A link in the recap this page does not answer, for the window to open."""
 
     def __init__(self, config: Config, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -336,6 +395,37 @@ class ProjectsPage(QWidget):
         detail.addWidget(self.docs)
         detail.addWidget(self.auto_sync)
         detail.addLayout(docs_row)
+
+        # --- The recap (build step 24) -------------------------------------
+        #
+        # Under the documents, because it is the other thing a project *is*
+        # over time: the docs are where its notes go, and this is what they add
+        # up to. The state line is Python's verdict and the button beside it is
+        # the one way it changes; the pane renders the file the way the
+        # dashboard renders a day, a `[<meeting-id>]` becoming a link.
+        self.recap_state = QLabel()
+        self.recap_state.setWordWrap(True)
+        self.recap_button = QPushButton(RECAP)
+        self.recap_button.setAutoDefault(False)
+        self.recap_button.clicked.connect(self._on_recap)
+        recap_row = QHBoxLayout()
+        recap_row.setContentsMargins(0, 0, 0, 0)
+        recap_row.addWidget(QLabel("Recap"))
+        recap_row.addWidget(self.recap_state, 1)
+        recap_row.addWidget(self.recap_button)
+
+        # The same two settings the dashboard's day pane runs under, for the
+        # same reason: every link here is answered in this process, and a
+        # QTextBrowser left to itself would *load* an unknown scheme into the
+        # pane and blank it.
+        self.recap_text = QTextBrowser()
+        self.recap_text.setOpenLinks(False)
+        self.recap_text.setOpenExternalLinks(False)
+        self.recap_text.anchorClicked.connect(self._on_recap_anchor)
+        self.recap_text.setMinimumHeight(120)
+
+        detail.addLayout(recap_row)
+        detail.addWidget(self.recap_text, 1)
         detail.addLayout(save_row)
         detail.addWidget(self.message)
         self.detail = QWidget()
@@ -404,6 +494,10 @@ class ProjectsPage(QWidget):
             return
         self._fill_list()
         self._fill_hotwords()
+        # The recap alone, not the form: `refresh()` is how the result of a
+        # queued pass reaches this page, and refilling the form would discard a
+        # half-typed glossary -- the `_refresh_docs` pattern, a fifth time.
+        self._refresh_recap()
         if self._document["complaint"]:
             # An unreadable `projects.json` loads as *no projects*, which is the
             # rule that keeps a broken file from costing a transcript and which
@@ -654,6 +748,9 @@ class ProjectsPage(QWidget):
                 self.glossary.setPlainText("")
                 self.docs.clear()
                 self._refresh_doc_buttons()
+                self.recap_state.clear()
+                self.recap_text.setMarkdown("")
+                self.recap_button.setEnabled(False)
                 self.detail.setEnabled(False)
                 return
             self.detail.setEnabled(True)
@@ -666,6 +763,7 @@ class ProjectsPage(QWidget):
             self.description.setText(project["description"])
             self.glossary.setPlainText("\n".join(project["glossary"]))
             self._fill_docs(project)
+            self._fill_recap(project)
         finally:
             self._loading = False
         self._on_edited()
@@ -769,6 +867,13 @@ class ProjectsPage(QWidget):
             return
         log.info("%s", outcome.message)
         self.refresh()
+        # Reselecting the same row fires no change and refills no form -- the
+        # property that keeps a half-typed glossary across a refresh -- so the
+        # one thing that just changed is updated directly, as the archive
+        # button does for its own state.
+        updated = self._project(self._selected)
+        if updated is not None:
+            self.heading.setText(updated["name"])
 
     def _on_archive(self) -> None:
         """Archive or unarchive, behind a modal that says what archiving does not do.
@@ -889,6 +994,115 @@ class ProjectsPage(QWidget):
         # deduplicates, and a box still showing the three lines that became two
         # would be this page holding an opinion about somebody else's field.
         self._fill_form(self._selected)
+
+    # --- The recap (build step 24) ------------------------------------------
+
+    def _fill_recap(self, project: dict[str, Any]) -> None:
+        """Draw one project's recap and its state, from `cli.recap_document`.
+
+        Everything on this line is decided in Python and arrives decided: which
+        meetings are in the series, which have notes, whether the file is stale
+        and why. The widget holds no rule. It opens no file either — the
+        document carries the recap's text — and a document it cannot get is a
+        sentence rather than an empty pane.
+        """
+        try:
+            document = cli.recap_document(self.config, project["id"])
+        except Exception:
+            log.exception("could not read the recap of %s", project["id"])
+            self.recap_state.setText("Could not read the recap - see the log.")
+            self.recap_text.setMarkdown("")
+            self.recap_button.setEnabled(False)
+            return
+        noted = [m for m in document["series"] if m["notes"]]
+        if document["complaint"]:
+            self.recap_state.setText(document["complaint"])
+            self.recap_text.setMarkdown("")
+        elif not document["exists"]:
+            self.recap_state.setText("")
+            self.recap_text.setMarkdown(
+                RECAP_NONE if noted else (RECAP_NO_NOTES if document["series"] else RECAP_UNTAGGED)
+            )
+        else:
+            self.recap_text.setMarkdown(recap_markdown(document))
+            words = dict(
+                generated=document["generated"][:16].replace("T", " ") or "an unknown time",
+                meetings=_meetings(len(document["meetings"])),
+            )
+            if document["stale"]:
+                reasons = document["reasons"]
+                more = f" (and {len(reasons) - 1} more)" if len(reasons) > 1 else ""
+                self.recap_state.setText(
+                    RECAP_STALE.format(**words, reason=f"{reasons[0].capitalize()}{more}.")
+                )
+                self.recap_state.setToolTip("\n".join(reasons))
+            else:
+                self.recap_state.setText(RECAP_CURRENT.format(**words))
+                self.recap_state.setToolTip("")
+        self._refresh_recap_button(
+            project["id"],
+            exists=document["exists"] and not document["complaint"],
+            can_write=bool(noted) and not document["complaint"],
+        )
+
+    def _refresh_recap(self) -> None:
+        """Redraw the recap alone, from the project just re-read. See :meth:`refresh`."""
+        project = self._project(self._selected)
+        if project is not None:
+            self._fill_recap(project)
+
+    def _refresh_recap_button(self, pid: str, *, exists: bool, can_write: bool) -> None:
+        """"Recap..." or "Rebuild...", and disabled while a pass for it is queued.
+
+        "Rebuild" once one exists, for the reason the dashboard's day button
+        changes: pressing it again is the documented way to fold in a meeting
+        written up since, and a button still saying "Recap" would look like it
+        had not worked the first time.
+
+        Whether one is in flight is read off :mod:`referat.progress`, which is
+        live state the window's queue already reports into — so this page needs
+        no second record of what it asked for, and a pass started from the
+        prompt shows here exactly as one started from this button does.
+        """
+        from referat import notes as notes_module
+
+        key = notes_module.recap_progress_key(pid)
+        running = any(job.key == key for job in progress.active())
+        self.recap_button.setText("Rebuild..." if exists else RECAP)
+        self.recap_button.setEnabled(can_write and not running)
+        if running:
+            self.recap_state.setText(RECAP_QUEUED)
+
+    def _on_recap(self) -> None:
+        """Ask the window to queue a `/recap` for the selected project.
+
+        Said on the state line at once, so the click visibly did something; the
+        button re-enables when the pass is off the queue and the window
+        refreshes this page.
+        """
+        project = self._project(self._selected)
+        if project is None:
+            return
+        self.recap_state.setText(RECAP_QUEUED)
+        self.recap_button.setEnabled(False)
+        self.recap_requested.emit(project["id"])
+
+    def _on_recap_anchor(self, url: QUrl) -> None:
+        """A link in the recap: a name, a meeting, or the window's to open.
+
+        The same three-way dispatch the dashboard's day pane makes, through the
+        same parsers, so the two pages cannot disagree about what a
+        `referat-meeting:` is.
+        """
+        name = viewer.parse_person(url)
+        if name is not None:
+            self.person_requested.emit(name)
+            return
+        meeting_id = viewer.parse_meeting(url)
+        if meeting_id is not None:
+            self.meeting_requested.emit(meeting_id)
+            return
+        self.external_requested.emit(url)
 
     # --- Messages -----------------------------------------------------------
 

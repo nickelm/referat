@@ -2,6 +2,153 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-08 — Step 24 is built: project recaps
+
+**Built the same day it was planned**, to the plan below with two things
+settled and one refinement. `referat recap <project-id>` assembles every tagged,
+promoted meeting's `notes.md` oldest first into `recaps/<project-id>.bundle.md`,
+spawns `/recap` on it through the same `_spawn` the other two prompts use, and
+removes the bundle in a `finally`; the prompt writes `recaps/<project-id>.md`
+with the bundle's frontmatter copied verbatim, then `## State` and `## Open`,
+each Open bullet citing the meeting that raised it. `--dry-run` assembles and
+reports without spending a subprocess; `--json` prints `cli.recap_document`,
+the eleventh JSON document. The projects page grew a **Recap** section under
+the documents — a state line, *Recap…* / *Rebuild…*, and the recap rendered
+with citations and names as links — and the button joins the window's one
+`claude` worker as a third kind of job rather than running on the page's doc
+thread. Driven once against a real project: two meetings in, the frontmatter
+and both shas copied character for character, the document reading as current,
+the bundle gone, and `referat list` still counting fifteen meetings.
+
+**Settled: stale is decided by sha, never by mtime.** The plan's open question,
+answered on the ground step 13 answered it — the meetings folder is in Dropbox,
+which rewrites modification times, and the digest already answers *did this
+note change* with `notes_sha256`. So the frontmatter has a fourth key, `notes`,
+a sha per folded-in meeting, and `generated` is for a person to read. A stored
+sha may be a prefix of the real one: the prompt copies it by hand, and a value
+it truncated still says whether the note changed.
+
+**Settled: the bundle lives beside the recap, not in the system temp folder.**
+`/recap <project-id>` keeps its planned signature and reads a path it can name
+from the folder it runs in, rather than being handed an absolute path outside
+its working directory. It exists for the minutes a pass takes.
+
+**The refinement is two checks after the pass**, because `expect.exists()`
+cannot tell a rewritten recap from the one already there: the file's sha before
+and after, and the frontmatter `/recap` wrote compared with what the bundle
+gave it, a disagreement reported as a partial success naming it rather than a
+recap that shows as stale for a reason nobody can see. A third staleness case
+was added beyond the plan's two — a meeting the recap folded in that no longer
+carries the tag — since a recap describing a meeting the project no longer has
+is describing a different project.
+
+`referat/recap.py` is new; `paths.RECAPS_DIR` joins the `list_meeting_dirs`
+skip set; `progress.RECAP` is the fifth kind; `notes.generate_recap` is the
+third caller of `_spawn`. The template `CLAUDE.md` and the live one both gained
+a `recaps/` layout line and a *recaps/, and `/recap`* section, and the live
+folder's `.claude/commands/recap.md` was seeded on the first run. `CLAUDE.md`,
+`INDEX.md` and `TODO.md` describe it as built; the deferred incremental folding
+stays deferred.
+
+## 2026-09-08 — Step 24 is planned: project recaps
+
+**A planning change and nothing else.** Build step 24, *Project recaps*, is
+written into `TODO.md` as the next uncompleted step: before a recurring meeting,
+a very short brief for one project — `## State`, one paragraph, and `## Open`, a
+few bullets of what needs discussing — regenerated from scratch out of every
+`notes.md` carrying the tag, in order, by a `/recap` prompt beside `/cleanup`
+and `/standup`, spawned by `referat recap <project-id>` and by a *Recap…*
+button on the projects page. Frontmatter carries `project`, `generated` and the
+ordered `meetings` folded in; a recap is stale when a tagged note is newer than
+`generated` or missing from `meetings`, derived on read, shown and never
+deleted. Nothing in `referat/`, `templates/` or the meetings folder changed.
+
+**Two things the request said had already been overtaken by the plan**, and
+each is recorded rather than copied in. The *Recap* action was asked for on the
+VS Code extension's Projects TreeView, with `--json` for the extension; the
+extension was deleted at step 23, so the button goes on the command center's
+projects page beside *Sync now*, onto a guarded `cli` function in process, and
+`--json` stays on step 23's own rule that a document you can print is one you
+can test. And the bundle was to read sectioned notes by their `## Project:
+[TAG]` and `## General` sections through the extraction the Google Docs layer
+uses; sectioned notes are step 17, unbuilt and experimental, and the digest
+pushes whole notes — so the bundle is whole notes, and the one-implementation
+rule for section extraction is recorded as conditional on 17, which step 24
+does not wait for. Step 17 gained an *Amended* paragraph saying so; its boxes
+and status are untouched, as are step 22's.
+
+**The recap lives at `recaps/<project-id>.md`, not `projects/<tag>/recap.md`.**
+The request left the location open if the existing layout suggested a better
+one, and it does: `days/<date>.md` is already one flat generated folder with a
+Markdown file per thing, and a per-project directory tree beside a file called
+`projects.json` would be the only one of its kind. The rejected alternative —
+the recap in the most recent meeting folder, found by walking backward — is
+recorded with its four grounds. *Incremental recap folding* is a deferred
+subsection of the step, since the file has no global deferred section, with
+the risk that resolved items linger and the rule not to build it until
+regeneration from scratch is actually slow.
+
+**`CLAUDE.md`** gained a `recaps/` row in the folder-level table — whose lead-in
+said *two more* over three rows since `PEOPLE.md` arrived, and now counts four
+— two paragraphs after the day summary's describing the plan explicitly as a
+plan, and a sentence on the *Nothing but notes leaves the machine* convention
+naming the recap as something that does not. **`INDEX.md`** lists
+`referat/recap.py` under *Planned modules*, which had been empty and had also
+still claimed phase 7 was unbuilt; notes the planned *Recap…* button on the
+projects page, since the dashboard lists queues and not projects; and gains the
+row for `templates/meetings/.claude/commands/standup.md` that had been missing
+since the file was added.
+
+## 2026-09-06 — The correction rule `/cleanup` was documented as having, and eight small fixes
+
+**Step 10's *Correcting transcription errors downstream* is built**, six days
+after the rest of the step and two after step 20c found that the *Known people
+and terms* table it described had never existed. It is built the other way
+round from how it was specified: **generated rather than hand-maintained**,
+because step 20c made the voices record the registry of full and short names,
+and a table kept by hand beside it would be the second registry of one fact.
+`PEOPLE.md` sits beside `INDEX.md` in the meetings folder, written by
+`index.render_people` from the database's names — full name, the short name a
+transcript label uses, and the id, **never an email** — and it is regenerated
+by every path that already regenerates the index, which is the pipeline after
+a transcription and `label` after a naming, a forget and a rename. The
+template's `CLAUDE.md` gained the *Known people and terms* section and the
+prompt a *Names and terms* section, both carrying the flag rule: an exact match
+is normalized silently, a near miss is corrected and marked once at first use
+as `Elmqvist (assumed transcription error: "Elmquist")`, and anything matching
+neither list is left exactly as transcribed. The flag text was checked against
+`markdown.INLINE_RE` rather than assumed to be plain. The live copies in the
+meetings folder are reconciled by hand, as the seeding rule requires, and have
+not been yet.
+
+**Eight small fixes**, each recorded as an open box before today. The relabel
+gate refuses an echo cluster on the mic in its own words rather than calling it
+an unnamed speaker. `referat show` prints the `debleed` and `noise` removal
+records — a count and a date per record. The dashboard's notes queue holds a
+meeting at `transcribed` that already has notes, since `rerun` writes that
+state and touches no note, so its notes are older than its transcript; read off
+the lifecycle, and checked first that no meeting on this machine sits there for
+any other reason. `actions_document`'s `owner` is the record's short name where
+the owner is on file. `logging.captureWarnings(True)` routes Python warnings
+into the rotating log, where under `pythonw.exe` they were dropped silently. A
+`ConfigError` at tray start is logged before the tray gives up, so an
+autostarted tray with a bad config leaves a line rather than nothing. The
+viewer keeps both panes' scroll when the same meeting is redrawn — done in
+`Viewer.show_meeting` rather than by skipping the redraw, so F5 still
+re-reads. The projects page's heading follows a rename, the way the archive
+button already handled its own state, and the people page refills its detail
+after one.
+
+**The English transcripts were re-examined for the repetition-loop shape** and
+have none: no sentence-length loop anywhere, only runs of `yeah` up to 26 in a
+row and of `bye` up to 14, which text alone cannot tell from real backchannels.
+Left as a note.
+
+**TODO.md lost its extension items.** Thirty boxes that belonged to the VS Code
+extension — its by-hand checks, its Projects section, its QuickPick, its
+terminal — are checked as dropped, since the extension was deleted at step 23.
+The cut-off feedback sentence about the interface is declined as not needed.
+
 ## 2026-09-04 (fifteenth) — Step 20c: a person is a record
 
 Build step 20c, the next unbuilt step in order. Raised on 2026-09-03 in three

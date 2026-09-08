@@ -499,6 +499,8 @@ class Viewer(QTabWidget):
         self.addTab(self.transcript, "Transcript")
         self.setCornerWidget(self._copy_button(), Qt.Corner.TopRightCorner)
         self._offsets: list[float] = []
+        self._shown: str | None = None
+        """The meeting id on screen, so a redraw of the same one keeps its scroll."""
         self._raw: dict[QTextBrowser, str] = {}
         """The exact bytes behind each pane, for a copy that is not a rendering."""
         self._zoom = 0
@@ -686,6 +688,7 @@ class Viewer(QTabWidget):
 
     def clear_meeting(self, message: str) -> None:
         """Both panes say the same thing: there is nothing selected, or nothing there."""
+        self._shown = None
         self._offsets = []
         self._raw = {}
         for browser in (self.transcript, self.notes):
@@ -701,6 +704,7 @@ class Viewer(QTabWidget):
         not streamed — so there is nothing to show and the honest thing is to say
         which of the two is true and what happens next.
         """
+        self._shown = None
         self._offsets = []
         self._raw = {}
         body = "".join(f"<p>{html.escape(line)}</p>" for line in lines)
@@ -718,6 +722,17 @@ class Viewer(QTabWidget):
         meeting only gets notes when somebody runs `/cleanup` on it, and an empty
         pane looks like a failure rather than like a queue.
         """
+        # The same meeting drawn again -- a refresh after tagging, F5, a
+        # transition -- keeps both panes where they were. It used to jump to
+        # the top on every redraw, which after tagging a meeting looked like
+        # the window losing its place. A different meeting starts at the top.
+        same = self._shown == document.get("id")
+        positions = (
+            {pane: pane.verticalScrollBar().value() for pane in (self.transcript, self.notes)}
+            if same
+            else {}
+        )
+        self._shown = document.get("id")
         self.transcript.setHtml(render_transcript_html(document))
         self._offsets = [float(entry["at"]) for entry in document["entries"]]
         # Kept for `_markdown_for_copy`, which hands over the source rather than
@@ -742,7 +757,11 @@ class Viewer(QTabWidget):
             # Both rewrites, and they cannot collide: a timestamp has no `[[` and a
             # wikilink has no `[HH:MM:SS]` inside it.
             self.notes.setMarkdown(link_people(link_timestamps(notes)))
-        self.transcript.moveCursor(self.transcript.textCursor().MoveOperation.Start)
+        if positions:
+            for pane, value in positions.items():
+                pane.verticalScrollBar().setValue(value)
+        else:
+            self.transcript.moveCursor(self.transcript.textCursor().MoveOperation.Start)
 
     # --- Cross-links --------------------------------------------------------
 

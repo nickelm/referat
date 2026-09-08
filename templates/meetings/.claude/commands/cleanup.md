@@ -83,6 +83,34 @@ folder, and at build step 13 it is what a project digest is assembled around.
 Use the exact name the transcript uses for a person; do not wikilink a
 `SPEAKER_NN`.
 
+## Names and terms
+
+The transcript is ASR output and mishears names and terms **consistently**. Two
+lists say what things are actually called; read both before writing:
+
+- `PEOPLE.md` in this folder — everybody Referat knows by name: the full name,
+  and the short name the transcript's labels use. Generated; never edit it.
+- The `glossary` of each project in `projects.json` whose id is in this
+  meeting's `meta.json` `tags`. An untagged meeting has no glossary.
+
+Three cases, and nothing in between:
+
+- **Exact match** (case aside) in either list: write it the right way, silently.
+- **Near miss** — the transcript's `Elmquist` against the list's `Elmqvist`, a
+  surname one letter off, an acronym with a letter swapped: write the corrected
+  spelling **and flag it once, at first use**, exactly like this:
+  `Elmqvist (assumed transcription error: "Elmquist")`. Every later use is the
+  corrected spelling alone. A `[[Wikilink]]` takes the corrected name, and the
+  flag goes **beside** the brackets, never inside them:
+  `[[Elmqvist]] (assumed transcription error: "Elmquist")`.
+- **Neither**: leave the word exactly as transcribed. Do not guess.
+
+This rule is about your own prose in `notes.md`. It never touches
+`transcript.md`, it never turns a `SPEAKER_NN` into a name (a name on the list
+is not evidence about who an unnamed speaker is), and it never reaches inside a
+quotation. The full rule lives in this folder's `CLAUDE.md` under *Known people
+and terms*.
+
 ## Language and spelling
 
 **Write the notes in English, whatever language the meeting was in.** Meetings

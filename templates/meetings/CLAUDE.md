@@ -12,9 +12,11 @@ One subfolder per meeting, named `YYYY-MM-DD_HHMM` (local start time, with a
 
 ```
 INDEX.md           the dashboard: one row per meeting. Generated — see below
+PEOPLE.md          who Referat knows by name, for `/cleanup`. Generated — see below
 projects.json      the projects a meeting can be tagged with. Machine-written
 actions.json       what has been done about the action items. Machine-written
 days/              one YYYY-MM-DD.md per day, from `/standup`. Generated
+recaps/            one <project-id>.md per project, from `/recap`. Generated
 2026-08-27_1400/
   mic.wav          my microphone — and the room — mono 16 kHz
   system.wav       system audio output (WASAPI loopback) — everyone on the call
@@ -22,13 +24,15 @@ days/              one YYYY-MM-DD.md per day, from `/standup`. Generated
   meta.json        duration, pause intervals, model and device used
   speakers/        WAV snippets of speakers nobody has named yet
   notes.md         written by `/cleanup`. The only file here you write
-.claude/           the `/cleanup` and `/standup` commands, and the `.voices/` deny rule
+.claude/           the `/cleanup`, `/standup` and `/recap` commands, and the `.voices/` deny rule
 .vscode/           opens Markdown rendered in this workspace
 ```
 
 **`INDEX.md` is generated** by `referat index`, and again at the end of every
 transcription. Hand edits to it are lost on the next run — change what it says by
-changing a meeting's `notes.md` title, not by editing the table.
+changing a meeting's `notes.md` title, not by editing the table. **`PEOPLE.md` is
+generated the same way**, and also whenever somebody is named, renamed or
+forgotten; it is read by `/cleanup` — see *Known people and terms* below.
 
 There may also be a `.voices/` folder. **Do not read it, and do not open any file
 inside it.** It holds voiceprints of everyone who has been recorded — biometric
@@ -317,6 +321,46 @@ rephrase an action item gratuitously when regenerating notes.
 **Never edit `actions.json`.** It is Referat's, written by `referat actions` and
 by the command center. It is not a to-do list you add to; the notes are.
 
+## Known people and terms
+
+Whisper mishears names, jargon and acronyms, and it mishears them
+**consistently** — the same surname comes out the same wrong way every meeting.
+The transcript keeps what was heard, because it is immutable; the correction
+happens in the notes. Two lists say what things are actually called:
+
+- **`PEOPLE.md`**, beside this file: everybody Referat knows by name, with the
+  spelling their name is actually written with and the short name a transcript
+  label calls them by. It is generated from the known-voices database's names —
+  never from a voiceprint, and it carries no email — so it is not edited by
+  hand: a person is *filed* by `referat label <meeting-id>`, which plays their
+  voice and asks, and a spelling is *changed* by `referat person rename <id>`.
+- **A project's `glossary`** in `projects.json`: the terms of art, product names
+  and people belonging to that thread of work. The projects that apply to a
+  meeting are the ids in its `meta.json`'s `tags`.
+
+**The flag rule**, for `/cleanup` and for anybody writing a note by hand. Three
+cases and nothing in between:
+
+- A word matching either list exactly, case aside, is written the right way
+  **silently**.
+- A **near miss** — a transcript's `Elmquist` against the list's `Elmqvist` — is
+  corrected **and marked, once, at first use**:
+  `Elmqvist (assumed transcription error: "Elmquist")`. After that first use the
+  corrected spelling stands alone. A silently applied guess reads exactly as
+  authoritative when it is wrong, and *a wrong name is worse than no name* is
+  the rule this folder runs on, applied to words rather than to speakers.
+- A word matching **neither** list is left exactly as transcribed.
+
+A `[[Wikilink]]` uses the **corrected** name, with the flag beside the brackets
+and never inside them — `[[Elmqvist]] (assumed transcription error: "Elmquist")`
+— or a project digest grows two entries for one person.
+
+What this does and does not do: it normalizes **notes**, never `transcript.md`.
+A name on either list does not name a `SPEAKER_NN` — that is still `referat
+label`, and still not something to infer from the words. And nobody is put into
+`.voices/` by being listed: `PEOPLE.md` is prose for the cleanup pass, not a
+voiceprint and not an identification.
+
 ## days/, and `/standup`
 
 `/standup <YYYY-MM-DD>` reads that day's `*/notes.md` and writes
@@ -340,6 +384,37 @@ meeting sounded like would be a guess wearing the face of a fact.
 
 **Generated — do not hand-edit one.** Re-running `/standup` for that day
 overwrites it, which is how you fold in a meeting that has since been written up.
+
+## recaps/, and `/recap`
+
+`/recap <project-id>` writes `recaps/<project-id>.md`: a **brief** on one
+project, read at the desk minutes before the recurring meeting it is for. Two
+sections and no more — `## State`, one short paragraph on where the project
+stands and what was concluded most recently, and `## Open`, at most eight
+one-sentence bullets on what needs discussing. It is the day summary's shape
+turned ninety degrees: one project across every meeting tagged with it, rather
+than one day across every project.
+
+**It reads a bundle and nothing else.** Which meetings carry the tag is
+`meta.json`'s to say, and nothing here may read `meta.json` — so `referat recap
+<project-id>` assembles the tagged meetings' `notes.md` files, oldest first,
+into `recaps/<project-id>.bundle.md`, spawns `/recap` on it, and removes the
+bundle afterwards. The bundle's frontmatter — `project`, `generated`, the
+ordered `meetings`, and a `notes` sha per meeting — is copied into the recap
+verbatim, and Referat reads it back to tell whether the recap is still
+**current**: it is stale when a tagged meeting is missing from `meetings` or
+its notes have changed since, and that is shown beside it, never acted on. A
+stale recap is never deleted; it is the last brief anybody wrote.
+
+**Every Open bullet ends with the id of the meeting that raised it**, in single
+brackets, exactly as `/standup`'s bullets do, and for the same two reasons: it
+becomes a link, and it is what says how old an open item is. Later meetings
+override earlier ones, and something raised in one meeting and resolved in a
+later one belongs in State, not Open.
+
+**Generated, regenerated from scratch every time, and it never leaves this
+machine.** It is derived from notes and is not notes: the project digest does
+not carry it. Do not hand-edit one, and do not fold the old one into the new.
 
 ## Working here
 

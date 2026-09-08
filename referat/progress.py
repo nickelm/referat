@@ -58,7 +58,18 @@ beside `notes:<meeting-id>` would stay distinct only because meeting ids
 happen to carry `_HHMM`. And the Activity tab prints this value as a column,
 where two different jobs both saying `notes` is a column carrying nothing.
 """
-"""The two kinds of job. A surface may group by these; nothing here does."""
+
+RECAP = "recap"
+"""A `/recap` pass over every note a project's meetings carry.
+
+A fourth kind for the same two reasons as :data:`DAY`, and one more: its key
+is `recap:<project-id>`, and a project id is a slug that could be spelled
+exactly like a meeting id never is but also exactly like nothing forbids — so
+sharing the `notes:` namespace would be relying on two id schemes staying
+disjoint by accident. It joins the command center's one-worker queue rather than
+growing a thread beside it: one rate limit, one folder.
+"""
+"""The kinds of job. A surface may group by these; nothing here does."""
 
 
 @dataclass(frozen=True)

@@ -27,6 +27,7 @@ from pathlib import Path
 from referat import paths, voices
 from referat.config import Config
 from referat.meeting import Meeting, format_duration
+from referat.voices import VoicesDB
 
 log = logging.getLogger(__name__)
 
@@ -179,13 +180,73 @@ def render_index(meetings: list[Meeting], *, gate_failed: int = 0, kept: int = 0
     return "\n".join(lines) + "\n"
 
 
+PEOPLE_HEADER = """# Known people
+
+Everybody Referat knows by name, for the `/cleanup` pass: the spelling a name is
+actually written with, beside what a transcript label calls that person. **This
+file is generated** by `referat index`, again at the end of every transcription,
+and whenever somebody is named, renamed or forgotten -- hand edits are lost on
+the next run. It is written from the known-voices database's *names* and nothing
+else: no voiceprint, no email, nothing out of `.voices/`.
+
+What it is for: a note normalizes a name against this list, and a near miss is
+corrected **and flagged** -- see *Known people and terms* in `CLAUDE.md`. What it
+is not: adding somebody here is not possible, because it is generated; a person
+is filed by `referat label <meeting-id>`, which plays their voice and asks, and a
+spelling is changed by `referat person rename <id>`. Nothing in this file names a
+`SPEAKER_NN`, and a name listed here puts nobody in the voices database.
+"""
+
+PEOPLE_COLUMNS = ("Full name", "Called in transcripts", "Id")
+
+
+def render_people(db: VoicesDB) -> str:
+    """The whole of `PEOPLE.md`, as Markdown. Names only — see :data:`referat.paths.PEOPLE_MD`.
+
+    Full name, short name and id, in the database's own order; a person whose
+    two spellings are the same still gets both columns, because the reader of
+    this file is a prompt and a column that is sometimes there is a rule it has
+    to be told about. The email is deliberately absent: this file lands in a
+    folder a sync client may see, and an address is contactable personal data
+    where a name is a label.
+    """
+    lines = [PEOPLE_HEADER]
+    people = db.ordered()
+    if not people:
+        lines.append(
+            "Nobody is on file yet. A person is filed by `referat label <meeting-id>`, "
+            "which plays an unnamed speaker and asks who it was.\n"
+        )
+    else:
+        lines.append("| " + " | ".join(PEOPLE_COLUMNS) + " |")
+        lines.append("| " + " | ".join("---" for _ in PEOPLE_COLUMNS) + " |")
+        for person in people:
+            cells = (person.name, person.short, f"`{person.id}`")
+            lines.append("| " + " | ".join(c.replace("|", "\\|") for c in cells) + " |")
+        lines.append("")
+        lines.append(f"{len(people)} {'person' if len(people) == 1 else 'people'}.")
+    lines.append("")
+    lines.append(
+        f"<sub>Generated {dt.datetime.now().strftime('%Y-%m-%d %H:%M')} "
+        f"by `referat index`.</sub>"
+    )
+    return "\n".join(lines) + "\n"
+
+
 def write_index(config: Config) -> Path | None:
-    """Regenerate `<meetings_dir>/INDEX.md`. Returns the path, or None on failure.
+    """Regenerate `<meetings_dir>/INDEX.md` and `PEOPLE.md`. Returns the index path, or None.
 
     **Never raises.** It is called at the end of the transcription pipeline, and
     the rule that governs diarization governs this too: a dashboard that could not
     be written must cost the dashboard and nothing else. A meeting with a good
     transcript in it is not a failed meeting because a table did not render.
+
+    `PEOPLE.md` is written here as well, since build step 10's correction rule
+    was built on 2026-09-06, because this is already the one function every
+    change to a name calls: the pipeline after a transcription, `label` after a
+    naming, a forget and a rename. A second regeneration point would be a
+    second thing to forget. It is written after the index and failing it costs
+    the people file alone.
     """
     try:
         meetings_dir = config.paths.meetings_dir
@@ -212,6 +273,12 @@ def write_index(config: Config) -> Path | None:
         log.warning("could not write the meetings INDEX.md", exc_info=True)
         return None
     log.debug("wrote %s (%d meetings)", target, len(meetings))
+    try:
+        people_target = meetings_dir / paths.PEOPLE_MD
+        paths.write_text_atomic(people_target, render_people(VoicesDB.load(config)))
+        log.debug("wrote %s", people_target)
+    except Exception:
+        log.warning("could not write the meetings PEOPLE.md", exc_info=True)
     return target
 
 

@@ -271,6 +271,10 @@ def _unnamed_detail(meeting: dict[str, Any]) -> str:
 
 
 def _notes_detail(meeting: dict[str, Any]) -> str:
+    # A row with notes on disk is here because the transcript was regenerated
+    # after they were written -- see `cli.pending` -- and the row says so.
+    if meeting.get("notes"):
+        return f"{meeting['duration']} re-transcribed, notes older than the transcript"
     return f"{meeting['duration']} transcribed, no notes yet"
 
 
@@ -298,7 +302,8 @@ QUEUES = (
         "notes",
         "No notes yet",
         "page",
-        "Meetings with a transcript and no notes.md. Open one and use Generate "
+        "Meetings with a transcript and no notes.md, or whose transcript was "
+        "re-transcribed after the notes were written. Open one and use Generate "
         "notes..., or Notes for all... to queue the whole backlog.",
         _notes_detail,
         "Every meeting has notes.",

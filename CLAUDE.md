@@ -562,7 +562,7 @@ which reads its documents by calling the same functions rather than by spawning:
 `transcript <id>`, `rerun <id>`,
 `label <id>`, `status`,
 `devices`, `hotwords`, `people`, `person rename <id>`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
-`project <verb>`, `tag`, `untag`, `state`,
+`project <verb>`, `tag`, `untag`, `state`, `recap <project-id>`,
 `promote <id>`,
 `reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `denoise <id> --speaker
 <label>`, `delete <id>`. **All of
@@ -717,7 +717,7 @@ the other way. The rule is one implementation, not one process
 boundary — worth saying in both directions, since a later reader could "fix" it
 either way.
 
-**Ten commands answer in JSON**, and the first five only because the VS Code
+**Eleven commands answer in JSON**, and the first five only because the VS Code
 extension asked. They outlived it, on the rule step 23 wrote down: a document you
 can print is a document you can test, and they are what anything scripting this
 from outside Python reads. Step 20 added `transcript <id> --json` and `show <id> --json`, phase
@@ -783,6 +783,12 @@ prints the record for a person, and `referat transcript` prints **who spoke, how
 often and what share of the words** rather than the transcript itself — which is
 a file you can already open, is the document here most likely to hold a character
 this console's code page cannot encode, and answers that one question worst.
+
+The eleventh is `referat recap <project-id> --json`, step 24's, which prints
+`cli.recap_document`: the recap's text and frontmatter, the series of tagged
+meetings a pass would read now and which of them have notes, and whether the
+file is stale and why — the same document the projects page renders, so the
+state line beside *Recap…* and the JSON cannot disagree about what stale means.
 
 `referat label` also grew the three flags that let something without a terminal
 name somebody: `--speaker SPEAKER_NN --name <name>` applies one name,
@@ -894,14 +900,24 @@ the verbatim transcript. The prompt is a versioned file, so it is refined by
 editing Markdown rather than by changing code.
 
 **`/cleanup` is also where transcription errors get corrected**, since by the
-immutability rule they cannot be corrected where they happened. This paragraph
-used to say the meetings folder's `CLAUDE.md` carries a *Known people and
-terms* section; **it does not, and neither does the template or the prompt** —
-found on 2026-09-04 while cross-referencing step 20c's full names against it,
-and recorded in `TODO.md` rather than quietly built. A meeting tagged with a
-project carries that project's `glossary`, which is the list of what things are
-actually called that does exist. An exact match against either is normalized
-silently. A **near miss is corrected and flagged in the note itself** —
+immutability rule they cannot be corrected where they happened. Two lists say
+what things are actually called. **`PEOPLE.md`**, beside `INDEX.md` in the
+meetings folder, is everybody Referat knows by name — full name, the short name
+a transcript label uses, and the id — and it is **generated**, by
+`index.write_index`, which is already the one function every change to a name
+calls: the pipeline after a transcription, `label` after a naming, a forget and
+a rename. Generated rather than hand-maintained because step 20c made the
+record the registry, and a table kept by hand beside it would be the second
+registry of the same fact. It carries names and nothing else — never an email,
+which is contactable personal data where a name is a label, and never anything
+out of `.voices/` — because it lands in a folder a sync client may see. (This
+paragraph claimed a hand-kept *Known people and terms* table from step 10
+onward; the table never existed, which was found on 2026-09-04 and built as
+this on 2026-09-06.) The second list is the `glossary` of each project in a
+meeting's `tags`. The rule is written in the template's `CLAUDE.md` under
+*Known people and terms* and again in the prompt's *Names and terms* section,
+and the live copies are reconciled by hand. An exact match against either is
+normalized silently. A **near miss is corrected and flagged in the note itself** —
 `Elmqvist (assumed transcription error: "Elmquist")`, once, at first use —
 because a silently applied guess is the same failure as putting a name on a
 `SPEAKER_NN`: it reads exactly as authoritative when it is wrong. That is the
@@ -1009,7 +1025,10 @@ list is an inventory, and the question somebody opens this window to ask is
 whether anything is waiting for them. Recent meetings on the left, capped so it
 stays a glance, and three queues on the right — untagged, speakers nobody has
 named, no notes yet — in the order the work is done in, which is the flow rule
-this UI already follows. Every row **navigates** and nothing acts in place: a
+this UI already follows. The notes queue also holds a meeting at `transcribed` that already has a
+`notes.md`: `rerun` writes `transcribed` and touches no note, so those notes
+describe a transcript that no longer exists, and the row says so. Read off the
+lifecycle, never off the file. Every row **navigates** and nothing acts in place: a
 queue row opens that meeting on the Meetings tab where *Tags…*, *Speakers…* and
 *Generate notes…* already are, because draining a queue from here would be a
 second path to each of those three writes, and the picker and the labeling dialog
@@ -1381,6 +1400,14 @@ put every action item's owner in bold, so the reconstruction is a last resort.
 A whole-document copy needs none of it, which is why the transcript pane now
 keeps its source too — `transcript_document`'s `markdown`.
 
+**A redraw of the same meeting keeps the viewer's place.** `Viewer.show_meeting`
+remembers the id it is showing and, when handed the same one again — a refresh
+after tagging, F5, a transition — restores both panes' scroll after rebuilding
+them. It used to jump to the top on every redraw, which after tagging a meeting
+looked like the window losing its place. Done in the viewer rather than by
+skipping the redraw, so F5 still re-reads a transcript whose labels may just
+have changed.
+
 **A meeting with no transcript yet says which of the two waits it is in.** A
 recording has not finished happening; a transcription has finished happening and
 is being read. `transcript.md` is written whole at the very end of the pipeline —
@@ -1537,6 +1564,60 @@ The command center's notes queue carries `(kind, target)` pairs and the day
 summary joined it rather than growing a worker beside it: one rate limit, one
 folder, which is the argument that made it a queue at all.
 
+**A project recap is the day summary's shape turned ninety degrees — build
+step 24, planned and built on 2026-09-08.** One project across every meeting
+that carries its tag, rather than one day across every project, read once at
+the desk minutes before the recurring meeting it is for. `referat recap
+<project-id>` assembles that project's `notes.md` files in chronological order
+into a bundle at `recaps/<project-id>.bundle.md`, spawns `/recap` on it through
+the same `_spawn` the other two prompts use, and removes the bundle in a
+`finally`; the prompt writes `<meetings_dir>/recaps/<project-id>.md`: `## State`,
+one short paragraph on where the project stands and what was concluded most
+recently, and `## Open`, at most eight one-sentence bullets on what needs
+discussing — questions left unresolved, actions assigned but not reported back,
+decisions postponed to a later meeting — each ending with the id of the meeting
+that raised it, which the projects page turns into a link exactly as the
+dashboard does for a day. Both sections are capped hard in the prompt, because
+a brief that has to be scrolled has stopped being one. It lives beside `days/`
+and never inside a meeting folder, because it is a property of the project: a
+recap kept in the most recent meeting's folder would be one recap per tag on a
+multi-tag meeting, would be orphaned by re-transcribing that meeting, and would
+need a backward walk through the series that exists only to compensate for the
+placement. `referat/recap.py` is the bundle, the frontmatter and the staleness
+rule; `cli.write_recap` is the guarded operation in `write_day_summary`'s shape
+and `cli.recap_document` is what a surface renders, `--json` printing it.
+
+**It is regenerated from scratch every time and never folded.** Every pass reads
+every note in the series, with the prompt told that later meetings override
+earlier ones and that an item raised in one meeting and resolved in a later one
+belongs in State, not Open. The bundle reads the same way it did on the day it
+was built: the whole of each `notes.md`, which is what the digest sends — if
+step 17's sectioned notes are ever built, the section read here is the digest
+layer's partition and never a second reading of the same headings. The
+frontmatter — `project`, `generated`, the ordered `meetings`, and `notes`, a
+sha of each meeting's `notes.md` at assembly — is the watermark. Which meetings
+carry the tag is `meta.json`'s to say and the prompt may not read it, so the
+bundle's header carries all four and **`/recap` copies them verbatim**, the
+division `/standup` already runs under; `write_recap` reads the file back and
+compares what was copied with what was given, reporting a copy that disagrees
+as a partial success with the disagreement named rather than leaving a recap
+that shows as stale for a reason nobody can see. **Stale is decided by sha and
+never by mtime**, which is the open question the plan left and the answer step
+13 already gave: the meetings folder is in Dropbox, a sync client rewrites
+modification times, and the digest already answers *did this note change* with
+`notes_sha256`. A recap is stale whenever a tagged meeting with notes is missing
+from `meetings`, one of those meetings' notes no longer matches its sha, or a
+meeting in `meetings` no longer carries the tag; that is derived on every read,
+stored nowhere, shown beside the recap with its reasons, and never a reason to
+delete the file. There is still no automatic pass: a recap is pressed, from the
+projects page or the prompt, and staleness is what says it is time — the page's
+*Recap…* joins the window's one-worker `claude` queue as a third kind, one rate
+limit and one folder, and *Rebuild…* is the same button once a recap exists.
+Nothing in `recaps/` leaves the machine — it is derived from notes and is not
+notes, and the digest push does not carry it. Incremental folding of the
+previous recap is recorded as deferred, with its risk named, and is not built
+until regeneration is actually slow.
+
 **Two flow rules.** *Project-scoped identification*: when a meeting carries a
 project, the names the labeling UI offers are the people associated with that
 project, everybody else behind a *show all*. It narrows and orders what a human
@@ -1603,7 +1684,8 @@ functions the CLI calls — `cli.list_document`, `cli.show_document`,
 `cli.apply_tags`,
 `cli.create_project`, `cli.rename_project`, `cli.set_description`,
 `cli.set_glossary`, `cli.set_archived`, `cli.remove_project`, `cli.write_notes`,
-`cli.write_day_summary`, `cli.actions_document`, `cli.actions_markdown`,
+`cli.write_day_summary`, `cli.write_recap`, `cli.recap_document`,
+`cli.actions_document`, `cli.actions_markdown`,
 `cli.select_actions`, `cli.owner_counts`, `cli.is_mine`, `cli.set_action_done`,
 `cli.dismiss_action`, `cli.edit_action`, `cli.prune_actions`,
 `cli.delete_meeting`, `cli.delete_warning`, `cli.promote_meeting`,
@@ -1994,18 +2076,22 @@ the API ever gains one.
 | `speakers/`     | a few WAV snippets per unidentified speaker, for `referat label` |
 | `notes.md`      | step 10: written by `/cleanup`, never by Referat itself      |
 
-Two more live at the **folder** level rather than inside a meeting, beside
-`projects.json` and the generated `INDEX.md`:
+Four more live at the **folder** level rather than inside a meeting, beside
+`projects.json` and the generated `INDEX.md`; the last row arrived with build
+step 24 on 2026-09-08, the same day it was planned:
 
 | File            | Contents                                                    |
 | --------------- | ----------------------------------------------------------- |
 | `actions.json`  | what has been done about the action items in the notes       |
 | `days/`         | `YYYY-MM-DD.md`, one glance per day, written by `/standup`   |
+| `PEOPLE.md`     | who Referat knows by name, for `/cleanup`. Generated with `INDEX.md` |
+| `recaps/`       | `<project-id>.md`, one brief per project, written by `/recap`; `<project-id>.bundle.md` beside it only while a pass runs |
 
-Neither is ever inside a meeting folder, and both are excluded by name from
-`paths.list_meeting_dirs` even though neither holds a `meta.json` and so neither
-could pass its gate — `.voices/` is named there for the same reason, which is
-that a rule belongs where somebody would break it.
+None of them is ever inside a meeting folder. `actions.json`, `days/` and
+`recaps/` are excluded by name from `paths.list_meeting_dirs` even though none
+of them holds a `meta.json` and so none could pass its gate — `.voices/` is
+named there for the same reason, which is that a rule belongs where somebody
+would break it.
 
 `transcript.md`:
 
@@ -2394,7 +2480,9 @@ disappeared, and nothing disappears here.
   nothing else — never `transcript.md`, never the audio, never `.voices/`, never
   a speaker embedding. This is its own rule rather than a detail of step 13,
   because it is the line somebody crosses by accident the first time a doc
-  "should really have the exact quote".
+  "should really have the exact quote". Step 24's `recaps/` is derived from
+  notes and is still not notes: it never leaves the machine, and the digest
+  push does not carry it.
 - **The transcript is immutable; corrections live downstream.** Nothing may ever
   change a word of what was said in `transcript.md` — not `/cleanup`, not a
   person, not Referat. A misheard name, a mangled acronym, a turn split in the

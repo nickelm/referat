@@ -354,6 +354,44 @@ def format_duration(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
+def audio_to_wall(pauses: list[Pause], audio: float) -> float:
+    """Seconds of audio (pauses excluded) into wall-clock seconds since the start.
+
+    The two clocks :class:`referat.recorder.RecordingClock` keeps, made
+    inter-convertible from the pause list `meta.json` records, which is what the
+    folder contract has promised since build step 3 and which nothing needed
+    until `referat trim` took a cut as a transcript timestamp and had to say
+    what time of day that was.
+
+    A position exactly at the start of a pause maps to the instant the pause
+    *began* rather than the instant it ended — both are the same audio second,
+    and the earlier one is the honest end of a meeting cut there.
+    """
+    wall = audio
+    for pause in sorted(pauses, key=lambda p: p.start):
+        if pause.start < wall:
+            wall += pause.duration
+        else:
+            break
+    return wall
+
+
+def wall_to_audio(pauses: list[Pause], wall: float) -> float:
+    """Wall-clock seconds since the start into seconds of audio. The inverse of :func:`audio_to_wall`.
+
+    An instant inside a pause maps to the audio second the pause began at,
+    which is where every later sample of that instant went. An open pause —
+    `end` still None — runs to the instant asked about.
+    """
+    paused = 0.0
+    for pause in sorted(pauses, key=lambda p: p.start):
+        if pause.start >= wall:
+            break
+        end = wall if pause.end is None else pause.end
+        paused += max(0.0, min(end, wall) - pause.start)
+    return max(0.0, wall - paused)
+
+
 def _parse_time(value: Any) -> dt.datetime | None:
     if not isinstance(value, str):
         return None
@@ -391,6 +429,43 @@ def resolve_meeting(config: Config, meeting_id: str) -> tuple[Meeting | None, st
     if meeting is None:
         return None, f"cannot read {folder / paths.META_JSON}"
     return meeting, ""
+
+
+def undiarized_channels(meeting: Meeting) -> list[str]:
+    """The channels whose diarization *failed* — not the ones it skipped.
+
+    Read off the `transcription.channels.<name>.diarization.status` the
+    pipeline wrote, never off the labels in `transcript.md`. `skipped` is a
+    deliberate no-op — diarization off, no token, a channel with no voice in
+    it — and costs nothing worth keeping audio for; `failed` is a run that
+    should have produced speakers and did not, and those speakers can only
+    ever come back from the WAV. That is the distinction
+    :func:`referat.transcribe.audio_is_clean` keeps the audio on, and the one
+    `referat promote` warns about.
+    """
+    channels = meeting.transcription.get("channels") or {}
+    return sorted(
+        name
+        for name, block in channels.items()
+        if isinstance(block, dict) and (block.get("diarization") or {}).get("status") == "failed"
+    )
+
+
+def sac_block(meeting: Meeting) -> str:
+    """The native module Smart App Control refused in this meeting's last run, or `""`.
+
+    :attr:`referat.diarize.Diarization.blocked`, read back out of `meta.json`
+    across the channels. Non-empty is the tray's cue that the audio was kept
+    for a reason that will lift by itself — see `App._recover_blocked` — as
+    opposed to a gate the transcript failed on its merits.
+    """
+    channels = meeting.transcription.get("channels") or {}
+    for block in channels.values():
+        if isinstance(block, dict):
+            blocked = (block.get("diarization") or {}).get("blocked")
+            if blocked:
+                return str(blocked)
+    return ""
 
 
 def load_meetings(config: Config) -> list[Meeting]:
@@ -436,9 +511,33 @@ def reconcile_interrupted(config: Config) -> list[Meeting]:
     **The caller must have established that no live tray is transcribing** —
     :func:`referat.rerun.busy_tray` is that question — because this cannot tell a
     dead process's residue from another process's work in progress.
+
+    **A meeting left `recording` is the same residue one state earlier, since
+    2026-09-11**, when a tray was killed seventy seconds into
+    `2026-09-11_0835`. The recorder streams both WAVs to disk and reseals their
+    headers every two seconds, so everything captured was there; what was not
+    was an `ended_at`, a duration, honest frame counts and a status anything
+    would act on — `recording` is refused by `referat delete`, drawn as live by
+    every surface, and re-queued by nothing. So this closes the meeting out the
+    way :meth:`referat.recorder.Recorder.stop` would have: the headers sealed
+    from the files' own length (:func:`referat.recorder.seal_wav`), the frames
+    read back from them, the end taken from the last write to either WAV — the
+    last moment anything is known to have been captured — an open pause closed
+    there, and `recorded`, which is what puts it in front of :meth:`App._resume`
+    to be transcribed. Unlike the `transcribing` clamp this does change the
+    folder, by exactly the header bytes a clean stop writes and nothing else.
+
+    :func:`busy_tray` answers *transcribing* and deliberately not *recording*,
+    so this branch asks its own question: a `status.json` from a live tray that
+    names this meeting while recording or paused means the meeting is not
+    residue but somebody's meeting in progress, and it is left alone.
     """
     repaired: list[Meeting] = []
     for meeting in load_meetings(config):
+        if meeting.status is MeetingStatus.RECORDING:
+            if _close_out_killed_recording(meeting):
+                repaired.append(meeting)
+            continue
         if meeting.status is not MeetingStatus.TRANSCRIBING:
             continue
         meeting.status = MeetingStatus.RECORDED
@@ -461,3 +560,58 @@ def reconcile_interrupted(config: Config) -> list[Meeting]:
         )
         repaired.append(meeting)
     return repaired
+
+
+def _close_out_killed_recording(meeting: Meeting) -> bool:
+    """Finish a meeting whose recorder died. True when it was written back as `recorded`."""
+    from referat import status
+    from referat.recorder import seal_wav
+    from referat.state import State
+
+    live = status.read_status()
+    if (
+        live is not None
+        and live.meeting_id == meeting.id
+        and live.state in (State.RECORDING, State.PAUSED)
+        and status.is_running(live.pid)
+    ):
+        return False
+
+    last_write: dt.datetime | None = None
+    for channel in meeting.audio.values():
+        path = meeting.dir / channel.file
+        if not path.exists():
+            continue
+        # Read before sealing: the seal rewrites the header and moves the mtime.
+        written = dt.datetime.fromtimestamp(path.stat().st_mtime)
+        try:
+            channel.frames = seal_wav(path)
+        except (OSError, ValueError):
+            log.exception("%s: could not seal %s", meeting.id, channel.file)
+            continue
+        last_write = written if last_write is None else max(last_write, written)
+
+    meeting.ended_at = last_write if last_write is not None else meeting.started_at
+    meeting.duration_seconds = max(0.0, (meeting.ended_at - meeting.started_at).total_seconds())
+    if meeting.pauses and meeting.pauses[-1].end is None:
+        meeting.pauses[-1].end = max(meeting.pauses[-1].start, meeting.duration_seconds)
+    meeting.status = MeetingStatus.RECORDED
+    meeting.transcription = {
+        **meeting.transcription,
+        "interrupted": {
+            "at": dt.datetime.now().isoformat(timespec="seconds"),
+            "why": "the recording process did not survive",
+            "after_seconds": round(meeting.duration_seconds, 1),
+        },
+    }
+    try:
+        meeting.save()
+    except Exception:
+        log.exception("could not reconcile %s", meeting.id)
+        return False
+    log.warning(
+        "%s was left recording by a process that is gone; closed out at %.1fs as recorded",
+        meeting.id,
+        meeting.duration_seconds,
+    )
+    return True

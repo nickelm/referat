@@ -444,13 +444,42 @@ class Pane(QTextBrowser):
         self.setOpenExternalLinks(False)
 
     def contextMenuEvent(self, event: Any) -> None:
-        """The two copy commands and a select-all, and nothing that writes."""
+        """The two copy commands and a select-all, and on the transcript one thing more.
+
+        *End the meeting before this line...* is the one item here that leads to
+        a write, and it is on the transcript pane only, on a line that is an
+        entry. It does not act: it hands the entry's timestamp to the window,
+        which asks the same question `referat trim` asks at a prompt, behind
+        the same warning. The gesture exists because the way somebody finds
+        where a meeting really ended is by reading down to *Great, thanks
+        everyone* — and the line after it is the cut.
+        """
         menu = QMenu(self)
         menu.addAction(self._viewer.copy_markdown_action)
         menu.addAction(self._viewer.copy_formatted_action)
         menu.addSeparator()
         menu.addAction("Select all", self.selectAll)
+        if self is self._viewer.transcript:
+            at = self._entry_at(event.pos())
+            if at is not None:
+                menu.addSeparator()
+                menu.addAction(
+                    "End the meeting before this line...",
+                    lambda: self._viewer.trim_requested.emit(at),
+                )
         menu.exec(event.globalPos())
+
+    def _entry_at(self, pos: Any) -> float | None:
+        """The start of the transcript entry under `pos`, or None off an entry.
+
+        The rendered block reads `[HH:MM:SS] Label: text`, which is the line
+        :func:`referat.transcribe.parse_entry` parses — the one parser of the
+        format, asked of the rendering rather than a second copy of the regex.
+        """
+        from referat.transcribe import parse_entry
+
+        parsed = parse_entry(self.cursorForPosition(pos).block().text())
+        return None if parsed is None else parsed[0]
 
     def keyPressEvent(self, event: Any) -> None:
         """`Ctrl+C` copies Markdown, falling through to Qt when there is none.
@@ -476,6 +505,14 @@ class Viewer(QTabWidget):
 
     A name rather than a URL, because the receiver looks it up by name and this
     widget is the only thing that should know a name was ever percent-encoded.
+    """
+
+    trim_requested = Signal(float)
+    """Somebody asked, from the transcript's context menu, to end the meeting before an entry.
+
+    The entry's start in seconds. Emitted and never acted on here, for the
+    reason the picker and the speaker dialog do not implement a rule: the
+    window asks `trim.plan`, shows `trim.warning`, and calls `trim.trim`.
     """
 
     copied = Signal(str)

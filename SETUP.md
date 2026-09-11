@@ -633,14 +633,29 @@ Four things worth knowing:
 
 ### Sleep, and the lid
 
-While recording or paused, Referat holds
+While recording, paused, transcribing, or running a notes pass, Referat holds
 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` so Windows will not
-idle-sleep out from under a meeting. The hold is dropped on stop, so a long
-transcription never keeps the laptop awake.
+idle-sleep out from under a meeting or a GPU job. (This section used to say the
+hold was dropped on stop; it is held through transcription since 2026-09-03,
+after a machine idled into Modern Standby mid-diarization.)
 
 **That suppresses the idle timer and nothing else.** Closing the lid, or choosing
-Sleep, still suspends the machine mid-meeting. If you record with the lid closed,
-change it yourself:
+Sleep, still suspends the machine — and since 2026-09-10 Referat treats both as
+the end of the meeting: **closing the lid stops a live recording**, so does the
+machine going to sleep, and a sleep that arrived without either notification
+is caught from the clock afterwards. The meeting is transcribed once the
+machine is awake again. If a recording ran on past the end anyway — the lid
+stayed open and nobody pressed stop — `referat trim <id> --clock 13:35`
+(or `--at 00:19:40`, as the transcript counts) discards everything after that
+point, audio included, and the command center's *Trim…* and the transcript's
+right-click *End the meeting before this line…* do the same.
+
+`scripts\power_probe.py` listens for the lid and for sleep and prints what
+arrives, which is the way to check what *this* laptop delivers on a lid close.
+
+If you want to record **with the lid closed** — docked, on an external screen —
+the lid must not put the machine to sleep, and that is a system-wide setting
+Referat will not change for you:
 
 ```powershell
 powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
@@ -649,6 +664,9 @@ powercfg /setactive SCHEME_CURRENT
 
 Or **Settings → System → Power & battery → Lid, power and sleep button
 controls**. Referat will not rewrite a system-wide power setting on your behalf.
+Note that closing the lid *during* a recording still stops it whatever the lid
+action is; a recording *started* with the lid already closed is left alone,
+because the lid switch reports changes and not states.
 
 ### Smart App Control
 
@@ -668,6 +686,30 @@ naming some other DLL during a run, that is a third library doing the same
 thing, and the fix is the same shape — see
 `transcribe._neutralize_pyav` and `diarize._neutralize_torchcodec`. This note
 exists to explain why those workarounds are there.
+
+**The one block that cannot be stubbed out is scipy under pyannote**, and it is
+the one that costs something: all 106 of scipy's `.pyd` files are unsigned,
+`pyannote.audio` reaches them through `lightning -> torchmetrics ->
+scipy.signal` with no seam to cut, and a block there fails diarization, so every
+line on that channel is `ME` or `REMOTE`. **A block is a window, not a state.**
+A file Smart App Control let through last week is refused today and let through
+again in an hour or two — 2026-09-01 refused `_odepack`, then `_stats_pythran`,
+then `_sobol`, over two hours; 2026-09-10 refused `_qhull` at 09:51 and was
+still refusing `_slsqplib` at 10:40, two days after three Windows updates. There
+is no per-file allow, so Referat outlives it instead:
+
+- `referat probe` says whether the stack loads right now, by loading it in a
+  child process. Exit 0 clear, 2 blocked. The tray runs the same probe when it
+  starts and when a meeting starts, and raises a notification on a block.
+- A meeting whose diarization failed **keeps its audio** and stays in staging as
+  `gate_failed`, where `referat list` shows it. The transcript is on disk and
+  fine; the speakers are what is missing, and the WAVs are the only thing that
+  can ever recover them.
+- The tray re-probes every quarter hour while idle and **re-transcribes the
+  meeting by itself** once the stack loads again. If it is still blocked twelve
+  hours later you are told, and `referat rerun <id>` finishes the job whenever
+  `referat probe` is clear. `referat promote <id> --release-audio` is the
+  off-ramp if you would rather have the meeting as it stands.
 
 Turning Smart App Control off is a **one-way** change — Windows cannot re-enable
 it without a reinstall — so it is documented here and not recommended.

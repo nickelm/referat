@@ -31,18 +31,19 @@ import ctypes
 import logging
 import sys
 import threading
+import time
 from collections.abc import Callable
 from ctypes import wintypes
 
-from referat import gpu, progress, rerun, status, voices
+from referat import gpu, paths, progress, rerun, sac, status, voices
 from referat.config import Config, ConfigError, load_config
 from referat.hotkeys import Hotkeys
 from referat.logging_setup import setup_logging
-from referat.meeting import Meeting
-from referat.power import SleepBlocker, SuspendWatcher
+from referat.meeting import Meeting, MeetingStatus, sac_block
+from referat.power import PowerEvents, SleepBlocker, SuspendWatcher
 from referat.recorder import Recorder, RecorderError
 from referat.state import Machine, State, Transition
-from referat.transcribe import transcribe_meeting
+from referat.transcribe import progress_key, transcribe_meeting
 
 # Named explicitly so the log reads the same whether this ran as referat-tray
 # or as `python -m referat.tray`, where __name__ would be "__main__".
@@ -50,6 +51,41 @@ log = logging.getLogger("referat.tray")
 
 MUTEX_NAME = r"Local\ReferatTraySingleInstance"
 ERROR_ALREADY_EXISTS = 183
+
+RECOVERY_PROBE_SECONDS = 15 * 60.0
+RECOVERY_GIVE_UP_SECONDS = 12 * 3600.0
+RECOVERY_MAX_RERUNS = 4
+"""How :meth:`App._recover_blocked` waits out a Smart App Control window.
+
+A meeting whose diarization was blocked keeps its audio — see
+:func:`referat.transcribe.audio_is_clean` — and is re-transcribed by this
+process once :func:`referat.sac.probe` comes back clean. Every quarter hour,
+because the window is measured in hours and each probe costs a child process
+importing torch; for at most twelve, because a block that outlasts a working
+day is not a window, and a person should hear about it rather than a thread
+keep quietly trying; and at most four reruns per meeting, because the window
+closes one file at a time — 2026-09-01 went `_odepack`, `_stats_pythran`,
+`_sobol` — so a clean probe can be followed by a run that hits the next file.
+Nothing here is a config knob: there is no meeting for which a different
+answer is right.
+"""
+
+SETTLE_SECONDS = 90.0
+RESUME_GRACE_SECONDS = 15.0
+"""How a meeting stopped by the lid or by sleep waits before it is transcribed.
+
+A meeting the hotkey stops goes straight onto the GPU. One the lid stopped is
+about to lose the machine: the suspend follows the lid by a few seconds when
+the lid action is Sleep, and a large-v3 load that a suspend interrupts is the
+wedged job `reconcile_interrupted` exists to clean up after. So the job waits.
+If the machine sleeps, it waits for the resume and then
+:data:`RESUME_GRACE_SECONDS` more for the GPU and the audio devices to come
+back; if nothing happens for :data:`SETTLE_SECONDS` — a docked laptop whose lid
+action is *do nothing* — it goes ahead, since a machine that stayed awake for a
+minute and a half is staying awake. Neither is a config knob: there is no
+meeting for which a different answer is right, and the cost of the long one is
+a transcript ninety seconds later than it could have been.
+"""
 
 
 # --- Single instance --------------------------------------------------------
@@ -60,14 +96,48 @@ def acquire_single_instance() -> wintypes.HANDLE | None:
 
     Autostart plus a manual launch would otherwise leave two processes fighting
     over the same hotkeys and both writing `status.json`. The handle is returned
-    so the caller can keep it alive for the lifetime of the process.
+    so the caller can hold it for as long as those two things are true of this
+    process, and hand it to :func:`release_single_instance` when they stop being.
     """
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.restype = wintypes.HANDLE
     handle = kernel32.CreateMutexW(None, wintypes.BOOL(True), MUTEX_NAME)
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        # Windows hands back a handle to the *other* tray's mutex on refusal,
+        # and an open handle keeps that mutex alive after its owner has let
+        # go. The refused process exits at once, so it never mattered there;
+        # it matters to anything that asks twice in one process.
+        kernel32.CloseHandle(handle)
         return None
     return handle
+
+
+def release_single_instance(handle: wintypes.HANDLE) -> None:
+    """Let go of the mutex now, rather than when the process finally dies.
+
+    Windows releases a mutex when its last handle closes, which for a handle
+    nobody closes is process exit -- and a tray's exit is not the moment
+    `main` returns. Interpreter finalization follows, tearing down whatever
+    the process loaded, and after a transcription that is torch, a CUDA
+    context, CTranslate2 and Qt. On 2026-09-11 a tray logged `tray exited` at
+    08:31:01 and was still holding this mutex at 08:31:25, so three restarts
+    in a row were refused as *another Referat tray is already running* while
+    no tray was running -- and under `pythonw.exe` the refusal is a line in
+    the log and nothing on the screen. Which finalizer took the time is not
+    established; this does not depend on the answer.
+
+    Called after :meth:`App.shutdown`, which is the point at which the two
+    things the mutex protects -- the hotkeys and `status.json` -- have been
+    given up, so a tray admitted from here on takes nothing from this one.
+    Never raises: a release that fails leaves the process exit to do the same
+    job, as it always did.
+    """
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.ReleaseMutex(handle)
+        kernel32.CloseHandle(handle)
+    except Exception:
+        log.debug("could not release the single-instance mutex", exc_info=True)
 
 
 # --- The app ----------------------------------------------------------------
@@ -89,6 +159,16 @@ class App:
         self.power = SleepBlocker()
         self.notify: Callable[[str], None] = self._log_notification
         self._stopped = False
+        self._closing = threading.Event()
+        # Meetings whose audio was kept because Smart App Control blocked their
+        # diarization, waiting for the window to close; and how many times each
+        # has been re-run for it, kept for the life of the process so the cap
+        # in `RECOVERY_MAX_RERUNS` survives the meeting leaving and re-entering
+        # the pending set.
+        self._recovery_lock = threading.Lock()
+        self._recovery_pending: set[str] = set()
+        self._recovery_reruns: dict[str, int] = {}
+        self._recovery_thread: threading.Thread | None = None
         self.hotkeys = Hotkeys(
             config.hotkeys,
             on_toggle_record=self.on_toggle_record,
@@ -100,9 +180,25 @@ class App:
         # its sleep hold.
         self.machine.add_listener(self._on_transition_power)
         self.machine.add_listener(self._on_transition_status)
+        # What the power events below say about the machine, for a job waiting
+        # to load a model: asleep or not, and when it last woke. Under one
+        # condition because the waiter and the callbacks are on different
+        # threads, and a resume that arrives between a check and a wait must
+        # wake the waiter rather than be missed.
+        self._power_cond = threading.Condition()
+        self._asleep = False
+        self._resumed_at = 0.0
         # Started last and owning nothing: it only reads the progress registry
-        # and writes to the log, so it cannot cost the recorder anything.
-        self.watcher = SuspendWatcher(self._describe_work)
+        # and writes to the log, so it cannot cost the recorder anything. Its
+        # gap callback is the fallback stop for a sleep nothing announced.
+        self.watcher = SuspendWatcher(self._describe_work, on_gap=self._on_lost_time)
+        # The lid and sleep. Registering can fail and the recorder comes up
+        # regardless; see `PowerEvents` for what each signal is and is not.
+        self.events = PowerEvents(
+            on_lid_closed=self._on_lid_closed,
+            on_suspend=self._on_suspend,
+            on_resume=self._on_resume,
+        )
 
     def _describe_work(self) -> str:
         """What is in flight, for the log's heartbeat and for a resume line.
@@ -197,14 +293,124 @@ class App:
             self.notify(
                 f"No system audio - {meeting.id} is recording the microphone only."
             )
+        # A block found now is known an hour before it would cost anything, and
+        # said so; the pipeline at the end of this meeting keeps the audio
+        # either way, so this is warning and never a decision.
+        self._probe_async(f"the start of {meeting.id}")
 
-    def stop_meeting(self) -> None:
-        """End the running meeting and hand it to a background transcription job."""
+    def stop_meeting(self, *, because: str = "") -> None:
+        """End the running meeting and hand it to a background transcription job.
+
+        `because` is set when the machine stopped it rather than a person — the
+        lid closed, sleep began, or a sleep was found in the clock afterwards —
+        and does two things: the notification says so, and the transcription
+        *waits* for the machine to be awake before it loads a model, since the
+        thing that stopped the meeting is about to interrupt anything started
+        now. See :data:`SETTLE_SECONDS`. Everything else is the same stop the
+        hotkey makes, through the same lines.
+        """
         if self.machine.state not in (State.RECORDING, State.PAUSED):
             log.info("stop ignored in state %s", self.machine.state)
             return
+        meeting_id = self.machine.meeting_id
+        if because:
+            log.warning("stopping %s: %s", meeting_id, because)
         if self.machine.try_to(State.STOPPED):
-            self._finish_meeting(self._stop_recorder())
+            self._finish_meeting(self._stop_recorder(), settle=because)
+            if because and meeting_id:
+                self.notify(
+                    f"Stopped {meeting_id} because {because}. It is transcribed "
+                    f"once the machine is awake again."
+                )
+
+    # --- The lid, and sleep ---------------------------------------------------
+
+    def _on_lid_closed(self) -> None:
+        """A closed laptop is not recording a meeting. On Windows' own thread."""
+        if self.machine.recording:
+            self.stop_meeting(because="the lid closed")
+
+    def _on_suspend(self) -> None:
+        """The machine is going to sleep: stop what is recording, and remember it.
+
+        Windows gives about two seconds. Closing two WAVs whose headers were
+        synced within the last two anyway, and writing one `meta.json`, is well
+        inside that; if the machine still goes before the stop completes, the
+        thread is frozen rather than killed and finishes the stop on resume.
+        A job already on the GPU cannot be helped from here — the clock
+        watcher records the gap and `reconcile_interrupted` picks up the piece.
+        """
+        with self._power_cond:
+            self._asleep = True
+        if self.machine.recording:
+            self.stop_meeting(because="the machine went to sleep")
+        elif self.machine.jobs:
+            log.warning("sleeping with a transcription in flight: %s", self._describe_work())
+
+    def _on_resume(self) -> None:
+        """The machine is back. Wakes any job waiting in :meth:`_settle`."""
+        with self._power_cond:
+            self._asleep = False
+            self._resumed_at = time.monotonic()
+            self._power_cond.notify_all()
+
+    def _on_lost_time(self, lost: float) -> None:
+        """The clock says the machine slept, whether or not anything announced it.
+
+        The fallback behind :class:`referat.power.PowerEvents`: a suspend that
+        delivered no notification still leaves a meeting that was recorded
+        through a sleep, and by the lid rule that meeting was over when the
+        sleep began. The stop is late by the length of the sleep, which the WAVs
+        carry as padded silence, and `referat trim` is how that stretch is cut
+        off afterwards. Never a second stop: a meeting the lid already stopped
+        is not recording by the time this runs.
+        """
+        if self.machine.recording:
+            self.stop_meeting(
+                because=f"the machine slept for {lost / 60.0:.0f} minutes without saying so"
+            )
+
+    def _settle(self, meeting: Meeting, why: str) -> None:
+        """Wait, on the job thread, for the machine to be awake. See :data:`SETTLE_SECONDS`.
+
+        Reported through :mod:`referat.progress` under the job's own key, which
+        the pipeline's `begin` then replaces, so the Activity tab shows a job
+        that is waiting rather than one that has not started. A shutdown ends
+        the wait; the thread is a daemon and the meeting is `recorded` with its
+        audio in staging, which is what the next tray's reconciliation reads.
+        """
+        progress.begin(
+            progress_key(meeting),
+            progress.TRANSCRIBE,
+            meeting.id,
+            f"waiting for the machine to settle ({why})",
+        )
+        began = time.monotonic()
+        deadline = began + SETTLE_SECONDS
+        with self._power_cond:
+            while not self._closing.is_set():
+                now = time.monotonic()
+                if self._asleep:
+                    progress.step(progress_key(meeting), "waiting for the machine to wake")
+                    # A suspend freezes this thread; the timeout is only so a
+                    # resume that delivered no notification still gets a look.
+                    self._power_cond.wait(60.0)
+                    continue
+                if self._resumed_at > began:
+                    ready = self._resumed_at + RESUME_GRACE_SECONDS
+                    if now >= ready:
+                        log.info("%s: the machine is awake; transcribing", meeting.id)
+                        return
+                    self._power_cond.wait(ready - now)
+                    continue
+                if now >= deadline:
+                    log.info(
+                        "%s: the machine stayed awake for %.0fs; transcribing",
+                        meeting.id,
+                        SETTLE_SECONDS,
+                    )
+                    return
+                self._power_cond.wait(deadline - now)
 
     def on_toggle_pause(self) -> None:
         """Pause a running meeting, or resume a paused one."""
@@ -235,16 +441,16 @@ class App:
             log.exception("could not stop the recorder cleanly")
             return recorder.meeting
 
-    def _finish_meeting(self, meeting: Meeting | None) -> None:
+    def _finish_meeting(self, meeting: Meeting | None, *, settle: str = "") -> None:
         """Hand the stopped meeting to a background transcription job."""
         if meeting is None:
             # Nothing captured worth transcribing; STOPPED -> IDLE exists for this.
             log.warning("no meeting to transcribe")
             self.machine.try_to(State.IDLE)
             return
-        self._queue_transcription(meeting)
+        self._queue_transcription(meeting, settle=settle)
 
-    def _queue_transcription(self, meeting: Meeting) -> None:
+    def _queue_transcription(self, meeting: Meeting, *, settle: str = "") -> None:
         """Count the job, claim the state, start the thread. The one path onto the GPU.
 
         All three callers want exactly this — a meeting just stopped, a meeting
@@ -265,7 +471,7 @@ class App:
         self.machine.begin_job()
         self.machine.try_to(State.TRANSCRIBING)
         threading.Thread(
-            target=self._transcribe, args=(meeting,), name="transcribe", daemon=True
+            target=self._transcribe, args=(meeting, settle), name="transcribe", daemon=True
         ).start()
 
     def rerun_meeting(self, meeting_id: str) -> tuple[bool, str]:
@@ -296,10 +502,21 @@ class App:
         channels = ", ".join(p.name for p in rerun.audio_present(meeting))
         return True, f"re-transcribing {meeting.id} from {channels}"
 
-    def _transcribe(self, meeting: Meeting) -> None:
-        """The background job. Deliberately survives a new recording starting."""
+    def _transcribe(self, meeting: Meeting, settle: str = "") -> None:
+        """The background job. Deliberately survives a new recording starting.
+
+        `settle` names what stopped the meeting when the machine did — see
+        :meth:`stop_meeting` — and makes the job wait for the machine to be
+        awake before it touches the GPU.
+        """
         try:
-            self._notify_transcribed(transcribe_meeting(meeting, self.config))
+            if settle:
+                self._settle(meeting, settle)
+                if self._closing.is_set():
+                    return
+            done = transcribe_meeting(meeting, self.config)
+            if not self._recover_blocked(done):
+                self._notify_transcribed(done)
         except Exception:
             # Already recorded as `failed` in meta.json; the tray carries on and
             # `referat rerun` can try again.
@@ -343,6 +560,148 @@ class App:
         """What :attr:`notify` does before a UI has replaced it, and if none ever does."""
         log.info("notification: %s", message)
 
+    # --- Smart App Control ----------------------------------------------------
+
+    def _probe_async(self, when: str) -> None:
+        """Ask, on a thread, whether Smart App Control is blocking the stack, and say so.
+
+        A child process importing torch and pyannote — see
+        :func:`referat.sac.probe` — so nothing unsigned is loaded into the
+        process that owns the recorder, and on a daemon thread so the caller
+        never waits on it. A block is a warning here and a decision nowhere:
+        what happens at the end of the meeting is the gate's, which keeps the
+        audio whether or not this ever ran.
+        """
+
+        def run() -> None:
+            try:
+                result = sac.probe()
+            except Exception:
+                log.exception("the Smart App Control probe at %s crashed", when)
+                return
+            if result.status == sac.BLOCKED:
+                log.warning("at %s: %s", when, result.describe())
+                self.notify(
+                    f"Smart App Control is blocking {result.blocked}. Speaker names "
+                    f"will fail until it clears; a meeting transcribed meanwhile keeps "
+                    f"its audio and is re-transcribed when it does."
+                )
+            else:
+                log.info("at %s: %s", when, result.describe())
+
+        threading.Thread(target=run, name="sac-probe", daemon=True).start()
+
+    def _recover_blocked(self, meeting: Meeting) -> bool:
+        """Queue a meeting whose diarization Smart App Control blocked for a later rerun.
+
+        True when this took the meeting — it is `gate_failed`, its audio is in
+        staging, and `meta.json` names the file that was refused — so the
+        caller's *Transcribed ...* notification is replaced by this one, which
+        says what was lost and that it is coming back. False for every other
+        meeting, including one the gate refused on the transcript's merits,
+        which no amount of waiting improves.
+
+        Bounded by :data:`RECOVERY_MAX_RERUNS`: a meeting that has been re-run
+        that many times and is still blocked is handed to the person, with the
+        command that finishes the job, rather than run a fifth time.
+        """
+        blocked = sac_block(meeting)
+        if meeting.status is not MeetingStatus.GATE_FAILED or not blocked:
+            return False
+        with self._recovery_lock:
+            reruns = self._recovery_reruns.get(meeting.id, 0)
+            if reruns >= RECOVERY_MAX_RERUNS:
+                self.notify(
+                    f"{meeting.id}: Smart App Control still blocking {blocked} after "
+                    f"{reruns} re-transcriptions. Audio kept - run: referat rerun "
+                    f"{meeting.id} once `referat probe` is clear."
+                )
+                return True
+            self._recovery_pending.add(meeting.id)
+            self._start_recovery_thread()
+        self.notify(
+            f"{meeting.id}: speaker names lost - Smart App Control blocked {blocked}. "
+            f"Audio kept; it will be re-transcribed when the block clears."
+        )
+        return True
+
+    def _start_recovery_thread(self) -> None:
+        """Start the waiting thread if none is running. Called under the lock."""
+        if self._recovery_thread is not None and self._recovery_thread.is_alive():
+            return
+        self._recovery_thread = threading.Thread(
+            target=self._recovery_loop, name="sac-recovery", daemon=True
+        )
+        self._recovery_thread.start()
+
+    def _recovery_loop(self) -> None:
+        """Probe every quarter hour; re-run every pending meeting once the probe is clean.
+
+        Only while the recorder is idle — a rerun is a GPU job, and starting one
+        during a live meeting is a load the recording never asked for — and
+        only on a probe that says :data:`referat.sac.OK`: an :data:`ERROR`
+        probe says nothing either way and is not permission. The thread ends
+        after dispatching; a rerun that hits the next blocked file comes back
+        through :meth:`_recover_blocked`, which starts it again.
+        """
+        started = time.monotonic()
+        while not self._closing.wait(RECOVERY_PROBE_SECONDS):
+            with self._recovery_lock:
+                pending = sorted(self._recovery_pending)
+            if not pending:
+                return
+            if time.monotonic() - started > RECOVERY_GIVE_UP_SECONDS:
+                with self._recovery_lock:
+                    self._recovery_pending.clear()
+                self.notify(
+                    f"Smart App Control has been blocking for {RECOVERY_GIVE_UP_SECONDS / 3600:.0f} "
+                    f"hours. Audio kept for {', '.join(pending)} - run: referat rerun "
+                    f"<id> once `referat probe` is clear."
+                )
+                return
+            if self.machine.state is not State.IDLE:
+                log.info("not probing Smart App Control while %s", self.machine.state)
+                continue
+            try:
+                result = sac.probe()
+            except Exception:
+                log.exception("the Smart App Control probe crashed; will try again")
+                continue
+            log.info("waiting on %s: %s", ", ".join(pending), result.describe())
+            if not result.ok:
+                continue
+            for meeting_id in pending:
+                with self._recovery_lock:
+                    self._recovery_pending.discard(meeting_id)
+                    self._recovery_reruns[meeting_id] = self._recovery_reruns.get(meeting_id, 0) + 1
+                ok, why = self.rerun_meeting(meeting_id)
+                if ok:
+                    self.notify(f"Smart App Control cleared - {why} for its speaker names")
+                else:
+                    log.warning("could not re-transcribe %s: %s", meeting_id, why)
+            return
+
+    def _recover_blocked_on_disk(self) -> None:
+        """Pick up meetings a previous tray left waiting on a block.
+
+        The pending set lives in this process, so a tray restarted mid-window
+        would otherwise forget them. Staging only: a meeting with audio is
+        never anywhere else. Never fatal, on the rule every optional thing in
+        this file runs under.
+        """
+        try:
+            for folder in paths.list_meeting_dirs(self.config.staging_dir()):
+                meeting = Meeting.load(folder)
+                if meeting is None or meeting.status is not MeetingStatus.GATE_FAILED:
+                    continue
+                if sac_block(meeting) and (
+                    meeting.mic_path.exists() or meeting.system_path.exists()
+                ):
+                    log.info("%s is waiting on Smart App Control from a previous tray", meeting.id)
+                    self._recover_blocked(meeting)
+        except Exception:
+            log.exception("could not look for meetings waiting on Smart App Control")
+
     # --- Lifecycle ----------------------------------------------------------
 
     def start(self) -> None:
@@ -362,6 +721,10 @@ class App:
             self.config.hotkeys.toggle_record,
             self.config.hotkeys.toggle_pause,
         )
+        # After the recorder is up, and both on their own threads: neither may
+        # delay a hotkey, and a probe that fails is a log line.
+        self._recover_blocked_on_disk()
+        self._probe_async("startup")
 
     def _reconcile_meetings(self) -> None:
         """Correct any meeting left `transcribing` by a process that is gone.
@@ -430,6 +793,7 @@ class App:
         if self._stopped:
             return
         self._stopped = True
+        self._closing.set()
         log.info("shutting down")
         self.hotkeys.stop()
         if self.machine.recording:
@@ -438,6 +802,11 @@ class App:
             self.machine.try_to(State.STOPPED)
             self._stop_recorder()
             self.machine.try_to(State.IDLE)
+        with self._power_cond:
+            # Any job waiting in `_settle` returns on this; the meeting stays
+            # `recorded` in staging for the next tray to reconcile.
+            self._power_cond.notify_all()
+        self.events.close()
         self.watcher.close()
         self.power.close()
         status.clear_status()
@@ -473,8 +842,10 @@ def main() -> int:
 
     setup_logging(config.app.log_level)
 
-    # Held for the lifetime of the process; releasing it would let a second
-    # tray start and take the hotkeys.
+    # Held until `shutdown` has given up the hotkeys and `status.json`, and
+    # released explicitly then -- not left to process exit, which after a
+    # transcription can trail `tray exited` by half a minute of finalization
+    # and refuse every restart attempted in between.
     mutex = acquire_single_instance()
     if mutex is None:
         log.warning("another Referat tray is already running; exiting")
@@ -487,6 +858,7 @@ def main() -> int:
         app.start()
     except Exception:
         log.exception("the recorder core would not start")
+        release_single_instance(mutex)
         return 1
 
     try:
@@ -499,6 +871,7 @@ def main() -> int:
         return 1
     finally:
         app.shutdown()
+        release_single_instance(mutex)
         log.info("tray exited")
 
 

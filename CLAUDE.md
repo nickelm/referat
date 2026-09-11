@@ -205,6 +205,36 @@ picture as the heap corruption. And `meeting.reconcile_interrupted` clamps a
 meeting left `transcribing` by a process that is gone, which is the sticky-lie
 gap recorded below, closed from the next start rather than from a handler.
 
+**A closed laptop is not recording a meeting — build step 25, 2026-09-10.**
+That day a meeting ended at about 13:35, the lid was closed, and the recording
+ran until somebody remembered it at 13:49: a closed laptop, the corridor and
+whoever spoke near it, transcribed and filed as the meeting. Nothing in this
+process can veto the lid, but it can *hear* it, and `power.PowerEvents` does,
+through `powrprof.dll` with callbacks rather than a window — the lid switch as
+a power-setting notification, and `PBT_APMSUSPEND`/`PBT_APMRESUMEAUTOMATIC`
+for sleep and wake — on a thread of Windows' own, exactly as the `keyboard`
+hook delivers a hotkey. Either the lid closing or the machine going to sleep
+stops a live meeting through the same `App.stop_meeting` the hotkey and the
+Stop button use, with a `because` that reaches the notification; the watcher's
+wall-clock gap is wired to the same handler as the fallback for a sleep nothing
+announced. The lid fires on the *change*, so a recording started with the lid
+already shut on a docked laptop is left alone, and the first report Windows
+sends on registration — the current state — is ignored for the same reason.
+
+**A meeting stopped that way is transcribed after the machine wakes, not
+before it sleeps.** The suspend follows the lid by seconds, and a large-v3 load
+it interrupts is the wedged job `reconcile_interrupted` exists to clean up
+after. So the job thread waits in `App._settle`: for the resume and fifteen
+seconds more if the machine sleeps, or ninety seconds if it does not — a docked
+laptop whose lid action is *do nothing* — before touching the GPU, and says so
+through `progress` under the job's own key. Both numbers are constants and not
+knobs; there is no meeting for which a different answer is right. What was
+measured: both registrations succeed on this machine and the lid reports
+`open` on registration (`scripts/power_probe.py`); whether Modern Standby
+delivers `PBT_APMSUSPEND` on a lid close here is not yet measured, which is
+what the probe is for, and the clock-gap fallback covers a machine that does
+not.
+
 **Transcription**, on stop, in a background thread: `faster-whisper` large-v3 on
 CUDA, degrading to CPU + medium when CUDA is unavailable. **Both channels** are
 diarized with `pyannote.audio` 4 (`speaker-diarization-community-1` — the
@@ -385,12 +415,24 @@ spelling a name onto unattributed speech is the same failure as putting a name o
 a `SPEAKER_NN`. `referat relabel` is the repair for the transcripts written under
 the old rendering, and it is deliberately narrow — see the CLI section.
 
-**Diarization may never cost anything but speaker names.** No token, a gated
+**Diarization may never cost anything but speaker names — and, since
+2026-09-10, it may not cost those permanently either.** No token, a gated
 repo, an out-of-memory, a pyannote release that moved its API: all of them
 degrade to undifferentiated `REMOTE:` labels and a `done` meeting.
 `diarize.diarize` therefore never raises — an exception escaping it on the CUDA
 attempt would make `transcribe_meeting` re-transcribe the whole meeting on the
-CPU, unable to tell a diarization problem from a dying GPU.
+CPU, unable to tell a diarization problem from a dying GPU. What that rule
+never priced was the step after it: the gate judged the *words* and released
+the audio, so a failure diarization had degraded gracefully became permanent
+thirteen seconds later. `2026-09-10_0903`, a 47-minute Teams call, lost every
+remote speaker that way to a Smart App Control block that lifted within the
+hour. So `transcribe.audio_is_clean` now refuses a channel whose diarization
+**failed** — `meeting.undiarized_channels`, `failed` and never `skipped`, since
+diarization turned off or a loopback with no voice in it is nothing a rerun
+improves — and the meeting stays `gate_failed` in staging with its WAVs, from
+which `referat rerun` recovers the speakers once whatever failed has stopped
+failing. The transcript is still written and still fine; what is kept is the
+one material that could ever put names on it.
 
 **Speaker identification** turns those numbers into names, without any
 enrollment step. Diarization already computes one embedding per cluster
@@ -515,9 +557,31 @@ degradation elsewhere", said from the code's side.
 `pyannote.audio` -> `lightning` -> `torchmetrics` -> `scipy.signal`, with no
 seam to cut. When the window is open, diarization fails and `diarize.diarize`
 degrades to undifferentiated labels exactly as it does for a missing token — a
-meeting transcribed during one loses its speaker names and nothing else. That is
-the degradation the rule *permits*, and the reason it is worth keeping the
-transcript on the other side of the line.
+meeting transcribed during one loses its speaker names and nothing else. This
+paragraph used to end *that is the degradation the rule permits*, and it was,
+until the gate released the audio behind it; the loss is now a **delay**
+rather than a degradation, and four things make it one. **A block is a window
+and not a state**: the cloud reputation that lets an unsigned file through is
+re-asked, so 2026-09-01 walked `_odepack`, `_stats_pythran` and `_sobol` over
+two hours, and 2026-09-10 refused `_qhull` at 09:51, was still refusing
+`_slsqplib` at 10:40, and was clear before 11:00 — two days after three Windows
+updates, which is a correlation and recorded as one. Nothing in this process
+can close it and there is no per-file allow, so `referat/sac.py` outlives it.
+`diarize.diarize` retries a block twice, half a minute apart, and writes the
+refused file into the channel's `diarization.blocked` — only a block, decided
+by `sac.is_block` through the cause chain, because a gated repository does not
+come right by waiting; the in-process re-import was tested against a simulated
+block and completes. The gate keeps the audio, one paragraph up. `sac.probe`
+loads the stack in a **child process** and names what was refused — a child
+because nothing unsigned may be loaded into the process that owns the
+recorder — and the tray runs it at startup and at every meeting start, so a
+block is a notification an hour before it would cost anything; `referat probe`
+is the same call at a prompt. And `App._recover_blocked` re-probes every
+quarter hour while the recorder is idle and re-runs a waiting meeting from its
+kept audio once the probe is clean, four reruns and twelve hours at most
+before handing the person the command, and picking up at startup whatever a
+previous tray left waiting. The in-job retry is short on purpose: it runs on
+the thread holding the GPU, and the long wait is the tray's.
 
 `transcribe.DecodeError` exists for the same failure. A decode is device-neutral
 and happens before any model is loaded, so a `DecodeError` on the CUDA attempt
@@ -560,12 +624,12 @@ is signed the way this one is.
 which reads its documents by calling the same functions rather than by spawning:
 `config`, `list`, `show <id>`,
 `transcript <id>`, `rerun <id>`,
-`label <id>`, `status`,
+`label <id>`, `status`, `probe`,
 `devices`, `hotwords`, `people`, `person rename <id>`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
 `project <verb>`, `tag`, `untag`, `state`, `recap <project-id>`,
 `promote <id>`,
 `reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `denoise <id> --speaker
-<label>`, `delete <id>`. **All of
+<label>`, `trim <id> --at <HH:MM:SS> | --clock <HH:MM>`, `delete <id>`. **All of
 them are built**, `project link-doc`, `project unlink-doc` and `project sync`
 included since step 13 — they were deliberately absent from the parser until
 then rather than present and answering "not built yet".
@@ -586,10 +650,10 @@ of it back, which is deliberately the opposite of `apply_tags` — a tag picker
 renders a subset of the projects, so a replacement there could drop a tag it
 never drew, while a glossary is edited as the whole list.
 
-`reflow`, `relabel`, `debleed` and `denoise` are the four repairs. The first
+`reflow`, `relabel`, `debleed`, `denoise` and `trim` are the five repairs. The first
 three are the same shape: all exist because a rendering rule changed after
 transcripts had already been written whose audio has since been released, so no
-`rerun` can regenerate them. All four write nothing when there is nothing to
+`rerun` can regenerate them. All five write nothing when there is nothing to
 change. `reflow` and `relabel`
 are idempotent; **`debleed` is convergent instead**, and that is a real
 difference rather than a quibble — its pairing is greedy and disjoint, so
@@ -680,6 +744,55 @@ be reconstructed, and wrong here, where the record *is* the justification for
 the deletion — a record that failed to land refuses the deletion outright.
 `debleed` had gone through `save` and inherited the hole; it was closed the same
 way the same day.
+
+**`trim` is the fifth repair and the third exception, built at step 25 on
+2026-09-10, and it differs from the other two exceptions on the one point that
+defines them.** `debleed` and `denoise` keep every removed line verbatim in
+`meta.json` so a deletion can be read back; `trim` keeps the *cut* and never
+the content. It exists for a recording that ran on after the meeting ended —
+the lid closed, a stop forgotten — and what follows the end of a meeting was
+never part of it and may be things people said believing nothing was
+recording, so a record that preserved those lines under another key would be
+the deletion not happening. `transcription.trimmed` is therefore a **list** of
+passes, each saying when, where (as `HH:MM:SS` and as the clock read) and how
+much — lines, frames per WAV, snippets, clusters — and a reader verifies the
+cut against the file, since nothing after that timestamp remains, without
+being able to read what went. That is the checkability the immutability rule
+asks for, applied to a deletion whose whole point is not being checkable by
+content.
+
+It reaches everything in the folder the discarded stretch touched: the entries
+at or after the cut and the header's stated length (`transcribe.render_header`
+and `HEADER_RE`, so the format stays in one file); the WAVs, truncated in place
+through the stdlib `wave` module when they are still on disk, because a later
+`rerun` would otherwise bring the stretch straight back; the snippets cut from
+after it; the *unnamed* clusters whose every line was after it, which would
+otherwise sit in the naming queue asking who somebody never in the meeting
+was — named clusters are left alone, since an identification is a fact about a
+person and `label --forget` is the tool for names; the pauses after it, the
+duration and `ended_at`. What it does **not** reach is anything derived from
+the untrimmed transcript that lives elsewhere — `notes.md`, a digest block, a
+day summary, the action items — and it says so, and drops a `notes_written` or
+`synced` meeting to `transcribed`, the state `rerun` writes for the same reason
+and the one the dashboard's notes queue already renders as *notes describe a
+transcript that no longer exists*, so regenerating the notes is the next thing
+offered and the auto-sync after that cleanup replaces the block.
+
+The cut is a person's and nothing infers it: an end-of-meeting detector would
+be *nothing is inferred from a transcript* broken at the one place a wrong
+guess deletes somebody's actual words. It is given as the transcript counts —
+audio time with pauses excluded, which is what the file shows — or as a time
+of day, which is how the end of a meeting is remembered, converted through the
+pause list by `meeting.wall_to_audio` and `audio_to_wall`, the two clocks the
+folder contract had promised were inter-convertible since step 3 and nothing
+had needed to convert. In the window it is *Trim…*, third in the audio group
+after *Re-transcribe…* and *Promote…*, and *End the meeting before this
+line…* on the transcript pane's context menu, which is how the point is
+usually found — by reading down to *Great, thanks everyone* — and hands the
+entry's timestamp to the same `trim.plan`, `trim.warning` and `trim.trim` the
+prompt uses. The dry run at the prompt is the one place the removed lines are
+ever shown together, which is deliberate: `meta.json` will not hold them, and
+somebody should read the cut before making it.
 
 **`relabel` is deliberately narrow**, because the label it is replacing means two
 things and only one of them is repairable. It spells the owner's name into `ME:`
@@ -2150,7 +2263,12 @@ and both are records of deletions kept so the deletion can be read back:
 keyed by label, each `{at, channel, removed: [{at, text}, ...]}`. Both
 `removed` lists accumulate across passes. The per-channel cluster a `noise`
 entry refers to also carries `noise: true` beside where `echo: true` would be,
-and both flags mean the cluster is never offered a name.
+and both flags mean the cluster is never offered a name. A third, `trimmed`,
+is a list of passes since step 25 — `{at, cut, cut_seconds, wall_seconds,
+clock, duration_before, entries_removed, audio: {<channel>: {frames_before,
+frames_after}}, snippets_removed, speakers_removed, pauses_removed,
+notes_stale}` — and holds **no text**, by design: it records that a cut was
+made and where, never what was cut.
 
 `digest` is what has been pushed into which Google Doc, **keyed by `gdoc_id`**,
 each entry `{tab_id, notes_sha256, written_at}`. Keyed by doc rather than being
@@ -2220,6 +2338,36 @@ The residue was worth closing because the lie is sticky: a meeting stuck at
 `transcribing` is refused by `referat delete`, drawn as in-flight by every
 surface that renders the lifecycle, and counted as busy by `busy_tray` itself, so
 the one command that would repair it is the one it blocks.
+
+**A meeting left `recording` is the same residue one state earlier, and since
+2026-09-11 the same function closes it out.** A tray killed seventy seconds
+into `2026-09-11_0835` left both WAVs intact — the recorder reseals their
+headers every two seconds — and a `meta.json` saying `recording` with no end,
+a one-second frame count and a status nothing re-queues. So
+`reconcile_interrupted` finishes such a meeting the way `Recorder.stop` would
+have: `recorder.seal_wav` rewrites each WAV's size fields from the file's own
+length (the flush the dead process never made, and the only bytes this
+changes — `decode_wav` reads through the stdlib `wave` module and would
+otherwise leave up to two seconds undecoded), the frames are read back, the
+end is the last write to either WAV, an open pause is closed there, and the
+meeting is `recorded` with `transcription.interrupted` saying why, which puts
+it in front of `_resume` to be transcribed. `busy_tray` deliberately answers
+*transcribing* and not *recording*, so this branch asks its own question: a
+live tray whose `status.json` names the meeting while recording or paused is
+somebody's meeting in progress and is left alone.
+
+**The single-instance mutex is released when `shutdown` is done, not when
+the process is.** Windows releases a mutex when its last handle closes, and
+`tray exited` is logged when `main` returns — interpreter finalization
+follows, and after a transcription that is torch, a CUDA context, CTranslate2
+and Qt. On 2026-09-11 a tray still held the mutex twenty-four seconds after
+its exit line and three restarts were refused as *already running* while no
+tray was running, which under `pythonw.exe` is a log line and nothing on the
+screen. `release_single_instance` runs in `main`'s `finally` after
+`App.shutdown` has given up the hotkeys and `status.json`, the two things the
+mutex protects, so a restart is admitted the moment this tray has let go of
+them. Which finalizer takes the time is not established, and the fix does not
+depend on the answer.
 
 **The meetings already on this machine are not migrated**, deliberately. The
 legacy values map on load, so every one of them reads correctly as `recorded` or

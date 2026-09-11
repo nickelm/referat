@@ -285,3 +285,229 @@ class SuspendWatcher:
         except Exception:
             log.debug("could not describe what is in flight", exc_info=True)
             return ""
+
+
+# --- Power events: the lid, and sleep --------------------------------------
+
+PBT_APMSUSPEND = 0x0004
+PBT_APMRESUMESUSPEND = 0x0007
+PBT_APMRESUMEAUTOMATIC = 0x0012
+PBT_POWERSETTINGCHANGE = 0x8013
+DEVICE_NOTIFY_CALLBACK = 0x0002
+
+LID_CLOSED = 0
+LID_OPEN = 1
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_uint32),
+        ("Data2", ctypes.c_uint16),
+        ("Data3", ctypes.c_uint16),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+GUID_LIDSWITCH_STATE_CHANGE = _GUID(
+    0xBA3E0F4D, 0xB817, 0x4094, (ctypes.c_ubyte * 8)(0xA2, 0xD1, 0xD5, 0x63, 0x79, 0xE6, 0xA0, 0xF3)
+)
+"""`{BA3E0F4D-B817-4094-A2D1-D56379E6A0F3}`: the lid switch, delivered as a power setting."""
+
+
+class _POWERBROADCAST_SETTING(ctypes.Structure):
+    _fields_ = [
+        ("PowerSetting", _GUID),
+        ("DataLength", ctypes.c_uint32),
+        ("Data", ctypes.c_ubyte * 1),
+    ]
+
+
+_NOTIFY_CALLBACK = ctypes.WINFUNCTYPE(
+    ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p
+)
+
+
+class _DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS(ctypes.Structure):
+    _fields_ = [("Callback", _NOTIFY_CALLBACK), ("Context", ctypes.c_void_p)]
+
+
+class PowerEvents:
+    """Hear the lid close and the machine sleep, and say so to whoever asked.
+
+    **Why this exists.** On 2026-09-10 a meeting ended at about 13:35, the lid
+    was closed, and the recording ran on until somebody remembered it at 13:49:
+    fourteen minutes of a closed laptop, the corridor and whoever spoke near it,
+    transcribed and filed as the meeting. The rule that fell out of it is the
+    one a person would state: *a closed laptop is not recording a meeting.* The
+    sleep hold (:class:`SleepBlocker`) is about the other direction — keeping
+    the machine awake for a meeting — and neither it nor anything else in this
+    process can veto the lid; what this does is *notice*, in time for the
+    recorder to stop cleanly rather than be found still running afterwards.
+
+    **Three signals, in the order they arrive, and a fourth that is not here.**
+    The lid switch comes first and by itself — `GUID_LIDSWITCH_STATE_CHANGE`
+    through `PowerSettingRegisterNotification`, which fires on the *change* and
+    so leaves a recording started with the lid already closed on a docked
+    laptop alone. `PBT_APMSUSPEND` follows seconds later when the lid action is
+    Sleep, and arrives on its own when Sleep was chosen from the menu or the
+    power button pressed; Windows gives about two seconds after it, which is
+    enough to close two WAV files whose headers are already synced every two
+    seconds anyway. `PBT_APMRESUMEAUTOMATIC` (and `PBT_APMRESUMESUSPEND`, which
+    is the same moment when a person caused the wake) says the machine is back,
+    and is what the tray waits for before loading a model — a CUDA context
+    that a suspend interrupted is the thing `reconcile_interrupted` exists to
+    clean up after. The fourth signal is :class:`SuspendWatcher`'s wall-clock
+    gap, which needs no registration and so is the fallback when none of these
+    is delivered; the tray wires it to the same handler.
+
+    **Callbacks rather than a window.** Both registrations take
+    `DEVICE_NOTIFY_CALLBACK`, so no window handle is needed and no message loop
+    is involved: Windows calls :attr:`_callback` on a thread of its own, exactly
+    as the `keyboard` hook calls the hotkey handlers on one of theirs, and the
+    handlers handed in here are the same methods those call. The callback holds
+    the GIL for the few lines it runs and returns zero; everything it triggers
+    happens through the state machine, which is safe from any thread.
+
+    **Failing to register costs nothing but the feature**, and says so once in
+    the log. `powrprof.dll` has had both calls since Windows 8, so this is
+    defensive rather than expected — but the recorder must come up whether or
+    not the lid can be heard, on the rule every optional thing in the tray runs
+    under. The ctypes callback and the parameter struct are kept on the
+    instance because Windows holds a raw pointer to them for as long as the
+    registration lives, and a garbage-collected callback is a crash in the
+    system's thread the next time the lid moves.
+    """
+
+    def __init__(
+        self,
+        *,
+        on_lid_closed: Callable[[], None],
+        on_suspend: Callable[[], None],
+        on_resume: Callable[[], None],
+    ) -> None:
+        self._on_lid_closed = on_lid_closed
+        self._on_suspend = on_suspend
+        self._on_resume = on_resume
+        self._lid: int | None = None
+        self._suspend_handle = ctypes.c_void_p()
+        self._lid_handle = ctypes.c_void_p()
+        self._registered = False
+        # Kept alive for the life of the registration - see the class docstring.
+        self._callback = _NOTIFY_CALLBACK(self._dispatch)
+        self._params = _DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS(self._callback, None)
+        try:
+            self._powrprof = ctypes.WinDLL("powrprof", use_last_error=True)
+        except OSError:
+            log.warning("powrprof.dll would not load; the lid and sleep will not stop a meeting")
+            self._powrprof = None
+            return
+        self._register()
+
+    @property
+    def registered(self) -> bool:
+        """Whether Windows is delivering at least one of the two notifications."""
+        return self._registered
+
+    @property
+    def lid(self) -> int | None:
+        """The last lid state heard: :data:`LID_OPEN`, :data:`LID_CLOSED`, or None before any."""
+        return self._lid
+
+    def _register(self) -> None:
+        dll = self._powrprof
+        assert dll is not None
+        dll.PowerRegisterSuspendResumeNotification.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        dll.PowerRegisterSuspendResumeNotification.restype = ctypes.c_uint32
+        dll.PowerSettingRegisterNotification.argtypes = [
+            ctypes.POINTER(_GUID),
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        dll.PowerSettingRegisterNotification.restype = ctypes.c_uint32
+        dll.PowerUnregisterSuspendResumeNotification.argtypes = [ctypes.c_void_p]
+        dll.PowerUnregisterSuspendResumeNotification.restype = ctypes.c_uint32
+        dll.PowerSettingUnregisterNotification.argtypes = [ctypes.c_void_p]
+        dll.PowerSettingUnregisterNotification.restype = ctypes.c_uint32
+
+        recipient = ctypes.cast(ctypes.pointer(self._params), ctypes.c_void_p)
+        error = dll.PowerRegisterSuspendResumeNotification(
+            DEVICE_NOTIFY_CALLBACK, recipient, ctypes.byref(self._suspend_handle)
+        )
+        if error:
+            log.warning("could not register for suspend notifications (error %d)", error)
+            self._suspend_handle = ctypes.c_void_p()
+        error = dll.PowerSettingRegisterNotification(
+            ctypes.byref(GUID_LIDSWITCH_STATE_CHANGE),
+            DEVICE_NOTIFY_CALLBACK,
+            recipient,
+            ctypes.byref(self._lid_handle),
+        )
+        if error:
+            log.warning("could not register for lid notifications (error %d)", error)
+            self._lid_handle = ctypes.c_void_p()
+        self._registered = bool(self._suspend_handle.value or self._lid_handle.value)
+        if self._registered:
+            log.info(
+                "listening for %s",
+                " and ".join(
+                    name
+                    for name, handle in (("the lid", self._lid_handle), ("sleep", self._suspend_handle))
+                    if handle.value
+                ),
+            )
+
+    def close(self) -> None:
+        """Unregister both. Safe to call twice, and never raises."""
+        dll = self._powrprof
+        if dll is None:
+            return
+        try:
+            if self._suspend_handle.value:
+                dll.PowerUnregisterSuspendResumeNotification(self._suspend_handle)
+                self._suspend_handle = ctypes.c_void_p()
+            if self._lid_handle.value:
+                dll.PowerSettingUnregisterNotification(self._lid_handle)
+                self._lid_handle = ctypes.c_void_p()
+        except Exception:
+            log.debug("could not unregister the power notifications", exc_info=True)
+        self._registered = False
+
+    def _dispatch(self, _context: int, kind: int, setting: int) -> int:
+        """Windows' entry point, on a thread of its own. Returns 0 whatever happens."""
+        try:
+            if kind == PBT_APMSUSPEND:
+                log.info("the machine is going to sleep")
+                self._on_suspend()
+            elif kind in (PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND):
+                log.info("the machine is awake again")
+                self._on_resume()
+            elif kind == PBT_POWERSETTINGCHANGE and setting:
+                self._on_setting(setting)
+        except Exception:
+            # Nothing may raise into Windows' thread; a handler that fails is a
+            # log line, and the recorder is no worse off than before this existed.
+            log.exception("a power event handler failed")
+        return 0
+
+    def _on_setting(self, setting: int) -> None:
+        block = ctypes.cast(setting, ctypes.POINTER(_POWERBROADCAST_SETTING)).contents
+        if bytes(block.PowerSetting) != bytes(GUID_LIDSWITCH_STATE_CHANGE) or block.DataLength < 1:
+            return
+        state = int(block.Data[0])
+        previous, self._lid = self._lid, state
+        if previous is None:
+            # Windows reports the current state on registration; that is a fact
+            # about now and not a change, and a docked laptop registering with
+            # its lid shut must not stop anything.
+            log.debug("lid is %s", "closed" if state == LID_CLOSED else "open")
+            return
+        if state == LID_CLOSED:
+            log.info("the lid closed")
+            self._on_lid_closed()
+        else:
+            log.info("the lid opened")

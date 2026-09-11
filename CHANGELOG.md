@@ -2,6 +2,181 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-11 — A tray that had exited still refused the next one
+
+**What happened.** The tray was quit at 08:31:01 (`shutting down`, `hotkeys
+unregistered`, `tray exited`) and three restarts at 08:31:06, 08:31:08 and
+08:31:25 were each refused with *another Referat tray is already running*.
+No tray was running. Under `pythonw.exe` the refusal is a log line and
+nothing on screen, so from the outside the app simply would not start. A
+launch a few minutes later came up cleanly.
+
+**Why.** The single-instance mutex was held by a handle nobody closed, so it
+was released by process exit — and `tray exited` is logged when `main`
+returns, not when the process dies. Interpreter finalization follows, and
+after a transcription that process is carrying torch, a CUDA context,
+CTranslate2 and Qt; on this occasion it outlived its own exit line by more
+than twenty-four seconds. Which finalizer took the time is not established
+and the fix does not depend on the answer.
+
+- `tray.release_single_instance` releases and closes the mutex from `main`'s
+  `finally`, right after `App.shutdown` has unregistered the hotkeys and
+  cleared `status.json` — the two things the mutex protects — so a restart is
+  admitted the moment this tray has let go of them rather than when its
+  interpreter finishes dying. Never raises; a failed release leaves process
+  exit to do what it always did.
+- `acquire_single_instance` closes the handle Windows hands back on a refusal.
+  The refused process exits at once so it never mattered there; it kept the
+  mutex alive across the release in a one-process check, which is how it was
+  found.
+- Measured: held, refused, released, re-acquired under a test mutex name
+  through the real functions, with the live tray untouched.
+
+**And a second gap, opened while fixing the first.** The tray started at 08:34
+to get the app back was recording `2026-09-11_0835` when it was killed at
+08:36:58 to restart it on the fixed code — a hard kill seventy seconds into a
+meeting, which is exactly what a crash or a power loss does. Both WAVs were
+intact (the recorder reseals their headers every two seconds) but `meta.json`
+said `recording` with no end and a one-second frame count, a state `referat
+delete` refuses, every surface draws as live, and nothing re-queues. Closed
+the same way `transcribing` was on 2026-09-03: from the next start.
+
+- `meeting.reconcile_interrupted` now closes out a meeting left `recording`
+  by a process that is gone, the way `Recorder.stop` would have: the end
+  taken from the last write to either WAV, the duration from that, an open
+  pause closed there, the frame counts read back from the files, `recorded`,
+  and `transcription.interrupted` saying why — which puts it in front of
+  `App._resume` to be transcribed. Guarded on its own question, since
+  `busy_tray` deliberately answers *transcribing* and not *recording*: a live
+  tray whose `status.json` names the meeting while recording or paused is
+  somebody's meeting in progress and is left alone.
+- `recorder.seal_wav` is the flush the killed process never made: it rewrites
+  the two size fields from the file's own length, because `decode_wav` reads
+  through the stdlib `wave` module and would otherwise leave up to two seconds
+  of captured audio undecoded. Writes nothing to a file the writer closed. The
+  header packing moved to `recorder.wav_header` so the writer and the seal
+  share it.
+- Driven against a synthetic folder: the live-tray guard, the close-out, the
+  sealed header read back through `wave`, a properly closed file left
+  untouched, idempotence, and a non-WAV refused.
+
+## 2026-09-10 — A closed laptop is not recording a meeting; `referat trim` (step 25)
+
+**What happened.** `2026-09-10_1315` ended at about 13:41 — *Great, thanks
+everyone* at 00:26:17 — the lid was closed at about 13:43, and the recording
+ran until somebody remembered it at 13:49. The log shows the sleep hold doing
+exactly what it promises and no more: `the machine lost 1 minutes to sleep`
+at 13:43:58, and 113.7 s of padded silence on the microphone. Two rules fell
+out of it, one preventive and one for afterwards.
+
+**The lid, and sleep, stop a live meeting.** New `power.PowerEvents` registers
+the lid switch (`GUID_LIDSWITCH_STATE_CHANGE`) and suspend/resume
+(`PBT_APMSUSPEND`, `PBT_APMRESUMEAUTOMATIC`) through `powrprof.dll` with
+`DEVICE_NOTIFY_CALLBACK` — no window, no message loop, a thread of Windows'
+own, the way the `keyboard` hook already delivers a hotkey. `App._on_lid_closed`
+and `App._on_suspend` call `stop_meeting(because=...)`, the same stop the
+hotkey and the Stop button make, and the notification says why.
+`SuspendWatcher`'s clock gap, until now only logged, is wired to the same
+handler as the fallback for a sleep nothing announced. The lid fires on the
+change and the report Windows sends on registration is ignored, so a recording
+started with the lid already shut on a docked laptop is left alone.
+
+**A meeting the machine stopped is transcribed after it wakes.** The suspend
+follows the lid by seconds, and a large-v3 load it interrupts is the wedged job
+`reconcile_interrupted` cleans up after. `App._settle` waits on the job thread
+— for the resume plus `RESUME_GRACE_SECONDS` if the machine sleeps, or
+`SETTLE_SECONDS` if it stays up — reporting through `progress` under the job's
+own key, which the pipeline's `begin` then replaces. Both are constants.
+
+**`referat trim <id> --at HH:MM:SS | --clock HH:MM [--apply]`**, new
+`referat/trim.py`, the fifth repair and the third exception to the immutability
+rule. Every transcript entry at or after the cut goes and the header states the
+new length; a WAV still on disk is truncated in place through the stdlib `wave`
+module so a later `rerun` cannot bring the stretch back; snippets cut from after
+the point are deleted; unnamed clusters whose every line was after it leave the
+speakers block; pauses after it go; the duration and `ended_at` move; a
+`notes_written` or `synced` meeting drops to `transcribed` so the notes are
+regenerated and the digest resynced. **It differs from `debleed` and `denoise`
+on the one point that defines them**: `transcription.trimmed` — a list of
+passes — records the cut and never the content, because what follows the end
+of a meeting may be things people said believing nothing was recording, and a
+record that kept the words would be the deletion not happening. The dry run at
+the prompt is the one place the removed lines are shown together. Named
+clusters are left alone. `meta.json` first, convergent, refuses a live meeting
+and a cut at zero.
+
+- `meeting.audio_to_wall` and `wall_to_audio`: the two clocks the folder
+  contract promised were inter-convertible since step 3, now converted.
+- `transcribe.render_header` and `HEADER_RE`: the header format in one place,
+  so `trim` rewrites only a header the renderer wrote.
+- `noise._without` became `noise.without_lines`, shared with `trim`.
+- The command center: *Trim…* third in the audio group after *Re-transcribe…*
+  and *Promote…*, behind a modal quoting `trim.warning`; and *End the meeting
+  before this line…* on the transcript pane's context menu, which hands the
+  entry's timestamp (parsed off the rendered block by `transcribe.parse_entry`)
+  to the same place. A `cut` glyph in `icons.py`.
+- `referat show` prints each trim pass beside the `debleed` and `noise` lines.
+- `scripts/trim_fixture.py`, all green, and `scripts/power_probe.py`, which
+  measured that both registrations succeed and the lid reports `open` on
+  registration. **Not measured**: what a real lid close delivers on this
+  laptop under Modern Standby, which the probe exists to find out.
+- SETUP.md section 10 corrected: it still said the sleep hold was dropped on
+  stop, a week after it stopped being true.
+
+The tray running at the time of writing loaded its code at 10:19 and has none
+of this until it is restarted.
+
+## 2026-09-10 — A Smart App Control block cost a Teams call its speakers
+
+**What happened.** `2026-09-10_0903`, 47 minutes over Teams: Smart App Control
+refused scipy's `_qhull` under pyannote, diarization failed on both channels,
+both transcripts passed the quality gate, and the pipeline released 361 MB of
+audio thirteen seconds later. The words are all there and `notes.md` was
+written; every remote speaker is one `REMOTE`, and the only material that could
+ever have put names on them is gone. The block lifted within the hour — the
+in-process retry test hit `_slsqplib` at 10:40 and `referat probe` was clear
+before 11:00 — so a rerun that afternoon would have recovered everything.
+`CLAUDE.md` had called this *the degradation the rule permits*; it was, and the
+gate then made a recoverable failure permanent, which nobody had priced.
+
+**Why it keeps happening.** A block is a window and not a state. All 106 scipy
+`.pyd` files are unsigned, pyannote reaches scipy through `lightning ->
+torchmetrics -> scipy.signal` with no seam to cut, and the cloud reputation that
+lets a file through is re-asked: 2026-09-01 walked `_odepack`,
+`_stats_pythran` and `_sobol` over two hours, and today's window opened two
+days after three Windows updates. Nothing in this process can close it and
+there is no per-file allow. That is the fact the rest is built on.
+
+**Fixed, in four places.**
+
+- **The gate keeps the audio.** `transcribe.audio_is_clean` refuses to release
+  a channel whose diarization *failed* — `meeting.undiarized_channels` — so the
+  meeting stays `gate_failed` in staging with its WAVs. `skipped` still
+  releases: diarization off, or a loopback with no voice in it, is nothing a
+  rerun would improve. `cli.promote_warning` says which case it is, and that
+  promoting gives the speakers up for good.
+- **Diarization retries a block, briefly, and records it.** `diarize.diarize`
+  retries a Smart App Control refusal twice, half a minute apart, reporting the
+  wait to the progress bar, and writes the refused file into the channel's
+  `diarization.blocked`. Only a block — `sac.is_block` walks the cause chain —
+  because a gated repository does not come right by waiting.
+- **The tray probes early and says so.** New `referat/sac.py`; `sac.probe`
+  loads the transcription stack in a child process and names what was refused.
+  The tray runs it at startup and when a meeting starts, and a block is a
+  notification an hour before it would have cost anything. `referat probe` is
+  the same call at a prompt.
+- **The tray re-runs the meeting by itself.** `App._recover_blocked` queues a
+  `gate_failed` meeting whose record names a block; a thread re-probes every
+  quarter hour while the recorder is idle and re-runs it from the kept audio
+  once the probe is clean, up to four reruns per meeting and twelve hours,
+  after which the person is told the command that finishes the job. Meetings
+  left waiting by a previous tray are picked up at startup.
+
+`scripts/sac_fixture.py` drives the retry, the gate and the record without
+torch. The in-process re-import was tested against a simulated block and the
+retry got past it, then died on the real `_slsqplib` — the test finding the
+window still open was more useful than the test passing.
+
 ## 2026-09-08 — Step 24 is built: project recaps
 
 **Built the same day it was planned**, to the plan below with two things

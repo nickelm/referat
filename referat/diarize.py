@@ -44,13 +44,14 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from referat import gpu
+from referat import gpu, sac
 from referat.config import Config
 
 if TYPE_CHECKING:
@@ -81,6 +82,19 @@ FAILED = "failed"
 `meta.json`. `skipped` is a deliberate no-op — diarization turned off, or no
 Hugging Face token — while `failed` is something that went wrong."""
 
+BLOCK_RETRIES = 2
+BLOCK_RETRY_SECONDS = 30.0
+"""How :func:`diarize` waits out a Smart App Control block, and how briefly.
+
+A block is a window and not a verdict — see :mod:`referat.sac` — so the first
+refusal is retried, but only twice and only half a minute apart, because the
+window is measured in hours and this runs on the thread holding the GPU. The
+long wait belongs to the tray, which re-probes on a timer and re-runs the
+meeting from the audio :func:`referat.transcribe.audio_is_clean` kept. Only a
+block is retried: a gated repository or an out-of-memory does not come right
+by waiting, and retrying those would cost a minute per channel for nothing.
+"""
+
 
 @dataclass(frozen=True)
 class Turn:
@@ -103,6 +117,13 @@ class Diarization:
     status: str = SKIPPED
     reason: str = ""
     """Why, in words, for the log and for `meta.json`. Empty on success."""
+    blocked: str = ""
+    """The native module Smart App Control refused, when that is what failed.
+
+    Kept apart from `reason` because the tray reads it: a failure that is a
+    block is one the audio was kept for and a later run will recover, and a
+    failure that is anything else is not.
+    """
     model: str = ""
     device: str = ""
     seconds: float = 0.0
@@ -124,6 +145,8 @@ class Diarization:
         meta: dict[str, Any] = {"status": self.status}
         if self.reason:
             meta["reason"] = self.reason
+        if self.blocked:
+            meta["blocked"] = self.blocked
         if self.model:
             meta["model"] = self.model
             meta["device"] = self.device
@@ -135,17 +158,27 @@ class Diarization:
 # --- Running the pipeline ---------------------------------------------------
 
 
-def diarize(audio: np.ndarray, sample_rate: int, config: Config, device: str) -> Diarization:
+def diarize(
+    audio: np.ndarray,
+    sample_rate: int,
+    config: Config,
+    device: str,
+    on_wait: Callable[[str], None] | None = None,
+) -> Diarization:
     """Who spoke when in `audio`, as a list of :class:`Turn`.
 
     `audio` is mono float32, the shape :func:`referat.transcribe.decode_wav`
     returns; `device` is the one the transcription backend resolved to, so
     diarization follows Whisper onto the GPU or onto the CPU rather than
-    deciding for itself.
+    deciding for itself. `on_wait` is told, in a sentence, when this is
+    sitting out a Smart App Control block — the pipeline hands it to
+    :mod:`referat.progress` so the window says so rather than *finding the
+    speakers* for a minute.
 
     Never raises. A run that could not happen comes back with `status`
     :data:`SKIPPED` or :data:`FAILED` and a reason, and the caller keeps its
-    undifferentiated `REMOTE` labels.
+    undifferentiated `REMOTE` labels — and, when the failure was a block,
+    keeps the audio too, on `blocked`'s say-so.
     """
     if not config.transcription.diarization:
         return Diarization(reason="diarization is off in the config")
@@ -157,20 +190,36 @@ def diarize(audio: np.ndarray, sample_rate: int, config: Config, device: str) ->
         return Diarization(reason=f"no Hugging Face token in {config.paths.hf_token_file}")
 
     started = time.monotonic()
-    try:
-        turns, embeddings = _run(audio, sample_rate, model, token, device)
-    except Exception as exc:
-        # Deliberately bare. Anything at all going wrong here — a gated
-        # repository, a network failure, an out-of-memory, a pyannote release
-        # that renamed something — costs the speaker labels and stops there.
-        log.exception("diarization failed")
-        return Diarization(
-            status=FAILED,
-            reason=_reason(exc),
-            model=model,
-            device=device,
-            seconds=time.monotonic() - started,
-        )
+    attempt = 0
+    while True:
+        try:
+            turns, embeddings = _run(audio, sample_rate, model, token, device)
+            break
+        except Exception as exc:
+            # Deliberately bare. Anything at all going wrong here — a gated
+            # repository, a network failure, an out-of-memory, a pyannote release
+            # that renamed something — costs the speaker labels and stops there.
+            blocked = sac.blocked_module(exc)
+            if blocked and attempt < BLOCK_RETRIES:
+                attempt += 1
+                phrase = (
+                    f"Smart App Control blocked {blocked}; retrying diarization in "
+                    f"{BLOCK_RETRY_SECONDS:.0f}s ({attempt} of {BLOCK_RETRIES})"
+                )
+                log.warning("%s", phrase)
+                if on_wait is not None:
+                    on_wait(phrase)
+                time.sleep(BLOCK_RETRY_SECONDS)
+                continue
+            log.exception("diarization failed")
+            return Diarization(
+                status=FAILED,
+                reason=_reason(exc),
+                blocked=blocked,
+                model=model,
+                device=device,
+                seconds=time.monotonic() - started,
+            )
 
     elapsed = time.monotonic() - started
     speakers = sorted({t.speaker for t in turns})

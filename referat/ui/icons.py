@@ -485,6 +485,22 @@ def _sync(painter: QPainter, size: int) -> None:
     )
 
 
+def _cut(painter: QPainter, size: int) -> None:
+    """A timeline that stops at a bar, with the remainder broken off after it.
+
+    What *Trim...* does is end a meeting at a point, and the picture is that
+    point: the solid bar on the left is the meeting, the upright is the cut,
+    and the two fragments on the right are what is discarded — drawn, because a
+    bar that simply ended would read as a shorter meeting rather than as one
+    with something taken off it. Scissors were tried on paper and are a grey
+    smear at sixteen pixels with a brush and no pen.
+    """
+    painter.drawRect(QRectF(size * 0.08, size * 0.44, size * 0.40, size * 0.12))
+    painter.drawRect(QRectF(size * 0.53, size * 0.20, size * 0.11, size * 0.60))
+    painter.drawRect(QRectF(size * 0.70, size * 0.44, size * 0.08, size * 0.12))
+    painter.drawRect(QRectF(size * 0.84, size * 0.44, size * 0.08, size * 0.12))
+
+
 GLYPHS: dict[str, Callable[[QPainter, int], None]] = {
     "record": _record,
     "pause": _pause,
@@ -505,6 +521,7 @@ GLYPHS: dict[str, Callable[[QPainter, int], None]] = {
     "promote": _promote,
     "link": _link,
     "sync": _sync,
+    "cut": _cut,
 }
 """Seventeen shapes, each drawn filled in one colour.
 

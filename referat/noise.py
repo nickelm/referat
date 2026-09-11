@@ -277,7 +277,7 @@ def mark_noise(config: Config, meeting_id: str, speaker: str) -> tuple[bool, str
             text = meeting.transcript_path.read_text(encoding="utf-8")
         except OSError as exc:
             return False, f"could not read {meeting.transcript_path}: {exc}"
-        kept = _without(text.split("\n"), {i for i, _at, _text in decided.entries})
+        kept = without_lines(text.split("\n"), {i for i, _at, _text in decided.entries})
         try:
             paths.write_text_atomic(meeting.transcript_path, "\n".join(kept))
         except OSError as exc:
@@ -303,8 +303,11 @@ def mark_noise(config: Config, meeting_id: str, speaker: str) -> tuple[bool, str
     )
 
 
-def _without(lines: list[str], doomed: set[int]) -> list[str]:
+def without_lines(lines: list[str], doomed: set[int]) -> list[str]:
     """`lines` minus the doomed ones, each taking the blank line after it along.
+
+    Shared with :mod:`referat.trim`, the other repair that removes whole
+    entries by line index, so the two cannot come to leave a file differently.
 
     Entries are separated by a blank line (:data:`referat.transcribe.ENTRY_SEPARATOR`),
     so deleting an entry alone leaves two blanks in a row — harmless in Markdown,

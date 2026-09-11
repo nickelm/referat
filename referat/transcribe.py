@@ -51,7 +51,7 @@ import numpy as np
 
 from referat import bleed, diarize, gpu, hotwords, index, merge, paths, progress, voices
 from referat.config import Config
-from referat.meeting import Meeting, MeetingStatus
+from referat.meeting import Meeting, MeetingStatus, undiarized_channels
 
 log = logging.getLogger(__name__)
 
@@ -971,8 +971,14 @@ def _diarize_into(
     config: Config,
     device: str,
     speaker_start: int = 1,
+    job: str = "",
 ) -> None:
     """Split one channel into speakers and name the ones it can, in place. Never raises.
+
+    `job` is the :mod:`referat.progress` key, so a Smart App Control block that
+    diarization is sitting out for a minute shows in the window as that rather
+    than as *finding the speakers*; empty from a caller with no job to report
+    into, in which case the wait is a log line only.
 
     One cheap refusal comes first: a channel that transcribed to nothing has no
     lines to label, so there is nothing for a pipeline to do but spend minutes
@@ -997,7 +1003,8 @@ def _diarize_into(
         )
         return
 
-    result = diarize.diarize(audio, SAMPLE_RATE, config, device)
+    on_wait = (lambda phase: progress.step(job, phase, None)) if job else None
+    result = diarize.diarize(audio, SAMPLE_RATE, config, device, on_wait=on_wait)
     transcript.diarization = result
     if result.ok:
         transcript.segments, found, renaming = diarize.assign(
@@ -1116,7 +1123,13 @@ def transcribe_channels(
                     gpu.release(f"transcribing {path.stem} of {meeting.id}")
                 progress.step(key, f"finding the speakers in {path.name}", None)
                 _diarize_into(
-                    meeting, transcript, audio, config, backend.device, speakers_used + 1
+                    meeting,
+                    transcript,
+                    audio,
+                    config,
+                    backend.device,
+                    speakers_used + 1,
+                    job=key,
                 )
                 # Before the next channel's model is loaded, not after: an hour
                 # of float32 at 16 kHz is 230 MB, and there is no reason for two
@@ -1247,11 +1260,25 @@ def render_transcript(meeting: Meeting, entries: list[tuple[float, str, str]]) -
     Entries are separated by a blank line — see :data:`ENTRY_SEPARATOR` for why
     one newline was not enough.
     """
-    when = meeting.started_at.strftime("%Y-%m-%d %H:%M")
-    minutes = round(meeting.duration_seconds / 60)
-    header = f"## Meeting {when} ({minutes} min)"
+    header = render_header(meeting)
     body = [f"[{format_timestamp(start)}] {label}: {text}" for start, label, text in entries]
     return ENTRY_SEPARATOR.join([header, *body]) + "\n"
+
+
+HEADER_RE = re.compile(r"^## Meeting \d{4}-\d{2}-\d{2} \d{2}:\d{2} \(\d+ min\)$")
+"""The header line :func:`render_header` writes, so `referat trim` can recognise the one it may rewrite.
+
+The header is the one line of a transcript that is not speech: it states the
+meeting's length, and a meeting cut short has a new one. A header in any other
+shape — a hand-edited file, a later format — is left exactly as it is.
+"""
+
+
+def render_header(meeting: Meeting, duration_seconds: float | None = None) -> str:
+    """The `## Meeting <when> (<n> min)` line. One place, shared with `referat trim`."""
+    when = meeting.started_at.strftime("%Y-%m-%d %H:%M")
+    seconds = meeting.duration_seconds if duration_seconds is None else duration_seconds
+    return f"## Meeting {when} ({round(seconds / 60)} min)"
 
 
 def reflow_transcript(text: str) -> tuple[str, int]:
@@ -1295,7 +1322,10 @@ def audio_is_clean(meeting: Meeting) -> bool:
     The gate is *every* channel in `meta.json`'s `audio` block, not just the ones
     that happened to produce segments: a channel that was recorded but not
     transcribed keeps both files, and so does a channel whose transcript looks
-    garbled, empty or uncertain. A channel with no voice in it at all counts as
+    garbled, empty or uncertain, and so — since 2026-09-10 — does a channel
+    whose **diarization failed**, because the words being right is not the
+    whole of a transcript when every one of them is filed under `REMOTE`. A
+    channel with no voice in it at all counts as
     clean — see :data:`MIN_VOICED_SECONDS` — because an in-person meeting, where
     the loopback records nothing but silence and notification chimes, would
     otherwise pin every recording to the disk forever.
@@ -1322,6 +1352,23 @@ def audio_is_clean(meeting: Meeting) -> bool:
     unclean = [name for name in present if not channels[name].get("clean")]
     if unclean:
         log.info("keeping the audio of %s: %s looks unreliable", meeting.id, ", ".join(unclean))
+        return False
+    # A transcript whose diarization *failed* is not one that can stand in for
+    # the audio, however clean its words: every line on that channel is an
+    # undifferentiated `ME` or `REMOTE`, and the speakers behind them can only
+    # ever come back from the WAV. `2026-09-10_0903` lost a Teams call's every
+    # remote speaker this way — Smart App Control blocked scipy under pyannote,
+    # both channels came out clean, and the audio was released thirteen seconds
+    # later. Only `failed`, never `skipped`: diarization turned off or a channel
+    # with no voice in it is nothing a rerun would improve on.
+    undiarized = [name for name in present if name in undiarized_channels(meeting)]
+    if undiarized:
+        log.info(
+            "keeping the audio of %s: diarization failed on %s, and the speaker "
+            "names can only come back from the audio",
+            meeting.id,
+            ", ".join(undiarized),
+        )
         return False
 
     return True

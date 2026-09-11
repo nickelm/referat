@@ -116,6 +116,62 @@ class RecordingClock:
 
 # --- WAV --------------------------------------------------------------------
 
+WAV_HEADER_FORMAT = "<4sI4s4sIHHIIHH4sI"
+WAV_HEADER_BYTES = 44
+
+
+def wav_header(samplerate: int, channels: int, data_bytes: int) -> bytes:
+    """The canonical 44-byte PCM header, packed once here for the writer and the seal."""
+    block_align = channels * SAMPLE_WIDTH
+    return struct.pack(
+        WAV_HEADER_FORMAT,
+        b"RIFF",
+        36 + data_bytes,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,  # PCM
+        channels,
+        samplerate,
+        samplerate * block_align,
+        block_align,
+        SAMPLE_WIDTH * 8,
+        b"data",
+        data_bytes,
+    )
+
+
+def seal_wav(path: Path) -> int:
+    """Make a WAV's header agree with its length, and return its frame count.
+
+    The flush the killed process never made. :class:`WavWriter` rewrites the
+    two size fields every :data:`FLUSH_INTERVAL_SECONDS`, so a file left by a
+    process that died mid-recording is playable but its header stops up to two
+    seconds short of the bytes actually on disk -- and `transcribe.decode_wav`
+    reads through the stdlib `wave` module, which trusts the header and would
+    leave that tail undecoded. This writes the header the writer would have
+    written on close, from the file's own size and the format fields it already
+    carries, and touches no sample.
+
+    Only the two size fields are rewritten, and only when they disagree with
+    the length, so sealing a file the writer closed properly writes nothing.
+    """
+    with path.open("r+b") as f:
+        head = f.read(WAV_HEADER_BYTES)
+        if len(head) < WAV_HEADER_BYTES or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+            raise ValueError(f"{path.name} is not a WAV this recorder wrote")
+        fields = struct.unpack(WAV_HEADER_FORMAT, head)
+        channels, samplerate, data_declared = fields[6], fields[7], fields[12]
+        f.seek(0, os.SEEK_END)
+        block_align = channels * SAMPLE_WIDTH
+        data_bytes = (f.tell() - WAV_HEADER_BYTES) // block_align * block_align
+        if data_bytes != data_declared:
+            f.seek(0)
+            f.write(wav_header(samplerate, channels, data_bytes))
+            f.flush()
+            os.fsync(f.fileno())
+        return data_bytes // block_align
+
 
 class WavWriter:
     """A PCM WAV file whose header is kept honest as it grows.
@@ -136,23 +192,7 @@ class WavWriter:
         self._file.flush()
 
     def _header(self, data_bytes: int) -> bytes:
-        block_align = self.channels * SAMPLE_WIDTH
-        return struct.pack(
-            "<4sI4s4sIHHIIHH4sI",
-            b"RIFF",
-            36 + data_bytes,
-            b"WAVE",
-            b"fmt ",
-            16,
-            1,  # PCM
-            self.channels,
-            self.samplerate,
-            self.samplerate * block_align,
-            block_align,
-            SAMPLE_WIDTH * 8,
-            b"data",
-            data_bytes,
-        )
+        return wav_header(self.samplerate, self.channels, data_bytes)
 
     @property
     def frames(self) -> int:

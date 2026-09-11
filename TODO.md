@@ -4540,7 +4540,149 @@ wait for.
       real one, since the prompt copies it by hand and a truncated value is
       still an answer. `referat/recap.py`'s docstring records the reasoning
 
+## 25. A closed laptop is not recording a meeting, and `referat trim`
+
+**Planned and built on 2026-09-10**, the afternoon it happened: `2026-09-10_1315`
+ended at about 13:41, the lid was closed at about 13:43, and the recording ran
+until 13:49. From: *"I forgot to stop recording until 15 minutes after the end of
+a meeting. I even closed my laptop. Probably a closed laptop should stop meeting
+recording. Also, I may need a way to mark the end of the meeting so that the
+rest is discarded (could be sensitive data)."* Two things, and they are the
+prevention and the repair of the same failure. Ahead of 17 and 22, which stay
+deferred.
+
+### The lid, and sleep
+
+- [x] **`power.PowerEvents`**: the lid switch and suspend/resume through
+      `powrprof.dll` with callbacks and no window. The callback and the
+      parameter struct are kept on the instance — Windows holds a raw pointer
+- [x] **The first lid report is ignored.** Windows sends the current state on
+      registration (measured: `open`), and a docked laptop registering with its
+      lid shut must not stop anything
+- [x] **`App.stop_meeting(because=...)`** — the lid, a suspend, and the
+      watcher's clock gap all stop a live meeting through the hotkey's own path,
+      and the notification says why
+- [x] **`App._settle`**: a meeting the machine stopped is transcribed after the
+      resume plus fifteen seconds, or after ninety seconds if no sleep follows.
+      Constants, not knobs
+- [x] Registration failure costs the feature and a log line, never the recorder
+- [x] `scripts/power_probe.py` registers both and prints what arrives
+- [ ] **Unmeasured: what a lid close delivers on this laptop under Modern
+      Standby** — the lid switch alone, the suspend as well, or neither. Run
+      `scripts\power_probe.py 60`, close the lid, open it, read the output. If
+      only the lid arrives, the stop still happens and the ninety-second settle
+      covers the rest; if neither does, the clock-gap fallback stops it late
+- [ ] **A job already on the GPU when the lid closes is still not helped**, and
+      nothing here changes that; it is the box under *Surfaced later* on
+      2026-09-03. `_on_suspend` logs what was in flight
+- [ ] **A meeting waiting in `_settle` when the tray is quit** stays `recorded`
+      in staging with its audio, and the next tray's `reconcile_interrupted`
+      picks up `transcribing` only. `referat rerun <id>` finishes it; a startup
+      pass over `recorded` meetings in staging with audio would do it
+      unasked. Recorded, not built — the window is a shutdown during the
+      ninety seconds after a lid close
+
+### `referat trim`
+
+- [x] **`referat/trim.py`**: `plan`, `warning`, `trim`, in the shape of
+      `noise.py`. `meta.json` first, convergent, dry by default
+- [x] **The record holds the cut and never the content** — the one way this
+      differs from `debleed` and `denoise`, argued in the module docstring
+- [x] Transcript entries at or after the cut, and the header's length through
+      the new `transcribe.render_header` / `HEADER_RE`
+- [x] WAVs truncated in place through `wave`, atomically, when still on disk
+- [x] Snippets from after the cut; unnamed clusters entirely after it; named
+      clusters left alone
+- [x] Pauses after the cut, `duration_seconds`, `ended_at`
+- [x] `notes_written` / `synced` drop to `transcribed`; the warning says the
+      notes and the digest may hold what was discarded
+- [x] `--at HH:MM:SS` as the transcript counts, `--clock HH:MM` as the day
+      read, through `meeting.wall_to_audio` and `audio_to_wall`
+- [x] The window: *Trim…* after *Promote…*, and *End the meeting before this
+      line…* on the transcript pane's context menu
+- [x] `referat show` prints the passes; `scripts/trim_fixture.py` all green
+- [ ] **`2026-09-10_1315` itself is not trimmed.** Its audio is already
+      released, so only the transcript and the duration are left to cut, and
+      the dry run at `--clock 13:35` shows the meeting still going — *Great,
+      thanks everyone* is at 00:26:17, and nothing is transcribed after it. A
+      `trim --at 00:26:30 --apply` would correct the stated length from 34 to
+      27 minutes and remove no line; that decision is a person's
+- [ ] **A trim does not touch `notes.md`, the digest, a day summary or
+      `actions.json`**, all of which may describe the discarded stretch. The
+      notes are one button away and the digest follows them; a day summary is
+      rebuilt by pressing it again; the action items orphan on regeneration.
+      Deleting any of them from here would be `trim` editing somebody's prose.
+      Worth revisiting only if a discarded stretch ever *has* to leave a doc in
+      a hurry, in which case `project sync --rerender` after regenerating the
+      notes is the sequence
+
 ## Surfaced later
+### A tray that had exited still refused the next one (2026-09-11)
+
+Quit at 08:31:01, three restarts refused as *already running* through
+08:31:25, no tray alive. The mutex was released by process exit, and after a
+transcription the interpreter's finalization trailed `tray exited` by more
+than twenty-four seconds; under `pythonw.exe` the refusal shows nothing.
+
+- [x] **Release the mutex from `main`'s `finally`**, after `App.shutdown` has
+      given up the hotkeys and `status.json` — `tray.release_single_instance`
+- [x] **Close the handle on a refused acquire**; found by the one-process check
+- [x] **A meeting left `recording` by a dead process is closed out at the next
+      start** — `reconcile_interrupted` seals the WAV headers, reads the frames
+      back, takes the end from the last write, writes `recorded`, and
+      `_resume` transcribes it. Found by killing the replacement tray seventy
+      seconds into `2026-09-11_0835`; the same residue a crash or a power loss
+      leaves
+- [x] `recorder.seal_wav` and `recorder.wav_header`, so the writer and the
+      seal pack one header
+- [ ] Measure which finalizer takes the time after a job — torch, the CUDA
+      context, CTranslate2 or Qt — with a timestamp from an `atexit` hook
+      against the process's actual exit. Only worth it if the trailing exit
+      is ever seen costing something else
+- [ ] A refused start under `pythonw.exe` is invisible. Worth a message box
+      naming the pid in `status.json` — but only from the refused process,
+      which has loaded no Qt, so it would be a `MessageBoxW` through ctypes
+
+### A Smart App Control block cost a Teams call its speakers (2026-09-10)
+
+`2026-09-10_0903`: `_qhull` refused under pyannote, diarization failed on both
+channels, both transcripts clean, audio released thirteen seconds later. The
+block lifted within the hour. Nothing recovers that meeting; everything below
+is so the next one is a delay.
+
+- [x] **The gate keeps the audio when diarization failed.** `audio_is_clean`
+      refuses on `meeting.undiarized_channels`; `failed` only, never `skipped`,
+      or an in-person meeting's silent loopback would pin every recording
+- [x] **`diarize.diarize` retries a block**, twice, half a minute apart, and
+      writes the refused file into `diarization.blocked`. Only a block is
+      retried
+- [x] **`referat/sac.py`** — `is_block` through the cause chain, `probe` in a
+      child process, `referat probe` at a prompt
+- [x] **The tray probes at startup and at meeting start** and notifies on a block
+- [x] **The tray re-runs a blocked meeting by itself** once the probe is clean:
+      every quarter hour, idle only, four reruns and twelve hours at most, and
+      meetings left waiting by a previous tray picked up at startup
+- [x] `cli.promote_warning` distinguishes *the speakers failed* from *the
+      transcript failed*
+- [x] `scripts/sac_fixture.py`
+- [x] **Confirm the in-process retry end to end.** The simulated `_qhull` block
+      was retried past, and the first retry then hit the real `_slsqplib`; run
+      again once the window had closed, the second import of pyannote completed
+      in 4.8s with `scipy.spatial` and `scipy.signal` usable. Python drops the
+      half-imported packages from `sys.modules` on the failed import, so a
+      retry re-executes them cleanly
+- [ ] **Watch the first real recovery.** Nothing above has met a live block
+      yet: the next window will show whether a quarter-hour probe cadence and
+      four reruns are the right numbers
+- [ ] **The window's cause is a correlation.** Three Windows updates on the 8th
+      and 9th, a window on the 10th; 2026-09-01's followed nothing that was
+      recorded. If it recurs after the next Patch Tuesday, run `referat probe`
+      the morning after and expect it
+- [ ] **The command center says nothing about a waiting meeting.** It renders
+      `gate_failed` and *Re-transcribe…* is enabled, but nothing says *this one
+      is waiting on Smart App Control and will re-run itself*; a note on the
+      row, read off `diarization.blocked`, would stop somebody pressing it twice
+
 ### Twelve minutes lost to a repetition loop (2026-09-04)
 
 Found in `2026-09-04_1001` immediately after the Swedish support landed, and
@@ -4746,7 +4888,10 @@ Diagnosed from `2026-09-03_1459`, whose mic diarization took **6527.8s against
       suspended mid-CUDA. `SuspendWatcher` makes that visible and
       `reconcile_interrupted` makes it recoverable, but neither makes it survive.
       Whether a CUDA context here actually survives Modern Standby is unmeasured
-      — this run suggests it does, having finished after one
+      — this run suggests it does, having finished after one. Step 25 narrowed
+      it: a meeting the lid stops no longer starts a job in front of the
+      suspend, since `App._settle` waits for the resume. A job already running
+      when the lid closes is exactly as exposed as before
 - [ ] **`powercfg /requests` still unverified** for the new reasons, for the same
       reason as the original entry in this section: it needs an elevated shell
 

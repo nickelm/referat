@@ -218,6 +218,22 @@ class CommandCenter(QMainWindow):
         )
         self.promote_button.clicked.connect(self._on_promote)
 
+        # Build step 25's, and third in this group because it is about the
+        # meeting's *extent* — audio included, when there is any — rather than
+        # about a transcript: a recording that ran on after the meeting ended
+        # holds a stretch that was never the meeting, and this is where it is
+        # cut off. The transcript pane's context menu reaches the same place
+        # from a line, which is how the point is usually found.
+        self.trim_button = QPushButton("Trim...")
+        self.trim_button.setIcon(self._glyph("cut"))
+        self.trim_button.setEnabled(False)
+        self.trim_button.setToolTip(
+            "End this meeting at a point, discarding everything recorded after it - "
+            "transcript lines, audio still on disk, and speaker snippets. Nothing "
+            "removed is kept anywhere."
+        )
+        self.trim_button.clicked.connect(self._on_trim)
+
         self.tag_button = QPushButton("Tags...")
         self.tag_button.setIcon(self._glyph("tag"))
         self.tag_button.setEnabled(False)
@@ -307,6 +323,7 @@ class CommandCenter(QMainWindow):
         actions.addStretch(1)
         actions.addWidget(self.rerun_button)
         actions.addWidget(self.promote_button)
+        actions.addWidget(self.trim_button)
         actions.addSpacing(18)
         actions.addWidget(self.tag_button)
         actions.addWidget(self.label_button)
@@ -326,6 +343,7 @@ class CommandCenter(QMainWindow):
         self.viewer = Viewer()
         self.viewer.external_requested.connect(self._on_external_link)
         self.viewer.person_requested.connect(self.open_person)
+        self.viewer.trim_requested.connect(self._trim_at)
         # The viewer writes the sentence, this shows it: it is the half that
         # knows whether a selection or the whole document went, and the status
         # bar is the window's.
@@ -647,6 +665,7 @@ class CommandCenter(QMainWindow):
             for button in (
                 self.rerun_button,
                 self.promote_button,
+                self.trim_button,
                 self.label_button,
                 self.notes_button,
                 self.delete_button,
@@ -677,6 +696,10 @@ class CommandCenter(QMainWindow):
         kept = bool(meeting and meeting["audio"] == "kept")
         self.rerun_button.setEnabled(kept and not live)
         self.promote_button.setEnabled(bool(meeting and meeting["staged"]) and not live)
+        # A cut needs something to cut: a transcript, or audio nothing has
+        # transcribed yet. `trim.plan` refuses a live meeting in its own words;
+        # disabling here is that refusal said before it has to be.
+        self.trim_button.setEnabled(bool(meeting and (meeting["transcript"] or kept)) and not live)
         self._show(self._selected)
 
     def _meeting(self, meeting_id: str | None) -> dict[str, Any] | None:
@@ -1134,6 +1157,85 @@ class CommandCenter(QMainWindow):
             return
         log.info("%s", outcome.message)
         self.statusBar().showMessage(outcome.message.replace("\n", "   -   "), 8000)
+        self.refresh()
+
+    def _on_trim(self) -> None:
+        """Ask where the meeting ended, then :meth:`_trim_at` that point.
+
+        A typed timestamp, as the transcript counts it, because that is the
+        axis the file in front of the person is drawn on; the context menu on
+        a transcript line fills it in without the typing, and is the usual way.
+        """
+        from PySide6.QtWidgets import QInputDialog
+
+        from referat import trim
+
+        meeting_id = self._selected
+        if meeting_id is None:
+            return
+        text, ok = QInputDialog.getText(
+            self,
+            "End the meeting early",
+            f"End {meeting_id} at (HH:MM:SS, as the transcript counts):\n"
+            f"Everything recorded after that point is discarded.",
+        )
+        if not ok or not text.strip():
+            return
+        seconds = trim.parse_timestamp(text)
+        if seconds is None:
+            QMessageBox.warning(
+                self, "End the meeting early", f"{text!r} is not a timestamp (HH:MM:SS or MM:SS)."
+            )
+            return
+        self._trim_at(seconds)
+
+    def _trim_at(self, seconds: float) -> None:
+        """Cut the selected meeting at `seconds`, behind the warning Python wrote.
+
+        The modal is shown *before* the command runs, so there is no outcome to
+        quote — the same exception :meth:`_on_delete` and :meth:`_on_promote`
+        are — and what it says is :func:`referat.trim.warning`'s text, which
+        the prompt's dry run prints. What the dry run also prints and this does
+        **not** is the lines themselves: they are in the pane behind the modal,
+        which is where the person found the point.
+        """
+        from referat import trim
+        from referat.meeting import resolve_meeting
+
+        meeting_id = self._selected
+        if meeting_id is None:
+            return
+        meeting, why = resolve_meeting(self.app.config, meeting_id)
+        if meeting is None:
+            QMessageBox.warning(self, "End the meeting early", why)
+            return
+        decided, why = trim.plan(self.app.config, meeting, seconds)
+        if decided is None:
+            QMessageBox.warning(self, "End the meeting early", why)
+            return
+        if decided.nothing:
+            QMessageBox.information(
+                self,
+                "End the meeting early",
+                f"Nothing after {cli.trim_stamp(seconds)} to discard; {meeting.id} already "
+                f"ends there.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "End the meeting early",
+            f"End {meeting.id} at {cli.trim_stamp(seconds)}?\n\n{trim.warning(meeting, decided)}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        done, message = trim.trim(self.app.config, meeting_id, seconds)
+        if not done:
+            QMessageBox.warning(self, "End the meeting early", message)
+            return
+        log.info("%s", message)
+        self.statusBar().showMessage(message.capitalize(), 8000)
         self.refresh()
 
     def _on_copy(self, formatted: bool) -> None:

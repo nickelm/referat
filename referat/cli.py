@@ -74,6 +74,7 @@ from referat.meeting import (
     format_duration,
     load_meetings,
     resolve_meeting,
+    undiarized_channels,
 )
 
 if TYPE_CHECKING:
@@ -108,6 +109,7 @@ NEEDS_CONFIG = (
     "state",
     "tag",
     "transcript",
+    "trim",
     "untag",
 )
 """`status` is missing from this on purpose: `status.json` lives in
@@ -205,6 +207,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="as_json",
         help="emit the same answer as JSON",
+    )
+
+    subcommands.add_parser(
+        "probe",
+        help="whether Smart App Control is blocking the transcription stack right now",
+        description=(
+            "Load torch, faster-whisper and pyannote in a child process, the way "
+            "a transcription does, and say which native file Smart App Control "
+            "refused, if any. A block is a window rather than a state - a file "
+            "it allowed last week is refused today and allowed again in an hour "
+            "- and diarization under it costs the speaker names, so the tray "
+            "runs this when it starts and when a meeting starts, keeps the audio "
+            "of a meeting it caught, and re-transcribes once this comes back "
+            "clean. Exit code 0 when clear, 2 when blocked, 1 when the probe "
+            "itself could not run."
+        ),
     )
 
     subcommands.add_parser(
@@ -440,6 +458,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="actually remove the lines. Without it, nothing is written",
+    )
+
+    trim_parser = subcommands.add_parser(
+        "trim",
+        help="end a meeting at a point, discarding everything recorded after it",
+        description=(
+            "A recording that ran on after the meeting ended - a lid closed, a "
+            "stop forgotten - holds a stretch that was never the meeting and may "
+            "be things people said believing nothing was recording. This cuts "
+            "one meeting at a point: every transcript line at or after it goes, "
+            "any WAV still on disk is truncated so no rerun brings it back, "
+            "speaker snippets from after it are deleted, unnamed speakers who "
+            "spoke only after it are dropped, and the duration and end time are "
+            "corrected. Nothing removed is kept anywhere: meta.json records the "
+            "cut, never the words. The point is yours to name - as the transcript "
+            "counts it (--at 00:19:40) or as the clock read (--clock 13:35) - and "
+            "nothing guesses it. notes.md and a synced digest were written from "
+            "the untrimmed transcript; a meeting that has notes goes back to "
+            "`transcribed` so they are regenerated. Dry by default: --apply writes."
+        ),
+    )
+    trim_parser.add_argument("meeting_id", help="e.g. 2026-08-27_1400")
+    trim_parser.add_argument(
+        "--at",
+        metavar="HH:MM:SS",
+        help="the cut as the transcript counts it: audio time, pauses excluded",
+    )
+    trim_parser.add_argument(
+        "--clock",
+        metavar="HH:MM",
+        help="the cut as a time of day on the meeting's day, converted through the pauses",
+    )
+    trim_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually cut. Without it, nothing is written",
     )
 
     delete = subcommands.add_parser(
@@ -1341,6 +1395,24 @@ def _removal_lines(transcription: dict[str, Any]) -> list[str]:
             out.append(
                 f"  noise      {label}: {n} line(s) removed on {entry.get('at') or '?'}"
                 + (f" ({entry['channel']})" if entry.get("channel") else "")
+            )
+    trimmed = transcription.get("trimmed")
+    if isinstance(trimmed, list):
+        # The one removal record that holds no text, by design: a count, a
+        # point and a date are all there is to print, and all there should be.
+        for entry in trimmed:
+            if not isinstance(entry, dict):
+                continue
+            audio = entry.get("audio") or {}
+            out.append(
+                f"  trimmed    at {entry.get('cut') or '?'} ({entry.get('clock') or '?'}) on "
+                f"{entry.get('at') or '?'}: {entry.get('entries_removed', 0)} line(s) removed"
+                + (f", {', '.join(sorted(audio))} cut" if isinstance(audio, dict) and audio else "")
+                + (
+                    f", {', '.join(entry['speakers_removed'])} dropped"
+                    if entry.get("speakers_removed")
+                    else ""
+                )
             )
     return out
 
@@ -2951,7 +3023,18 @@ def promote_warning(config: Config, meeting: Meeting) -> str:
             "No audio left to delete - this only moves the folder, which is the "
             "retry for a promotion that failed to move it the first time."
         )
-    if meeting.status is MeetingStatus.GATE_FAILED:
+    if meeting.status is MeetingStatus.GATE_FAILED and (undiarized := undiarized_channels(meeting)):
+        # The words passed; the speakers did not. The audio is the only thing
+        # that can ever put names on that channel, and a `rerun` once the block
+        # lifts is the repair — promoting is choosing not to have it.
+        lines.append(
+            f"The transcript passed the quality gate, but diarization failed on "
+            f"{', '.join(undiarized)}: every line there is an undifferentiated "
+            f"ME or REMOTE, and only this audio can recover the speakers. "
+            f"`referat rerun {meeting.id}` recovers them; promoting gives them up "
+            f"for good and makes the meeting `transcribed` as it stands."
+        )
+    elif meeting.status is MeetingStatus.GATE_FAILED:
         lines.append(
             "The quality gate was not confident in this transcript. Promoting is "
             "accepting it, so the meeting becomes `transcribed`."
@@ -3579,6 +3662,86 @@ def run_denoise(config: Config, meeting_id: str, speaker: str, *, apply: bool = 
         return 1
     print(f"{meeting.id}: {message}")
     return 0
+
+
+# --- referat trim -----------------------------------------------------------
+
+
+def run_trim(
+    config: Config,
+    meeting_id: str,
+    *,
+    at: str | None,
+    clock: str | None,
+    apply: bool = False,
+) -> int:
+    """`referat trim <id> (--at HH:MM:SS | --clock HH:MM) [--apply]` - end a meeting at a point.
+
+    Fifth in the family of repairs, and the third that deletes whole entries,
+    so it is dry by default and writes `meta.json` first. The rules are
+    :mod:`referat.trim`'s and the operation is :func:`referat.trim.trim`; this
+    prints the plan and `--apply` calls it. The command center's *Trim...* and
+    the transcript pane's *End the meeting before this line...* call the same
+    function behind a modal quoting the same :func:`referat.trim.warning`.
+
+    The dry run prints every line that would go, which is the one place they
+    are ever shown together — `meta.json` will not hold them, by design — so
+    somebody can read the cut before making it.
+    """
+    from referat import trim
+
+    if bool(at) == bool(clock):
+        print("referat trim: give exactly one of --at HH:MM:SS or --clock HH:MM", file=sys.stderr)
+        return 2
+    meeting = _resolve_meeting(config, meeting_id, "trim")
+    if meeting is None:
+        return 1
+    if at:
+        seconds = trim.parse_timestamp(at)
+        if seconds is None:
+            print(f"referat trim: {at!r} is not a timestamp (HH:MM:SS or MM:SS)", file=sys.stderr)
+            return 2
+    else:
+        assert clock
+        seconds, why = trim.clock_to_audio(meeting, clock)
+        if seconds is None:
+            print(f"referat trim: {why}", file=sys.stderr)
+            return 2
+    decided, why = trim.plan(config, meeting, seconds)
+    if decided is None:
+        print(f"referat trim: {why}", file=sys.stderr)
+        return 1
+    if decided.nothing:
+        print(
+            f"{meeting.id}: nothing after {trim_stamp(seconds)} to discard; it already "
+            f"ends at {format_duration(meeting.duration_seconds)}"
+        )
+        return 0
+
+    if not apply:
+        print(f"{meeting.id}:")
+        for line in trim.warning(meeting, decided).split("\n"):
+            print(f"  {line}")
+        if decided.entries:
+            print()
+            for _i, stamp, label, text in decided.entries:
+                print(f"  - [{stamp}] {label}: {text}")
+        print("\n  Dry run. Use --apply to write.")
+        return 0
+
+    done, message = trim.trim(config, meeting.id, seconds)
+    if not done:
+        print(f"referat trim: {message}", file=sys.stderr)
+        return 1
+    print(f"{meeting.id}: {message}")
+    return 0
+
+
+def trim_stamp(seconds: float) -> str:
+    """`HH:MM:SS` for a cut, through the transcript's own formatter."""
+    from referat.transcribe import format_timestamp
+
+    return format_timestamp(seconds)
 
 
 # --- referat delete ---------------------------------------------------------
@@ -4979,6 +5142,24 @@ def run_hotwords(config: Config, as_json: bool = False) -> int:
     return 0
 
 
+def run_probe() -> int:
+    """`referat probe`. Is Smart App Control blocking the transcription stack right now?
+
+    Needs no config: the question is about the venv, not about a meetings
+    folder. The same :func:`referat.sac.probe` the tray runs, so what this
+    prints and what the tray decides on cannot disagree.
+    """
+    from referat import sac
+
+    result = sac.probe()
+    print(result.describe())
+    if result.status == sac.OK:
+        return 0
+    if result.status == sac.BLOCKED:
+        return 2
+    return 1
+
+
 def run_devices(config: Config) -> int:
     """`referat devices`. What is plugged in, and what `[audio]` does with it."""
     import sounddevice as sd
@@ -5089,6 +5270,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         return run_status(as_json=args.as_json)
+    if args.command == "probe":
+        return run_probe()
 
     try:
         config = load_config() if args.command in NEEDS_CONFIG else None
@@ -5141,6 +5324,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "denoise":
         return run_denoise(config, args.meeting_id, args.speaker, apply=args.apply)
+
+    if args.command == "trim":
+        return run_trim(config, args.meeting_id, at=args.at, clock=args.clock, apply=args.apply)
 
     if args.command == "relabel":
         return run_relabel(config, args.meeting_id)

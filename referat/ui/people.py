@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -128,6 +129,16 @@ RENAME_NOTE = (
     "until its next sync. The email is stored and never sent."
 )
 
+MERGE = (
+    "Merge {source} into {target}?\n\n"
+    "{prints} voiceprint(s) move to {target}, and in {meetings} meeting(s) the "
+    "label becomes {short}. {source} is deleted as a record; {target} keeps its "
+    "own id and names.\n\n"
+    "Only for the same person on file twice. Two different people merged are one "
+    "voice to every later meeting, and taking them apart again means forgetting "
+    "both."
+)
+
 FORGET = (
     "Delete {name} and revert every label?\n\n"
     "{prints} voiceprint(s) are deleted outright. In {meetings} transcript(s) the "
@@ -181,6 +192,9 @@ class PeoplePage(QWidget):
 
         self.people = QListWidget()
         self.people.currentItemChanged.connect(self._on_row_changed)
+        # A double-click opens the record, which is what somebody double-clicking
+        # a person expects; the button stays for the keyboard.
+        self.people.itemDoubleClicked.connect(self._on_row_double_clicked)
 
         # Read once and kept: this page rebuilds every list on every refresh, and
         # `icons.glyph` caches on the colour anyway. The *meeting* and *project*
@@ -232,14 +246,21 @@ class PeoplePage(QWidget):
 
         # Between the harmless button and the destructive one, which is the
         # projects page's own order: Rename, Archive, Delete.
-        self.rename_button = QPushButton("Rename...")
+        self.rename_button = QPushButton("Properties...")
         self.rename_button.setAutoDefault(False)
         self.rename_button.clicked.connect(self._on_rename)
+
+        # After Properties and before Forget: it deletes a record, but a record
+        # that was a duplicate, and nothing it held is lost.
+        self.merge_button = QPushButton("Merge into...")
+        self.merge_button.setAutoDefault(False)
+        self.merge_button.clicked.connect(self._on_merge)
 
         title_row = QHBoxLayout()
         title_row.addWidget(self.heading, 1)
         title_row.addWidget(self.actions_button)
         title_row.addWidget(self.rename_button)
+        title_row.addWidget(self.merge_button)
         title_row.addWidget(self.forget_button)
 
         self.prints = QTreeWidget()
@@ -482,6 +503,7 @@ class PeoplePage(QWidget):
         if person is None:
             self.forget_button.setEnabled(False)
             self.rename_button.setEnabled(False)
+            self.merge_button.setEnabled(False)
             self.heading.setText(name or NOTHING_SELECTED)
             # A name the window was handed by a link and nobody answers to. The
             # honest answer, which is also information about whatever said it.
@@ -496,6 +518,7 @@ class PeoplePage(QWidget):
         # follows the same rule: a drifted name has no record to rename.
         self.forget_button.setEnabled(person["in_database"])
         self.rename_button.setEnabled(person["in_database"])
+        self.merge_button.setEnabled(person["in_database"] and not person["is_owner"])
 
         for filing in person["filed_from"]:
             item = QTreeWidgetItem(
@@ -632,6 +655,75 @@ class PeoplePage(QWidget):
         self._selected = None
         self.refresh()
 
+    def _on_row_double_clicked(self, item: QListWidgetItem) -> None:
+        pid = item.data(ID_ROLE)
+        if pid and (person := self._person(str(pid))) is not None and person["in_database"]:
+            self._selected = person["id"]
+            self._on_rename()
+
+    def _on_merge(self) -> None:
+        """Fold this record into another, through the one guarded function.
+
+        A pick from everybody else on file, then a modal saying which record
+        survives — the direction is the one thing a merge can get wrong that
+        :func:`referat.label.merge_person` cannot catch, since both are the same
+        person by assumption.
+        """
+        person = self._person(self._selected)
+        if person is None:
+            return
+        others = [
+            p for p in self._document["people"] if p["in_database"] and p["id"] != person["id"]
+        ]
+        if not others:
+            return
+        choices = [f"{_shown(p)} [{p['id']}]" for p in others]
+        # Namesakes first: a duplicate is usually spelled like the original.
+        order = sorted(
+            range(len(others)),
+            key=lambda i: (
+                others[i]["short"].casefold() != person["short"].casefold(),
+                others[i]["name"].casefold(),
+            ),
+        )
+        choices = [choices[i] for i in order]
+        others = [others[i] for i in order]
+        picked, accepted = QInputDialog.getItem(
+            self,
+            f"Merge {person['name']}",
+            f"{_shown(person)} [{person['id']}] is the same person as:",
+            choices,
+            0,
+            False,
+        )
+        if not accepted:
+            return
+        target = others[choices.index(picked)]
+        answer = QMessageBox.question(
+            self,
+            "Merge people",
+            MERGE.format(
+                source=f"{person['name']} [{person['id']}]",
+                target=f"{target['name']} [{target['id']}]",
+                short=target["short"],
+                prints=person["prints"],
+                meetings=len(person["appears_in"]),
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        merged, message = label.merge_person(self.config, person["id"], target["id"])
+        if not merged:
+            self._complain(message)
+            return
+        log.info("%s", message)
+        self._selected = target["id"]
+        self.refresh()
+        self._fill_detail(self._selected)
+        self._complain(message)
+
     def _on_rename(self) -> None:
         """Change what a person is called, through the one guarded function.
 
@@ -685,7 +777,7 @@ class RenameDialog(QDialog):
 
     def __init__(self, parent: QWidget, person: dict[str, Any]) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Rename {person['name']}")
+        self.setWindowTitle(f"Properties of {person['name']}")
         self.name = QLineEdit(person["name"])
         self.short = QLineEdit(person["short"] if person["short"] != person["name"] else "")
         self.short.setPlaceholderText("blank: the full name")

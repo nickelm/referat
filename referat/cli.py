@@ -683,20 +683,22 @@ def build_parser() -> argparse.ArgumentParser:
 def _add_person_parser(subcommands: argparse._SubParsersAction) -> None:
     """`referat person <verb>`: the record behind a name, and changing it.
 
-    One verb so far, `rename`, because a person is created by `referat label`
-    and deleted by `referat label --forget`, and what was missing was the edit
-    between them. The people themselves are listed by `referat people`.
+    Two verbs, `rename` and `merge`, because a person is created by `referat
+    label` and deleted by `referat label --forget`, and what was missing was the
+    edits between them — including the one for somebody created twice. The
+    people themselves are listed by `referat people`.
     """
     person = subcommands.add_parser(
         "person",
-        help="change what a known person is called",
+        help="change what a known person is called, or merge a duplicate",
         description=(
             "A person is a record with an id that never moves: a full name, a "
             "short name the transcript renders, and an optional email that is "
             "stored and never sent. `referat people` lists them with their ids. "
             "`rename` changes any of the three; a changed short name is relabeled "
             "into every transcript the person appears in and into the "
-            "[[Wikilinks]] of those meetings' notes, and nowhere else."
+            "[[Wikilinks]] of those meetings' notes, and nowhere else. `merge` "
+            "folds a duplicate record into another."
         ),
     )
     verbs = person.add_subparsers(dest="person_command", metavar="<verb>", required=True)
@@ -723,6 +725,20 @@ def _add_person_parser(subcommands: argparse._SubParsersAction) -> None:
     rename.add_argument(
         "--email", metavar="ADDRESS", default=None, help="an address; an empty string clears it"
     )
+
+    merge = verbs.add_parser(
+        "merge",
+        help="fold a duplicate record into another one: the same person on file twice",
+        description=(
+            "Every voiceprint of <who> moves to <into>, every meeting naming <who> "
+            "names <into> instead, and <who> is deleted. <into> keeps its own id, "
+            "full name and short name. When the short names differ the transcript "
+            "labels and the [[Wikilinks]] in those meetings' notes are rewritten, as "
+            "`rename` does. The owner cannot be merged away."
+        ),
+    )
+    merge.add_argument("who", help="the duplicate: an id, a full name or a short name")
+    merge.add_argument("into", help="the record that survives")
 
 
 def _add_actions_parser(subcommands: argparse._SubParsersAction) -> None:
@@ -5355,6 +5371,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "person":
         from referat import label as labelling
 
+        if args.person_command == "merge":
+            return labelling.run_merge(config, args.who, args.into)
         assert args.person_command == "rename"
         return labelling.run_rename(
             config, args.who, name=args.name, short=args.short, email=args.email

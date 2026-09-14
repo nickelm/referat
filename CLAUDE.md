@@ -502,11 +502,22 @@ used to assume kept audio meant a failed gate: `referat list`'s footer and
 meetings the gate refused and `promote --release-audio` for the ones kept on
 purpose.
 
-**Smart App Control is enforcing on this machine**, so unsigned bundled DLLs are
-blocked — PyAV's FFmpeg among them, which made `import faster_whisper` fail.
-Referat therefore decodes its own WAVs (`transcribe.decode_wav`) and stubs `av`
-out. Turning Smart App Control off is a one-way system-wide change and is the
-user's call, not Referat's.
+**Smart App Control was enforcing on this machine until 2026-09-14**, so
+unsigned bundled DLLs were blocked — PyAV's FFmpeg among them, which made
+`import faster_whisper` fail. Referat therefore decodes its own WAVs
+(`transcribe.decode_wav`) and stubs `av` out. Turning it off was the user's call
+and not Referat's, and they made it on 2026-09-14, the morning a third window in
+two weeks refused scipy's `_propack` under diarization; `referat probe` was clean
+minutes later and `VerifiedAndReputablePolicyState` reads `0`.
+
+**Everything below this paragraph about SAC stays in the code, and is written in
+the past tense only where it describes this machine.** The stubs, the numpy
+resampler, `sac.py`, the gate keeping undiarized audio and `_recover_blocked` cost
+nothing while nothing is blocked, and they are the difference between a delay and
+a loss on any machine where SAC is on — including this one, if it is ever turned
+back on. Do not read "SAC is off" as licence to put scipy back on the path from a
+WAV to a transcript; the rule stated below is about unsigned native code, and SAC
+was only the thing that enforced it.
 
 `torchcodec`, which `pyannote.audio` pulls in, bundles FFmpeg the same way, and
 it takes **two** measures rather than one. Pyannote reaches for a *decoder* only
@@ -625,7 +636,7 @@ which reads its documents by calling the same functions rather than by spawning:
 `config`, `list`, `show <id>`,
 `transcript <id>`, `rerun <id>`,
 `label <id>`, `status`, `probe`,
-`devices`, `hotwords`, `people`, `person rename <id>`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
+`devices`, `hotwords`, `people`, `person rename <id>`, `person merge <who> <into>`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
 `project <verb>`, `tag`, `untag`, `state`, `recap <project-id>`,
 `promote <id>`,
 `reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `denoise <id> --speaker
@@ -1302,7 +1313,28 @@ Prose still using the old name surfaces on the people page as a name nothing is
 filed under, which is the safety net either way. A rewritten note drops a
 `synced` meeting to `notes_written` from the function that *knows* the notes
 changed, as `cli.set_notes_written` does, so the next sync re-renders the block;
-a Google Doc's own prose is never reached into.
+a Google Doc's own prose is never reached into. The people page's button reads
+*Properties…* since 2026-09-14, and double-clicking a person opens the same
+dialog.
+
+**Merging is for one person on file twice — 2026-09-14.** An id per record means
+the same person can be created twice, and did: `yvonne` named in one meeting,
+`yvonne-jansen` typed as a full name in another. That is worse than untidy,
+because `voices.match` compares **ids**: two records holding one voice are each
+other's runner-up, so the margin rule refuses exactly the match both prints
+exist to make. `label.merge_person` is the eleventh guarded function, `referat
+person merge <who> <into>` printed and *Merge into…* on the people page in
+process. `<into>` survives with its own id and names — taking `<who>`'s email
+only when it has none — every print moves, and every meeting naming `<who>` in
+`speaker_names`, the per-channel `name` or a `match.name` (near-misses included)
+names `<into>` instead; differing short names are relabeled and wikilinked
+through the same two functions `rename_person` uses. It refuses merging somebody
+into themself, merging the **owner** away (merge the other record into the owner
+instead), and a short name that would put two people behind one label in a
+meeting. **The meetings are written before the database**, the reverse of
+`apply_name`: meetings first leaves `<who>` on file with nothing pointing at it,
+and running the same merge again finishes it. The direction is the one mistake
+the function cannot catch, which is why the window's modal names the survivor.
 
 **Two refusals hold the transcript honest.** A short name is the whole of a
 label, so two people one file calls `Anna` are one label and every later edit
@@ -1806,7 +1838,7 @@ functions the CLI calls — `cli.list_document`, `cli.show_document`,
 `cli.doc_candidates`, `audio_state`,
 `meeting.format_duration`, `index.meeting_title`, `voices.unknown_speakers`,
 `label.label_document`, `label.name_speaker`, `label.forget_person`,
-`label.rename_person` — and spawning a subprocess of its
+`label.rename_person`, `label.merge_person` — and spawning a subprocess of its
 own CLI would buy nothing
 but an interpreter start per refresh.
 
@@ -2686,8 +2718,14 @@ disappeared, and nothing disappears here.
 
 ## Commands
 
-**Neither `uv` nor the interpreter it provisioned runs on this machine.** Smart
-App Control blocks unsigned binaries whose cloud reputation does not vouch for
+**Smart App Control has been off on this machine since 2026-09-14**, which is
+what the rest of this section was written against; `uv` has **not** been
+re-tried since, and the signed-Python venv below is still the one in use and
+still works. Until somebody runs `uv sync` here and it succeeds, keep using the
+interpreter below — and when it does, this section is the thing to rewrite.
+
+**Neither `uv` nor the interpreter it provisioned ran on this machine while SAC
+was on.** Smart App Control blocks unsigned binaries whose cloud reputation does not vouch for
 them, and it took uv 0.12.6 on 2026-08-31 after a week of working. It did not
 stop there: the venv's own CPython was a python-build-standalone build, unsigned
 file by file, and SAC went on to block `_ctypes.pyd` inside it — which kills
@@ -2729,8 +2767,8 @@ rebuilding the venv onto a signed interpreter without re-downloading the ~5 GB o
 wheels — and the repair for a `.venv` a sync client has eaten.
 
 The `uv sync` / `uv run referat` forms in the git history and in SETUP.md are how
-this is meant to work, and would work on a machine where SAC is off. Do not
-reach for them here.
+this is meant to work, and should work now that SAC is off — which is untested,
+so do not reach for them here until it has been.
 
 Configuration lives in repo-root `config.toml`, gitignored and created from
 `config.example.toml` on first run. Override the location with `REFERAT_CONFIG`.

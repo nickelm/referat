@@ -3297,6 +3297,25 @@ argument transfers line for line.
       no `embedding` and no `voices` path in the document. The table prints ID
       and SHORT and deliberately not the email — a table is what gets pasted
       into a message
+- [x] **Merging, for one person on file twice** (2026-09-14). Ids made it
+      possible to create somebody twice, and `yvonne`/`yvonne-jansen` and
+      `duosi`/`duosi-dai` were. Two records of one voice are each other's
+      runner-up in `voices.match`, so the margin refuses the match. `referat
+      person merge <who> <into>` and *Merge into…* on the people page, both
+      through `label.merge_person`; fixture section 6b. Both real duplicates
+      merged
+- [x] **Double-clicking a person opens the record**, and *Rename…* is
+      *Properties…* (2026-09-14)
+- [ ] **Nothing stops a duplicate from being created.** `_file` makes a new
+      record whenever the typed text resolves to nobody, so `Yvonne Jansen`
+      typed while `Yvonne` is filed under the id `yvonne` with no full name
+      becomes a second person. A hint in the speaker dialog when a new full
+      name shares a short name with somebody on file would catch most of it;
+      it must stay a hint and never a silent resolve
+- [ ] **Merge the other way is unbuilt, and should stay so until needed.** Two
+      *different* people merged are one voice to every later meeting, and the
+      only way back is forgetting both. A split would need per-print provenance
+      that `Voiceprint` already has, so it is possible, just not asked for
 
 #### Email, and the one rule it is easy to break
 
@@ -4617,6 +4636,19 @@ deferred.
       notes is the sequence
 
 ## Surfaced later
+### Smart App Control turned off (2026-09-14)
+
+A third block in two weeks, scipy's `_propack` under diarization, with no
+meeting waiting. The user turned SAC off; `referat probe` clean minutes later.
+
+- [x] CLAUDE.md and SETUP.md say SAC *was* enforcing, dated; no SAC code removed
+- [ ] **Re-try `uv sync` on this machine** now that nothing should block it, and
+      if it works rewrite CLAUDE.md's Commands section and SETUP.md section 2
+      around it rather than around the signed-Python venv
+- [ ] **Find out whether this Windows build can turn SAC back on** without a
+      reinstall, and write the answer down with its date — every doc here says
+      one-way, which was true once and may not be now
+
 ### A tray that had exited still refused the next one (2026-09-11)
 
 Quit at 08:31:01, three restarts refused as *already running* through

@@ -34,7 +34,14 @@ update, not a Referat problem.
 
 ## 2. Python 3.12 and uv
 
-> **On this machine, read "If Smart App Control blocks uv" below first.** Both
+> **Smart App Control was turned off on this machine on 2026-09-14**, after a
+> third block on diarization in two weeks (`_propack`, that morning). `referat
+> probe` came back clean minutes later. Nothing below was undone: the venv is
+> still the signed-Python one and still works, and `uv` has not been re-tried
+> since. What follows is kept because it is what happens on a machine where SAC
+> is on.
+>
+> **On a machine where it is on, read "If Smart App Control blocks uv" below first.** Both
 > `uv.exe` and the interpreter uv provisions are unsigned, and Smart App Control
 > blocked both on 2026-08-31 — then gave `uv` back hours later, unchanged. The
 > venv here is built on a *signed* Python for that reason and is not the one
@@ -254,9 +261,9 @@ reaches a `.pyd` nobody on this machine has run before. That is why the
 resampler was moved off scipy (section 5) rather than wrapped in a retry: the
 window is unpredictable and lands wherever it lands.
 
-Turning Smart App Control off would also fix all of this. It is a one-way,
-system-wide change that Windows cannot undo without a reinstall, and it is your
-call, not this project's: see section 10.
+Turning Smart App Control off would also fix all of this. It is a system-wide
+change, historically one-way without a reinstall, and it is your call, not this
+project's: see section 10. On this machine it was made on 2026-09-14.
 
 ### If the checkout lives in Dropbox, the venv will be eaten
 
@@ -711,8 +718,17 @@ is no per-file allow, so Referat outlives it instead:
   `referat probe` is clear. `referat promote <id> --release-audio` is the
   off-ramp if you would rather have the meeting as it stands.
 
-Turning Smart App Control off is a **one-way** change — Windows cannot re-enable
-it without a reinstall — so it is documented here and not recommended.
+Turning Smart App Control off was long documented here as one-way — Windows
+could not re-enable it without a reinstall — and not recommended. **It was
+turned off on this machine on 2026-09-14** anyway, after 2026-09-01, 2026-09-10
+and that morning's `_propack` block made a block a fortnightly event rather
+than an exception; `referat probe` was clean minutes later, and the registry's
+`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState`
+reads `0`. Whether a current Windows 11 build can switch it back on without a
+reinstall was not checked; do check before relying on it. **None of the
+machinery above was removed**: the stubs, the numpy resampler, the probe and
+the recovery cost nothing while nothing is blocked, and they are what keeps a
+machine where SAC is on, or comes back on, from losing speakers.
 
 ---
 

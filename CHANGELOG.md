@@ -2,6 +2,44 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-14 — Smart App Control off, and a person on file twice
+
+**Smart App Control is off.** `referat probe` that morning named scipy's
+`_propack` as blocked under diarization — the third window in two weeks, after
+2026-09-01 and 2026-09-10 — and no meeting was waiting on a rerun. The user
+turned SAC off; the probe was clean minutes later and
+`VerifiedAndReputablePolicyState` reads `0`.
+
+- CLAUDE.md and SETUP.md now say SAC *was* enforcing and date the change. No
+  SAC code was removed: the `av`/`torchcodec` stubs, the numpy resampler,
+  `sac.py`, the gate and `_recover_blocked` cost nothing while nothing is
+  blocked, and they still matter anywhere SAC is on.
+- `uv` has not been re-tried. The Commands section still says to use the
+  signed-Python venv until `uv sync` has actually worked here.
+
+**`referat person merge <who> <into>`**, because there was no way to fold
+duplicate records together. `yvonne`/`yvonne-jansen` and `duosi`/`duosi-dai`
+were each one person under two ids. That is worse than untidy: `voices.match`
+compares ids, so the two records were each other's runner-up, and the margin
+rule would refuse the very match both prints exist for.
+
+- `label.merge_person` is the guarded operation. Prints move to `<into>`, every
+  `speaker_names` value, per-channel `name` and `match.name` resolving to `<who>`
+  is rewritten, differing short names are relabeled and wikilinked as `rename`
+  does, and `<who>` is deleted. It refuses merging somebody into themself,
+  merging the owner away, and a short-name collision inside a meeting. Meetings
+  are written before the database, so an interrupted merge is finished by
+  running it again.
+- People page: *Rename…* is now *Properties…*, double-clicking a person opens
+  it, and *Merge into…* picks the survivor (namesakes listed first) behind a
+  modal that names which record survives.
+- `scripts/person_fixture.py` gained a merge section: both refusals, the
+  collision refusal leaving nothing moved, prints and labels and wikilinks and a
+  near-miss match following, and the directory seeing one person.
+- Run on the real database: `duosi` into `duosi-dai` (5 meetings updated) and
+  `yvonne` into `yvonne-jansen` (4), each survivor now holding 2 prints. The
+  short names matched, so no transcript line changed. 33 names remain.
+
 ## 2026-09-11 — A tray that had exited still refused the next one
 
 **What happened.** The tray was quit at 08:31:01 (`shutting down`, `hotkeys

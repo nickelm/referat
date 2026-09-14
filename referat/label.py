@@ -1160,3 +1160,155 @@ def run_rename(
         return 1
     print(message)
     return 0
+
+
+# --- Merging ----------------------------------------------------------------
+
+
+def merge_person(config: Config, who: str, into: str) -> tuple[bool, str]:
+    """File one person's record under another's, everywhere. The only implementation.
+
+    For the same person on file twice — `yvonne` named in one meeting and
+    `yvonne-jansen` typed as a full name in another — which is not merely untidy:
+    :func:`referat.voices.match` compares *ids*, so two records holding one voice
+    are each other's runner-up, and the margin rule refuses the very match both
+    prints exist to make. `referat person merge <who> <into>` is this printed and
+    the people page's *Merge into…* is this in process.
+
+    **`into` survives and `who` does not.** Every print of `who` moves across,
+    `into` keeps its own full name, short name and id, and takes `who`'s email
+    only when it has none, since an address is the one field a merge could
+    otherwise lose. In every meeting whose `speaker_names` carries `who` the
+    value becomes `into`'s id, the per-channel `name` and `match.name` follow —
+    near-misses included, since the record says which person a voice scored
+    against — and when the two short names differ the labels and the
+    `[[Wikilinks]]` are rewritten exactly as :func:`rename_person` rewrites them,
+    through the same two functions and with a `synced` meeting dropped to
+    `notes_written` for the same reason.
+
+    **Refused**: merging somebody into themself; merging the owner away, since
+    `[speakers].owner_name` resolves to a record and the record it named would
+    be gone — merge the other one into the owner instead; and a short name that
+    would put two people behind one label in a meeting, the rule
+    :func:`referat.voices.namesake_in` holds everywhere else.
+
+    **The meetings are written before the database**, the reverse of
+    :func:`apply_name` and for the reason that function gives: order the writes
+    so an interruption leaves the recoverable state. Nothing here is lost either
+    way, but a database written first would leave meetings naming an id nobody
+    answers to, while meetings written first leave `who` on file with nothing
+    pointing at it — and running the same merge again finishes the job.
+    """
+    db, source, complaint = _lookup(config, who)
+    if source is None:
+        return False, complaint
+    target, complaint = db.resolve(into)
+    if complaint:
+        return False, complaint
+    if target is None:
+        return False, f"{into} is not in the known-voices database"
+    if source.id == target.id:
+        return False, "a person cannot be merged into themself"
+    owner = db.owner(config)
+    if owner is not None and owner.id == source.id:
+        return False, (
+            f"{source.name} ({source.id}) is the owner [speakers].owner_name resolves to; "
+            f"merge {target.id} into {source.id} instead"
+        )
+
+    meetings = [
+        m
+        for m in load_meetings(config)
+        if any(voices.person_id(v) == source.id for v in m.speaker_names.values())
+        or _match_names(m, source.id)
+    ]
+    for meeting in meetings:
+        other = voices.namesake_in(meeting, db, target)
+        if other is not None and other.id != source.id:
+            return False, (
+                f"{meeting.id} has {other.name} ({other.id}) in it, whom its transcript "
+                f"already calls {other.short}; merged, {source.name} would be called "
+                f"{target.short} there too, and two people with one label cannot be "
+                f"told apart in one file"
+            )
+
+    relabeled = notes_rewritten = 0
+    for meeting in meetings:
+        spellings = {source.short} | {
+            value
+            for value in meeting.speaker_names.values()
+            if voices.person_id(value) == source.id
+        }
+        spellings.discard(target.short)
+        if spellings:
+            relabeled += relabel_transcript(
+                meeting.transcript_path, {old: target.short for old in spellings}
+            )
+        for label, value in list(meeting.speaker_names.items()):
+            if voices.person_id(value) == source.id:
+                meeting.speaker_names[label] = target.id
+        for entry in _clusters(meeting):
+            if voices.person_id(str(entry.get("name", ""))) == source.id and entry.get("name"):
+                entry["name"] = target.id
+            match = entry.get("match")
+            if isinstance(match, dict) and voices.person_id(str(match.get("name", ""))) == source.id:
+                match["name"] = target.id
+        if spellings and _rewrite_wikilinks(meeting, spellings, target.short):
+            notes_rewritten += 1
+            if meeting.status is MeetingStatus.SYNCED:
+                meeting.status = MeetingStatus.NOTES_WRITTEN
+        meeting.save()
+        log.info("%s: %s is %s now", meeting.id, source.id, target.id)
+
+    moved = len(source.prints)
+    target.prints.extend(source.prints)
+    if not target.email and source.email:
+        target.email = source.email
+    db.forget(source.id)
+    db.save()
+    index.write_index(config)
+
+    said = [
+        f"{source.name} ({source.id}) merged into {target.name} ({target.id}): "
+        f"{moved} voiceprint(s) moved, {target.id} now has {len(target.prints)}, "
+        f"{len(meetings)} meeting(s) updated"
+    ]
+    if relabeled or notes_rewritten:
+        said.append(
+            f"{relabeled} transcript line(s) relabeled to {target.short}; "
+            f"[[Wikilinks]] rewritten in {notes_rewritten} note(s), prose left alone"
+        )
+        if notes_rewritten:
+            said.append("a linked Google Doc holds the old name until its next sync")
+    return True, ". ".join(said) + "."
+
+
+def _clusters(meeting: Meeting) -> list[dict[str, Any]]:
+    """Every per-channel `speakers` entry in `meta.json`, raw, for editing in place."""
+    return [
+        entry
+        for channel in (meeting.transcription.get("channels") or {}).values()
+        if isinstance(channel, dict)
+        for entry in (channel.get("speakers") or {}).values()
+        if isinstance(entry, dict)
+    ]
+
+
+def _match_names(meeting: Meeting, pid: str) -> bool:
+    """Whether any cluster's stored `name` or `match.name` resolves to `pid`."""
+    for entry in _clusters(meeting):
+        match = entry.get("match")
+        names = [entry.get("name"), match.get("name") if isinstance(match, dict) else None]
+        if any(n and voices.person_id(str(n)) == pid for n in names):
+            return True
+    return False
+
+
+def run_merge(config: Config, who: str, into: str) -> int:
+    """`referat person merge <who> <into>` — one line of dispatch."""
+    merged, message = merge_person(config, who, into)
+    if not merged:
+        print(f"referat person: {message}", file=sys.stderr)
+        return 1
+    print(message)
+    return 0

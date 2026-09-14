@@ -243,6 +243,44 @@ def main() -> int:
     ok, message = noise.mark_noise(config, "2026-01-01_0900", "SPEAKER_01")
     check("noise refuses a named cluster and names them through the database", not ok and "Niklas" in message and "--forget niklas" in message, message[:120])
 
+    # --- 6b. Merging a duplicate -------------------------------------------------------
+    # Left standing: niklas (owner), anna called Annika in 01, anna-lind called
+    # Anna in 03. A near-miss match on 03's SPEAKER_03 names `anna`.
+    print("\n=== merging ===")
+    m3_meta = meetings / "2026-01-03_0900" / paths.META_JSON
+    raw = json.loads(m3_meta.read_text(encoding="utf-8"))
+    raw["transcription"]["channels"]["mic"]["speakers"]["SPEAKER_03"]["match"] = {
+        "name": "anna", "score": 0.6, "runner_up": 0.5, "accepted": False,
+    }
+    m3_meta.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    ok, message = label.merge_person(config, "anna", "anna")
+    check("into themself is refused", not ok and "themself" in message, message)
+    ok, message = label.merge_person(config, "niklas", "anna")
+    check("the owner cannot be merged away", not ok and "owner" in message, message)
+    db = voices.VoicesDB.load(config)
+    db.new_person("Nils Holm", "Niklas")
+    db.save()
+    ok, message = label.merge_person(config, "anna", "nils-holm")
+    check("a short name colliding inside a meeting is refused", not ok and "2026-01-01_0900" in message, message[:90])
+    check("and nothing moved", voices.VoicesDB.load(config).get("anna") is not None)
+    ok, message = label.merge_person(config, "anna", "anna-lind")
+    check("merge succeeds", ok, message)
+    db = voices.VoicesDB.load(config)
+    check("the duplicate is gone", db.get("anna") is None)
+    check("its prints moved", len(db.get("anna-lind").prints) == 2, str(len(db.get("anna-lind").prints)))
+    check("the survivor keeps its names", (db.get("anna-lind").name, db.get("anna-lind").short) == ("Anna Lind", "Anna"))
+    m1 = next(m for m in load_meetings(config) if m.id == "2026-01-01_0900")
+    check("speaker_names points at the survivor", m1.speaker_names.get("SPEAKER_02") == "anna-lind", str(m1.speaker_names))
+    check("the per-channel name follows", m1.transcription["channels"]["mic"]["speakers"]["SPEAKER_02"].get("name") == "anna-lind")
+    t1 = (meetings / "2026-01-01_0900" / paths.TRANSCRIPT_MD).read_text(encoding="utf-8")
+    check("labels take the survivor's short name", "[00:00:05] Anna: Morning." in t1 and "Annika:" not in t1, t1[:160])
+    n1 = (meetings / "2026-01-01_0900" / paths.NOTES_MD).read_text(encoding="utf-8")
+    check("[[Wikilinks]] follow", "[[Anna]]" in n1 and "[[Annika]]" not in n1, n1)
+    m3 = next(m for m in load_meetings(config) if m.id == "2026-01-03_0900")
+    check("a near-miss match follows too", m3.transcription["channels"]["mic"]["speakers"]["SPEAKER_03"]["match"]["name"] == "anna-lind")
+    directory = {p.id: p for p in people.directory(config)}
+    check("the directory sees one person in both meetings", directory["anna-lind"].appears_in == ["2026-01-01_0900", "2026-01-03_0900"], str(directory["anna-lind"].appears_in))
+
     # --- 7. A collision on load is refused, not merged -------------------------------------
     print("\n=== a version-1 file with two names that slugify alike ===")
     clash = root / "clash"

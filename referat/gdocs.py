@@ -243,9 +243,14 @@ def _consent(config: Config, token_path: Any, reason: str = "") -> Any:
             "there -- SETUP.md section 13 has the walkthrough."
         )
     if not sys.stdin or not sys.stdin.isatty():
+        # `reason` is carried into this sentence too, because the command center
+        # is exactly where a weekly expiry is met: it used to be dropped here, so
+        # a window said "consent once" to somebody who had, and pointed them at
+        # `link-doc`, which is a verb about a document rather than about a token.
         raise GoogleError(
-            "Google consent has to be given once at a terminal. Run "
-            "`referat project link-doc <project-id>` from a prompt, and every later "
+            (f"You have consented before, and {reason} " if reason else "")
+            + "Google consent has to be given at a terminal: run "
+            "`referat project sync <project-id>` from a prompt, and every later "
             "sync -- from the command center included -- will use the stored token."
         )
 
@@ -276,7 +281,7 @@ def _consent(config: Config, token_path: Any, reason: str = "") -> Any:
         # which is what a piped or captured stdin looks like. Nothing was saved.
         raise GoogleError(
             "there is no terminal to read the authorization code from. Run "
-            "`referat project link-doc <project-id>` directly at a prompt -- once. "
+            "`referat project sync <project-id>` directly at a prompt. "
             "Every later sync uses the token it stores."
         ) from None
     code = _code_from(pasted)

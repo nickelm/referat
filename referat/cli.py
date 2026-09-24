@@ -2849,6 +2849,7 @@ def apply_tags(
     """
     add, remove = list(add), list(remove)
     archived: set[str] = set()
+    db = None
     if add:
         db = projects.ProjectsDB.load(config)
         if db.unreadable:
@@ -2867,6 +2868,17 @@ def apply_tags(
 
     added = projects.add_tags(meeting, add) if add else []
     removed = projects.remove_tags(meeting, remove) if remove else []
+    if (
+        added
+        and db is not None
+        and meeting.status is MeetingStatus.SYNCED
+        and not digest.is_synced(meeting, db)
+    ):
+        # `synced` means every doc of every tag holds the current notes, and a
+        # tag just added whose project is linked has a doc that holds nothing
+        # yet. Dropped here for the reason `set_notes_written` drops it: this is
+        # the function that knows the set of docs just changed.
+        meeting.status = MeetingStatus.NOTES_WRITTEN
     if added or removed:
         meeting.save()
     # Keyed on what actually changed rather than on what was asked for, so
@@ -2911,12 +2923,18 @@ def _tag_lines(
 
 
 def run_tag(config: Config, meeting_id: str, project_ids: list[str]) -> int:
-    """`referat tag <meeting-id> <project-id>...`. Idempotent, and several at a time."""
+    """`referat tag <meeting-id> <project-id>...`. Idempotent, and several at a time.
+
+    Then the auto-sync a cleanup pass would have run, for a meeting whose notes
+    were written before it carried the tag -- see :func:`auto_sync_tagged`.
+    """
     outcome = apply_tags(config, meeting_id, add=project_ids)
     if not outcome.ok:
         print(f"referat tag: {outcome.message}", file=sys.stderr)
         return 1
     print(outcome.message)
+    for line in auto_sync_tagged(config, meeting_id):
+        print(f"  {line}")
     return 0
 
 
@@ -4170,8 +4188,73 @@ def set_auto_sync(config: Config, pid: str, auto: bool) -> Outcome:
     )
 
 
-def auto_sync_meeting(
+def tag_sync_pending(config: Config, meeting_id: str) -> list[str]:
+    """The auto-syncing projects this meeting's notes have not reached yet. No network.
+
+    The question tagging asks after the fact. Auto-sync used to run only as the
+    third step of a cleanup pass, so a meeting tagged *after* its notes were
+    written reached no document until somebody pressed *Sync now* -- which is
+    the doc going stale that `Project.auto_sync` exists to prevent, and it was
+    met on 2026-09-15. Linking the doc and applying the tag are the two decisions
+    auto-sync is the standing consequence of; the order they came in is not a
+    third.
+
+    Only for a meeting at `notes_written` or `synced`, read off the lifecycle
+    and never off whether `notes.md` exists: a `transcribed` meeting with a note
+    beside it is one whose note describes a transcript that no longer exists,
+    and pushing that is the one thing a re-cleanup is for. A project whose every
+    doc already holds the current sha is left out, so a picker that changed
+    nothing costs nothing.
+
+    Reads `meta.json` and `projects.json` and nothing else, which is what lets
+    the window ask it on the GUI thread before queueing anything at all.
+    """
+    meeting, _why = resolve_meeting(config, meeting_id)
+    if meeting is None or not meeting.tags:
+        return []
+    if meeting.status not in (MeetingStatus.NOTES_WRITTEN, MeetingStatus.SYNCED):
+        return []
+    sha = digest.notes_sha256(meeting.dir / paths.NOTES_MD)
+    if not sha:
+        return []
+    db = projects.ProjectsDB.load(config)
+    if db.unreadable:
+        return []
+    return [
+        pid
+        for pid in meeting.tags
+        if (project := db.projects.get(pid)) is not None
+        and project.docs
+        and project.auto_sync
+        and any(
+            (meeting.digest.get(doc.gdoc_id) or {}).get("notes_sha256") != sha
+            for doc in project.docs
+        )
+    ]
+
+
+def auto_sync_tagged(
     config: Config, meeting_id: str, *, progress: Callable[[str], None] | None = None
+) -> list[str]:
+    """Push a tagged meeting into the auto-syncing projects it has not reached.
+
+    :func:`tag_sync_pending` decides and :func:`auto_sync_meeting` pushes, under
+    that function's rule: it never raises and never fails what called it, since
+    the tag is applied whatever Google says. Asked again here rather than handed
+    the answer, because the window runs this later on its queue's worker.
+    """
+    pending = tag_sync_pending(config, meeting_id)
+    if not pending:
+        return []
+    return auto_sync_meeting(config, meeting_id, only=pending, progress=progress)
+
+
+def auto_sync_meeting(
+    config: Config,
+    meeting_id: str,
+    *,
+    only: Sequence[str] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> list[str]:
     """Push one meeting into every linked, auto-syncing project it carries.
 
@@ -4203,6 +4286,8 @@ def auto_sync_meeting(
 
     lines: list[str] = []
     for pid in meeting.tags:
+        if only is not None and pid not in only:
+            continue
         project = db.projects.get(pid)
         # An orphaned tag has no project and so no documents; an archived one is
         # synced exactly like a live one, because archiving hides a project from

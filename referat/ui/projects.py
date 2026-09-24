@@ -87,6 +87,7 @@ from referat.config import Config
 from referat.projects import clean_terms
 from referat.ui import docs as docs_dialog
 from referat.ui import icons, lists, viewer
+from referat.ui.recap import RecapWindow
 
 log = logging.getLogger(__name__)
 
@@ -408,10 +409,22 @@ class ProjectsPage(QWidget):
         self.recap_button = QPushButton(RECAP)
         self.recap_button.setAutoDefault(False)
         self.recap_button.clicked.connect(self._on_recap)
+        # Reading comes before rewriting in the row, as *Open in browser* comes
+        # before *Link doc...* in the documents row above.
+        self.recap_open_button = QPushButton("Open larger")
+        self.recap_open_button.setToolTip("Read this recap in a window of its own")
+        self.recap_open_button.setAutoDefault(False)
+        self.recap_open_button.setEnabled(False)
+        self.recap_open_button.clicked.connect(self._on_open_recap)
+        self._recap_window: RecapWindow | None = None
+        """Made on first use and kept, so its size and zoom outlast a close."""
+        self._recap_shown: tuple[str, str] = ("", "")
+        """`(rendered, source)` Markdown of the recap on the pane, for the window."""
         recap_row = QHBoxLayout()
         recap_row.setContentsMargins(0, 0, 0, 0)
         recap_row.addWidget(QLabel("Recap"))
         recap_row.addWidget(self.recap_state, 1)
+        recap_row.addWidget(self.recap_open_button)
         recap_row.addWidget(self.recap_button)
 
         # The same two settings the dashboard's day pane runs under, for the
@@ -751,6 +764,8 @@ class ProjectsPage(QWidget):
                 self.recap_state.clear()
                 self.recap_text.setMarkdown("")
                 self.recap_button.setEnabled(False)
+                self._recap_shown = ("", "")
+                self.recap_open_button.setEnabled(False)
                 self.detail.setEnabled(False)
                 return
             self.detail.setEnabled(True)
@@ -1006,6 +1021,7 @@ class ProjectsPage(QWidget):
         document carries the recap's text — and a document it cannot get is a
         sentence rather than an empty pane.
         """
+        self._recap_shown = ("", "")
         try:
             document = cli.recap_document(self.config, project["id"])
         except Exception:
@@ -1013,6 +1029,7 @@ class ProjectsPage(QWidget):
             self.recap_state.setText("Could not read the recap - see the log.")
             self.recap_text.setMarkdown("")
             self.recap_button.setEnabled(False)
+            self._refresh_recap_window(project)
             return
         noted = [m for m in document["series"] if m["notes"]]
         if document["complaint"]:
@@ -1024,7 +1041,8 @@ class ProjectsPage(QWidget):
                 RECAP_NONE if noted else (RECAP_NO_NOTES if document["series"] else RECAP_UNTAGGED)
             )
         else:
-            self.recap_text.setMarkdown(recap_markdown(document))
+            self._recap_shown = (recap_markdown(document), document.get("body", ""))
+            self.recap_text.setMarkdown(self._recap_shown[0])
             words = dict(
                 generated=document["generated"][:16].replace("T", " ") or "an unknown time",
                 meetings=_meetings(len(document["meetings"])),
@@ -1044,6 +1062,64 @@ class ProjectsPage(QWidget):
             exists=document["exists"] and not document["complaint"],
             can_write=bool(noted) and not document["complaint"],
         )
+        self._refresh_recap_window(project)
+
+    def _refresh_recap_window(self, project: dict[str, Any]) -> None:
+        """Enable *Open larger*, and redraw the window if it shows this project.
+
+        Called last in :meth:`_fill_recap`, after the state line has its final
+        words — *Queued* included — so the window says what the pane says
+        rather than a second reading of the same document.
+        """
+        self.recap_open_button.setEnabled(bool(self._recap_shown[0]))
+        window = self._recap_window
+        if window is None or window.project_id != project["id"] or not window.isVisible():
+            return
+        if not self._recap_shown[0]:
+            # Gone or unreadable since it was opened: the window has nothing to
+            # show, and a stale copy of a recap is worse than none.
+            window.close()
+            return
+        window.show_recap(
+            project["id"],
+            project.get("name", project["id"]),
+            self.recap_state.text(),
+            *self._recap_shown,
+            reasons=self.recap_state.toolTip(),
+        )
+
+    def _on_open_recap(self) -> None:
+        """Open the selected project's recap in its own window, or bring it up."""
+        project = self._project(self._selected)
+        if project is None or not self._recap_shown[0]:
+            return
+        if self._recap_window is None:
+            self._recap_window = RecapWindow(self._on_recap_window_anchor)
+            # Parentless, so nothing else closes it with this page.
+            self.destroyed.connect(self._recap_window.close)
+        self._recap_window.show_recap(
+            project["id"],
+            project.get("name", project["id"]),
+            self.recap_state.text(),
+            *self._recap_shown,
+            reasons=self.recap_state.toolTip(),
+        )
+        self._recap_window.present()
+
+    def _on_recap_window_anchor(self, url: QUrl) -> None:
+        """A link in the recap window: the pane's dispatch, then this window forward.
+
+        Forward because the meeting or person it opens is shown *here*, and the
+        recap window is a separate top-level that may be covering it. An
+        external link goes to the browser and leaves both where they are.
+        """
+        self._on_recap_anchor(url)
+        if viewer.parse_person(url) is not None or viewer.parse_meeting(url) is not None:
+            window = self.window()
+            if window.isMinimized():
+                window.showNormal()
+            window.raise_()
+            window.activateWindow()
 
     def _refresh_recap(self) -> None:
         """Redraw the recap alone, from the project just re-read. See :meth:`refresh`."""

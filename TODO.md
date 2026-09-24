@@ -1599,6 +1599,33 @@ checkbox per-project to turn on auto-sync?"* Built the same day.
       checkbox that writes immediately rather than waiting for Save -- it is a
       switch, not a field somebody is part-way through typing
 
+### Tagged after the notes, and nothing synced (2026-09-15)
+
+`2026-09-15_1100` got its notes at 14:08 and was tagged
+`anytime-anywhere-analytics` at 14:10; the *AI Meeting Notes* tab was never
+touched, and *Sync now* did nothing visible either. Two causes, independent.
+
+- [x] **Auto-sync ran only as the third step of a cleanup pass**, so a tag applied
+      afterwards reached no document. `cli.tag_sync_pending` (no network: the
+      auto-syncing projects whose docs lack this meeting's current notes sha, for
+      a meeting at `notes_written` or `synced`) and `cli.auto_sync_tagged` over
+      it; `referat tag` runs it, and the window queues it on the claude worker as
+      a `sync` job after the picker is applied, where cleanup's auto-sync already
+      runs
+- [x] **Adding a linked tag to a `synced` meeting drops it to `notes_written`** in
+      `apply_tags`: the set of docs just grew, so `synced` stopped being true
+- [x] **The Google token had expired** — linked 2026-09-08, rejected 2026-09-15,
+      the OAuth app's seven-day *Testing* expiry. The window's refusal dropped
+      that reason and said to run `link-doc` "once"; it now carries the reason
+      and names `referat project sync <project-id>` at a prompt
+- [ ] **Re-consent at a terminal**: `referat project sync anytime-anywhere-analytics`
+      — which also pushes `2026-09-15_1100`
+- [ ] **Set the OAuth app's publishing status to *In production*** in the Google
+      Cloud console, or this recurs every seven days
+- [ ] **A failed *Sync now* is easy to miss.** It lands in the projects page's
+      message line; consider `App.notify` for a failed sync as well
+- [ ] Drive the tag-triggered sync end to end in the window once the token works
+
 ### Left open
 
 - [ ] **Auto-sync has not yet run off a real `/cleanup` pass.** It was driven by
@@ -4523,6 +4550,17 @@ wait for.
       is what says it is time. **Nothing in `recaps/` leaves the machine** — it
       is derived from notes but it is not notes, and the digest push does not
       carry it
+- [x] **A recap can be read at reading size** (2026-09-24). The pane under the
+      documents was too small to read a brief in. *Open larger* beside
+      *Recap…* opens `referat/ui/recap.py`'s `RecapWindow`: a separate,
+      parentless top-level window rather than a modal, since a modal would lock
+      the Stop button during the meeting the recap is read for. It opens three
+      zoom steps up, has `Ctrl+±`/`Ctrl+0`, the two copy flavours and Escape,
+      redraws when the page does (keeping its scroll), and raises the command
+      center when a citation or name in it is followed
+- [ ] **Remember the recap window's size, position and zoom across tray
+      restarts**, if closing and reopening it in one session turns out not to
+      be enough. Not built: nothing else in the window persists geometry
 
 ### Rejected while deciding this
 

@@ -1763,6 +1763,13 @@ notes, and the digest push does not carry it. Incremental folding of the
 previous recap is recorded as deferred, with its risk named, and is not built
 until regeneration is actually slow.
 
+**The recap is read in a window of its own**, since 2026-09-24:
+*Open larger* opens `referat/ui/recap.py`, because the pane under the documents
+was too small to read a brief in. It is a parentless top-level window and
+**not a modal**. The recap is read during the meeting it is for, and a modal
+would lock the command center, including its Stop button. The window renders
+what the page hands it and holds no rule.
+
 **Two flow rules.** *Project-scoped identification*: when a meeting carries a
 project, the names the labeling UI offers are the people associated with that
 project, everybody else behind a *show all*. It narrows and orders what a human
@@ -2138,7 +2145,12 @@ auto-syncing project it carries. It is the **third step** of an operation whose
 first two are spawning `/cleanup` and recording `notes_written`, and it runs
 under that function's existing rule — a document that did not update is a line in
 the message, never a failed cleanup, because `notes.md` is on disk whatever
-Google says. Silent when the `digest` extra is not installed, since that is a
+Google says. **Tagging a meeting whose notes already exist pushes too**, since
+2026-09-15 — the doc and the tag are the two decisions, and the order they came
+in is not a third. `cli.tag_sync_pending` asks without network which auto-syncing
+projects lack the meeting's current notes, only at `notes_written` or `synced`;
+`referat tag` runs `cli.auto_sync_tagged` and the window queues it on the claude
+worker after the picker, where cleanup's auto-sync already runs. Silent when the `digest` extra is not installed, since that is a
 machine that does not do digests rather than an error. An **archived** project
 still auto-syncs: archiving hides a project from the tag picker and changes
 nothing else, and a digest that quietly went stale would be archiving costing

@@ -737,6 +737,11 @@ class CommandCenter(QMainWindow):
         carried = meeting["tags"] if meeting else []
         if tags.open_for(self, self.app.config, meeting_id, list(carried)):
             self.refresh()
+            # A meeting tagged after its notes were written gets the push a
+            # cleanup pass would have given it. Asked here, where it costs two
+            # file reads, so nothing is queued when no document is waiting.
+            if cli.tag_sync_pending(self.app.config, meeting_id):
+                self._enqueue_notes([(progress.SYNC, meeting_id)])
 
     # --- Labeling -----------------------------------------------------------
 
@@ -941,6 +946,10 @@ class CommandCenter(QMainWindow):
             return notes_module.day_progress_key(target)
         if kind == progress.RECAP:
             return notes_module.recap_progress_key(target)
+        if kind == progress.SYNC:
+            # `sync:<project-id>` is the projects page's key; a slug holds no
+            # colon, so this namespace cannot be spelled like one of those.
+            return f"{progress.SYNC}:meeting:{target}"
         return notes_module.progress_key(target)
 
     def _enqueue_notes(self, jobs: list[tuple[str, str]]) -> None:
@@ -1013,8 +1022,26 @@ class CommandCenter(QMainWindow):
                 kind, target = self._notes_queue.get_nowait()
             except queue.Empty:
                 return
-            what = {progress.DAY: "Day summary", progress.RECAP: "Recap"}.get(kind, "Notes")
+            what = {
+                progress.DAY: "Day summary",
+                progress.RECAP: "Recap",
+                progress.SYNC: "Sync",
+            }.get(kind, "Notes")
             try:
+                if kind == progress.SYNC:
+                    # On this worker rather than a thread of its own, because
+                    # this is where a cleanup pass's auto-sync already runs: two
+                    # pushes into one document at once would each hold indices
+                    # from their own read. Never raises, and says nothing when
+                    # there turned out to be nothing to say.
+                    key = self._job_key(kind, target)
+                    lines = cli.auto_sync_tagged(
+                        self.app.config, target,
+                        progress=lambda phase, key=key: progress.step(key, phase),
+                    )
+                    if lines:
+                        self.app.notify("\n".join([f"Tagged {target}:", *lines]))
+                    continue
                 if kind == progress.DAY:
                     outcome = cli.write_day_summary(self.app.config, target)
                 elif kind == progress.RECAP:

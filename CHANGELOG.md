@@ -2,6 +2,50 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-24 — A recap you can read
+
+The recap pane on the projects page shares a column with the description, the
+glossary and the doc list, and was too small to read a brief in.
+
+- **The projects page has an *Open larger* button** beside *Recap…*. It opens
+  `referat/ui/recap.py`'s `RecapWindow`: resizable, three zoom steps up from
+  the pane, `Ctrl+±`/`Ctrl+0` and A-/A+ buttons, both copy flavours of the
+  recap's source, and Escape to close.
+- **A window and not a modal**, because a recap is read during the meeting it
+  is for, and a modal would lock the command center with the Stop button in it.
+  It has no owner, so it can sit on another monitor and drop behind the command
+  center. Following a citation or a name in it raises the command center on
+  that meeting or person.
+- **It holds no rule.** The page hands it the text it already rendered, and
+  `_refresh_recap_window` redraws it whenever the pane is redrawn. So a rebuild
+  that finishes while it is open shows up in both, and the scroll position is
+  kept.
+- Smoke-tested offscreen against the real projects file: enabled on the eight
+  projects that have a recap, zoom 9 → 12 pt on open, copy puts the source on
+  the clipboard, the scroll survives a refresh, and it switches to another
+  project when that project's recap is opened. The running tray was not
+  touched.
+
+## 2026-09-15 — Tagging after the notes now syncs
+
+`2026-09-15_1100` was tagged `anytime-anywhere-analytics` two minutes after its
+notes were written, and the project's *AI Meeting Notes* tab was never updated.
+*Sync now* did not update it either.
+
+- **Auto-sync used to run only after a cleanup pass.** A tag applied later
+  reached no document. `cli.tag_sync_pending` answers, without network, which
+  auto-syncing projects lack the meeting's current notes. `cli.auto_sync_tagged`
+  pushes to those. `referat tag` runs it, and the window queues it as a `sync`
+  job on the claude worker after the tag picker is applied.
+  `auto_sync_meeting` gained `only=`.
+- **A `synced` meeting given a linked tag drops to `notes_written`**, in
+  `apply_tags`, since the new project's docs do not hold it yet.
+- **Sync now failed because the Google token had expired.** It was granted on
+  2026-09-08 and refused on 2026-09-15: the seven-day refresh-token expiry for
+  an OAuth app still in *Testing*. In the window, `gdocs._consent` dropped the
+  reason and said to run `link-doc` once. It now includes the reason and points
+  to `referat project sync <project-id>` at a prompt.
+
 ## 2026-09-14 — Smart App Control off, and a person on file twice
 
 **Smart App Control is off.** `referat probe` that morning named scipy's

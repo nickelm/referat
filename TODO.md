@@ -1626,6 +1626,41 @@ touched, and *Sync now* did nothing visible either. Two causes, independent.
       message line; consider `App.notify` for a failed sync as well
 - [ ] Drive the tag-triggered sync end to end in the window once the token works
 
+### A linked doc you can see and open (2026-09-30)
+
+Four pieces of feedback on the projects page: you could not tell a project was
+linked, opening the doc took two clicks, the Link dialog always opened blank,
+and none of the doc buttons had a picture.
+
+- [x] **The list says it**: a linked project's second line reads `- Google Doc`
+      (or `- N Google Docs`), in text beside the archived date
+- [x] **A doc line under the heading** — a `gdoc` mark, *Linked to <title>,
+      tab <tab>* or *No Google Doc linked*, and **Open in Google Docs**, which
+      replaces the bottom *Open in browser* and is enabled whenever a doc exists
+      rather than only when a row is selected
+- [x] **The doc list always has a row selected**, the previous one or the
+      first, so *Unlink* and the dialog's prefill have a target
+- [x] **`icons._gdoc`**, a sheet with a folded corner and three lines, in
+      `icons.LINKED` blue when a doc is linked and disabled grey when not — a
+      state colour, so the colour rule holds. On the doc line, the *Google Docs*
+      heading, *Open in Google Docs* and the dialog's window icon. *Link doc…*
+      and *Sync now* finally wear the `link` and `sync` glyphs drawn for them at
+      phase 7
+- [x] **The Link dialog opens on the current link**: *Attach*, the link with
+      its `?tab=`, the tabs looked up at once and the linked one preselected,
+      and a line saying what is linked now. The same tab disables the button;
+      another tab makes it **Move link**
+- [x] **`cli.link_doc` retargets.** The same document on another tab moves the
+      reference and syncs every meeting into the new tab, leaving the old tab's
+      blocks where they are, as `unlink_doc` does. It used to say "already
+      linked" and write nothing — after `--new-tab` had already added a tab to
+      the document. Tested against a synthetic `projects.json` with gdocs
+      stubbed; the page and dialog were rendered offscreen
+- [ ] **Move a link to another tab for real**, on a throwaway document, and
+      confirm the sync writes every block there and the old tab is untouched
+- [ ] **Click *Open in Google Docs* in the running window** — offscreen
+      renders cannot open a browser
+
 ### Left open
 
 - [ ] **Auto-sync has not yet run off a real `/cleanup` pass.** It was driven by

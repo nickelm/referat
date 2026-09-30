@@ -56,12 +56,13 @@ saying to run one command at a prompt, once. That is a property of the paste flo
 
 from __future__ import annotations
 
+import html
 import logging
 import threading
 from typing import Any
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -113,6 +114,9 @@ GLOSSARY_HELP = (
 )
 
 DOCS_UNLINKED = "No Google Doc yet. Link one to push this project's notes into it."
+
+DOC_ICON = 16
+"""The `gdoc` mark beside the doc line and the section heading, in pixels."""
 
 EXTRAS_NOTE = (
     "Terms from `config` are [transcription].hotword_extras, hand-edited in "
@@ -326,6 +330,7 @@ class ProjectsPage(QWidget):
         self.docs.itemDoubleClicked.connect(self._on_open_doc)
 
         self.link_button = QPushButton("Link doc...")
+        self.link_button.setIcon(icons.glyph("link", self._icon_color()))
         self.link_button.setAutoDefault(False)
         self.link_button.clicked.connect(self._on_link_doc)
         self.auto_sync = QCheckBox("Sync automatically when notes are written")
@@ -335,15 +340,24 @@ class ProjectsPage(QWidget):
         )
         self.auto_sync.toggled.connect(self._on_auto_sync)
 
-        self.open_doc_button = QPushButton("Open in browser")
+        # **The doc line**, under the heading rather than under the glossary:
+        # whether a project is linked, and one click to the document, are the
+        # two things somebody looks for on this page and they were the two
+        # things furthest down it. The mark is blue exactly when a document is
+        # linked, which is what makes `icons.LINKED` a state colour.
+        self.doc_mark = QLabel()
+        self.doc_line = QLabel()
+        self.doc_line.setTextFormat(Qt.TextFormat.RichText)
+        self.doc_line.setWordWrap(True)
+        self.open_doc_button = QPushButton("Open in Google Docs")
+        self.open_doc_button.setIcon(icons.glyph("gdoc", icons.LINKED))
         self.open_doc_button.setAutoDefault(False)
-        self.open_doc_button.clicked.connect(
-            lambda: self._on_open_doc(self.docs.currentItem())
-        )
+        self.open_doc_button.clicked.connect(self._on_open_linked)
         self.unlink_button = QPushButton("Unlink")
         self.unlink_button.setAutoDefault(False)
         self.unlink_button.clicked.connect(self._on_unlink_doc)
         self.sync_button = QPushButton("Sync now")
+        self.sync_button.setIcon(icons.glyph("sync", self._icon_color()))
         self.sync_button.setAutoDefault(False)
         self.sync_button.clicked.connect(self._on_sync)
 
@@ -373,9 +387,16 @@ class ProjectsPage(QWidget):
         save_row.addWidget(self.revert_button)
         save_row.addWidget(self.save_button)
 
+        doc_row = QHBoxLayout()
+        doc_row.setContentsMargins(0, 0, 0, 0)
+        doc_row.addWidget(self.doc_mark)
+        doc_row.addWidget(self.doc_line, 1)
+        doc_row.addWidget(self.open_doc_button)
+
         detail = QVBoxLayout()
         detail.addLayout(title_row)
         detail.addWidget(self.subheading)
+        detail.addLayout(doc_row)
         detail.addWidget(QLabel("Description"))
         detail.addWidget(self.description)
         detail.addWidget(QLabel("Glossary"))
@@ -383,16 +404,20 @@ class ProjectsPage(QWidget):
         detail.addWidget(self.glossary, 1)
         # The same order the title row uses and for the same reason: harmless,
         # then reversible, then the one that goes out to the network and writes
-        # into somebody's document.
+        # into somebody's document. *Open* moved up to the doc line.
         docs_row = QHBoxLayout()
         docs_row.setContentsMargins(0, 0, 0, 0)
         docs_row.addStretch(1)
-        docs_row.addWidget(self.open_doc_button)
         docs_row.addWidget(self.link_button)
         docs_row.addWidget(self.unlink_button)
         docs_row.addWidget(self.sync_button)
 
-        detail.addWidget(QLabel("Google Docs"))
+        self.docs_mark = QLabel()
+        docs_heading = QHBoxLayout()
+        docs_heading.setContentsMargins(0, 0, 0, 0)
+        docs_heading.addWidget(self.docs_mark)
+        docs_heading.addWidget(QLabel("Google Docs"), 1)
+        detail.addLayout(docs_heading)
         detail.addWidget(self.docs)
         detail.addWidget(self.auto_sync)
         detail.addLayout(docs_row)
@@ -409,8 +434,8 @@ class ProjectsPage(QWidget):
         self.recap_button = QPushButton(RECAP)
         self.recap_button.setAutoDefault(False)
         self.recap_button.clicked.connect(self._on_recap)
-        # Reading comes before rewriting in the row, as *Open in browser* comes
-        # before *Link doc...* in the documents row above.
+        # Reading comes before rewriting in the row, as *Open in Google Docs*
+        # comes before everything that writes to a document.
         self.recap_open_button = QPushButton("Open larger")
         self.recap_open_button.setToolTip("Read this recap in a window of its own")
         self.recap_open_button.setAutoDefault(False)
@@ -544,6 +569,12 @@ class ProjectsPage(QWidget):
             def add(project: dict[str, Any], hidden: bool = False) -> None:
                 nonlocal chosen
                 second = _meetings(project["meetings"])
+                if project["docs"]:
+                    # Said in text on the row rather than as a second icon: the
+                    # row's glyph already says tag or archived, and whether a
+                    # project is linked is the thing you scan this list for.
+                    count = len(project["docs"])
+                    second += " - Google Doc" if count == 1 else f" - {count} Google Docs"
                 if project["archived_at"]:
                     second = f"{second} - archived {project['archived_at'][:10]}"
                 item = QListWidgetItem(f"{project['name']}\n{second}")
@@ -760,6 +791,7 @@ class ProjectsPage(QWidget):
                 self.description.clear()
                 self.glossary.setPlainText("")
                 self.docs.clear()
+                self._fill_doc_line(None)
                 self._refresh_doc_buttons()
                 self.recap_state.clear()
                 self.recap_text.setMarkdown("")
@@ -1192,7 +1224,10 @@ class ProjectsPage(QWidget):
         id — the same split every list in this window makes between a display
         name and the id underneath it.
         """
+        previous = self.docs.currentItem()
+        wanted = previous.data(ID_ROLE) if previous is not None else None
         self.docs.clear()
+        chosen: QListWidgetItem | None = None
         for doc in project["docs"]:
             # **The document's title leads, not the tab's.** A row answers
             # "which document is this project written into", and the tab is the
@@ -1212,6 +1247,13 @@ class ProjectsPage(QWidget):
                 "Double-click to open it in your browser."
             )
             self.docs.addItem(item)
+            if chosen is None or doc["gdoc_id"] == wanted:
+                chosen = item
+        # **A row is always selected when there is one**, so *Unlink* and the
+        # link dialog's prefill have a target without a click first -- the
+        # unselected list was why opening a document took two.
+        if chosen is not None:
+            self.docs.setCurrentItem(chosen)
         if not project["docs"]:
             item = QListWidgetItem(DOCS_UNLINKED)
             item.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -1224,7 +1266,32 @@ class ProjectsPage(QWidget):
             self.auto_sync.setChecked(bool(project.get("auto_sync", True)))
         finally:
             self._loading = was_loading
+        self._fill_doc_line(project)
         self._refresh_doc_buttons()
+
+    def _fill_doc_line(self, project: dict[str, Any] | None) -> None:
+        """The line under the heading: linked or not, to what, in which tab.
+
+        Called from :meth:`_fill_docs`, so every path that redraws the list --
+        a link, an unlink, a sync that corrected a tab's name -- redraws this
+        too without refilling the form.
+        """
+        docs = project["docs"] if project else []
+        color = icons.LINKED if docs else self._muted_color()
+        mark = icons.glyph("gdoc", color).pixmap(DOC_ICON, DOC_ICON)
+        self.doc_mark.setPixmap(mark)
+        self.docs_mark.setPixmap(mark)
+        if project is None:
+            self.doc_line.clear()
+        elif not docs:
+            self.doc_line.setText("No Google Doc linked")
+        elif len(docs) == 1:
+            doc = docs[0]
+            name = html.escape(doc["doc_title"] or doc["gdoc_id"])
+            tab = html.escape(doc["tab_name"] or doc["tab_id"] or "(no tab recorded)")
+            self.doc_line.setText(f"Linked to <b>{name}</b>, tab {tab}")
+        else:
+            self.doc_line.setText(f"Linked to <b>{len(docs)} Google Docs</b>")
 
     def _refresh_doc_buttons(self) -> None:
         """Unlink needs a selected doc; Sync needs one to exist. Both need a project.
@@ -1239,7 +1306,12 @@ class ProjectsPage(QWidget):
         selected = self.docs.currentItem()
         has_doc = bool(selected and selected.data(ID_ROLE))
         self.auto_sync.setEnabled(project is not None and not self._syncing)
-        self.open_doc_button.setEnabled(has_doc)
+        self.open_doc_button.setEnabled(linked)
+        target = self._doc_to_open()
+        self.open_doc_button.setToolTip(
+            f"Open {target['doc_title'] or target['gdoc_id']} in your browser"
+            if target else "No Google Doc is linked to this project"
+        )
         self.link_button.setEnabled(project is not None and not self._syncing)
         self.unlink_button.setEnabled(has_doc and not self._syncing)
         self.sync_button.setEnabled(linked and not self._syncing)
@@ -1278,6 +1350,30 @@ class ProjectsPage(QWidget):
     def _icon_color(self) -> str:
         return self.palette().windowText().color().name()
 
+    def _muted_color(self) -> str:
+        """The `gdoc` mark's colour when nothing is linked: text, disabled."""
+        return self.palette().color(
+            QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText
+        ).name()
+
+    def _doc_to_open(self) -> dict[str, Any] | None:
+        """The selected document, or the first: what *Open* and the dialog act on."""
+        project = self._project(self._selected)
+        if project is None or not project["docs"]:
+            return None
+        selected = self.docs.currentItem()
+        gdoc_id = selected.data(ID_ROLE) if selected is not None else None
+        for doc in project["docs"]:
+            if doc["gdoc_id"] == gdoc_id:
+                return doc
+        return project["docs"][0]
+
+    def _on_open_linked(self) -> None:
+        """*Open in Google Docs*: the selected document, or the only one there is."""
+        doc = self._doc_to_open()
+        if doc is not None:
+            QDesktopServices.openUrl(QUrl(gdocs.doc_url(doc["gdoc_id"])))
+
     def _on_open_doc(self, item: QListWidgetItem | None) -> None:
         """Open the selected document in the browser. The one thing here that leaves Qt.
 
@@ -1297,7 +1393,9 @@ class ProjectsPage(QWidget):
         project = self._project(self._selected)
         if project is None:
             return
-        dialog = docs_dialog.LinkDocDialog(self.config, project["name"], self)
+        dialog = docs_dialog.LinkDocDialog(
+            self.config, project["name"], self, current=self._doc_to_open()
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         answers = dialog.result_link()

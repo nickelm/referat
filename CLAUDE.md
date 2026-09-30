@@ -1118,7 +1118,12 @@ document, whose tabs are `Proposal` and `Meeting Notes & Writing Log`; a wrong
 default that is *visible* is still a wrong default, because the point of a dialog
 is that somebody clicks through it. The window **cannot authenticate**, which is
 a property of the paste flow rather than a limitation: consent needs a terminal,
-so a browser consent can never be started from the thread that owns the recorder. Phase 1 was deliberately read-only — the
+so a browser consent can never be started from the thread that owns the recorder.
+Since 2026-09-30 the dialog **opens on the current link** when there is one — its
+`?tab=` preselects the tab by the same rule — and the page carries a doc line
+under the project heading with *Open in Google Docs*, because whether a project
+is linked and one click to its document were the two things furthest down the
+form. Phase 1 was deliberately read-only — the
 meetings list, the viewer, the cross-links, the recording buttons and the ambient
 state — so the toolkit was settled against real meetings rather than against a
 prototype, with nothing at risk. Phase 2 is the first thing this window writes,
@@ -1192,7 +1197,11 @@ wears the glyph of the **button that drains it**, so a row followed to the
 Meetings tab finds the thing to press next wearing the picture it came from; and
 a list's rows do **not** repeat their heading's glyph, because the same icon
 down twelve rows is the one thing on a page carrying no information — they carry
-the meeting's dot instead.
+the meeting's dot instead. **`icons.LINKED` is Google's blue and is still a state
+colour**: the `gdoc` glyph wears it exactly when a project has a document linked
+and is disabled grey when it has none, so the blue appearing *is* the link
+appearing. A brand colour worn whatever the state would be decoration, and that
+is the line.
 
 **The projects page is where a glossary is edited, and that is hotword
 management.** A glossary is read twice at two different times — merged into the
@@ -2115,7 +2124,12 @@ reasonable if something says what they are called.
 
 **Linking is create-or-select, and the tab is the awkward half.** `referat
 project link-doc <id>` *appends* a doc reference and `unlink-doc <id> <gdoc_id>`
-removes one, since a project may carry several. *Create new
+removes one, since a project may carry several. Linking a document the project
+**already holds** is a no-op on the same tab and a **move** on another: the
+reference is retargeted, the sync writes every tagged meeting into the new tab,
+and the old tab's blocks are left exactly where they are, as `unlink-doc` leaves
+them. It used to answer "already linked" and write nothing, which on `--new-tab`
+came after adding a tab to the document. *Create new
 doc* calls `documents.create` titled `<Project> Meeting Digest`, **renames its
 tab** to `[digest].new_tab_name` and gives it a `TITLE` line — the one case where
 writing a heading is not touching somebody else's prose, since the document is a

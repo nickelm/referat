@@ -2374,6 +2374,10 @@ def link_doc(
     Linking ends by running a sync unless told not to, which is what makes
     attaching an *existing* doc backfill every already-tagged meeting rather than
     leaving somebody to remember a second command.
+
+    A document the project is **already linked to** is a no-op on the same tab
+    and a *move* on another: the reference is retargeted, the old tab's blocks
+    stay where they are, and the sync writes every meeting into the new one.
     """
     if (why := gdocs.available()):
         return Outcome(False, why)
@@ -2415,25 +2419,48 @@ def link_doc(
     except gdocs.GoogleError as exc:
         return Outcome(False, str(exc))
 
-    if any(doc.gdoc_id == gdoc_id for doc in project.docs):
-        return Outcome(True, f"{project.id} is already linked to {gdoc_id}; nothing was written")
-
-    project.docs.append(
-        projects.DocRef(
-            gdoc_id=gdoc_id,
-            tab_id=tab_id,
-            tab_name=tab_name,
-            doc_title=doc_title,
-            linked_at=dt.datetime.now().isoformat(timespec="seconds"),
+    existing = next((doc for doc in project.docs if doc.gdoc_id == gdoc_id), None)
+    if existing is not None and existing.tab_id == tab_id:
+        return Outcome(
+            True,
+            f"{project.id} is already linked to {doc_title or gdoc_id}, tab "
+            f"{tab_name or tab_id}; nothing was written",
         )
-    )
-    db.save()
-
-    lines = [
-        f"Linked {project.id} to {doc_title or gdoc_id}",
-        f"  {gdocs.doc_url(gdoc_id)}",
-        f"  tab: {tab_name or tab_id}",
-    ]
+    if existing is not None:
+        # **The same document with another tab is a move, not a refusal.** It
+        # used to answer "already linked" and write nothing -- after `--new-tab`
+        # had already added a tab to somebody's document for it. The blocks in
+        # the old tab are left exactly where they are, as `unlink_doc` leaves
+        # them: they are in a document somebody may write in, and a sync deletes
+        # nothing it was not asked to. The sync below finds no anchors in the new
+        # tab and writes every tagged meeting there.
+        old = existing.tab_name or existing.tab_id
+        existing.tab_id = tab_id
+        existing.tab_name = tab_name
+        existing.doc_title = doc_title or existing.doc_title
+        db.save()
+        lines = [
+            f"Moved {project.id}'s link in {existing.doc_title or gdoc_id} from tab "
+            f"{old} to tab {tab_name or tab_id}",
+            f"  {gdocs.doc_url(gdoc_id)}",
+            f"  The blocks already in {old} stay there; Referat no longer writes into it.",
+        ]
+    else:
+        project.docs.append(
+            projects.DocRef(
+                gdoc_id=gdoc_id,
+                tab_id=tab_id,
+                tab_name=tab_name,
+                doc_title=doc_title,
+                linked_at=dt.datetime.now().isoformat(timespec="seconds"),
+            )
+        )
+        db.save()
+        lines = [
+            f"Linked {project.id} to {doc_title or gdoc_id}",
+            f"  {gdocs.doc_url(gdoc_id)}",
+            f"  tab: {tab_name or tab_id}",
+        ]
     if sync:
         outcome = sync_project(config, pid)
         lines.append("")

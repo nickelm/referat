@@ -86,6 +86,16 @@ back to grey rather than raising, since a UI must never be the thing that refuse
 to draw a lifecycle it has not been taught.
 """
 
+LINKED = "#4285f4"
+"""The colour of one state: **this project is linked to a Google Doc**.
+
+Google's own blue, because the `gdoc` glyph drawn in it is recognised as a
+Google Doc before it is read -- but it is a state colour and not decoration,
+which is what keeps it inside the rule that a colour here means a state or means
+nothing. A project with no document draws the same glyph in the palette's
+disabled text colour, so the blue appearing *is* the link appearing.
+"""
+
 
 # --- Discs: the tray, and one per meeting row -------------------------------
 
@@ -501,6 +511,50 @@ def _cut(painter: QPainter, size: int) -> None:
     painter.drawRect(QRectF(size * 0.84, size * 0.44, size * 0.08, size * 0.12))
 
 
+def _gdoc(painter: QPainter, size: int) -> None:
+    """A sheet with its corner folded down and three lines on it: a Google Doc.
+
+    The fold is what keeps it apart from `_page`, which means *notes* and sits on
+    the meetings tab: a folded corner is the shape everybody already knows as a
+    document in somebody else's app, and the third line makes it a page of prose
+    rather than a note. The fold is cut out of the sheet and the flap drawn back
+    into the gap with a cleared seam between them, the way `_copy` separates its
+    two sheets, since every glyph in this set is a brush and no pen.
+    """
+    left, top = size * 0.20, size * 0.08
+    right, bottom = size * 0.80, size * 0.92
+    fold = size * 0.22
+    painter.drawPolygon(
+        QPolygonF([
+            QPointF(left, top),
+            QPointF(right - fold, top),
+            QPointF(right, top + fold),
+            QPointF(right, bottom),
+            QPointF(left, bottom),
+        ])
+    )
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    seam = size * 0.05
+    painter.drawPolygon(
+        QPolygonF([
+            QPointF(right - fold - seam, top - seam),
+            QPointF(right - fold - seam, top + fold + seam),
+            QPointF(right + seam, top + fold + seam),
+        ])
+    )
+    height = size * 0.07
+    for y, width in ((size * 0.44, 0.40), (size * 0.58, 0.40), (size * 0.72, 0.26)):
+        painter.drawRect(QRectF(left + size * 0.10, y, size * width, height))
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+    painter.drawPolygon(
+        QPolygonF([
+            QPointF(right - fold, top),
+            QPointF(right - fold, top + fold),
+            QPointF(right, top + fold),
+        ])
+    )
+
+
 GLYPHS: dict[str, Callable[[QPainter, int], None]] = {
     "record": _record,
     "pause": _pause,
@@ -522,8 +576,9 @@ GLYPHS: dict[str, Callable[[QPainter, int], None]] = {
     "link": _link,
     "sync": _sync,
     "cut": _cut,
+    "gdoc": _gdoc,
 }
-"""Seventeen shapes, each drawn filled in one colour.
+"""Twenty-one shapes, each drawn filled in one colour.
 
 One style throughout — solid, no outlines, no two-tone — because a set that mixes
 filled and stroked glyphs reads as icons borrowed from two places, which at this

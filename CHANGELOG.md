@@ -2,6 +2,42 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-09-30 — A linked doc you can see and open
+
+Feedback on the projects page: you couldn't tell a project had a Google Doc,
+opening it took two clicks, the Link dialog always opened blank, and the doc
+buttons had no pictures.
+
+- **Visible from the list.** A linked project's second line says `- Google Doc`
+  (or `- N Google Docs`).
+- **A doc line under the project heading**: a Google Docs mark, *Linked to
+  <title>, tab <tab>*, and **Open in Google Docs**, one click. It replaces
+  *Open in browser* at the bottom of the form, which stayed disabled until you
+  selected a row in the doc list. That list now always has a row selected.
+- **A `gdoc` glyph** in `referat/ui/icons.py`: a sheet with a folded corner and
+  three lines. It is drawn in `icons.LINKED` (Google blue) when a doc is linked
+  and in disabled grey when not. Because the blue appears exactly when there is
+  a link, it is a state colour and the colour rule still holds. *Link doc…* and
+  *Sync now* now carry the `link` and `sync` glyphs that were drawn for them at
+  phase 7 and never used.
+- **The Link dialog opens prefilled** when a doc is linked. It opens on
+  *Attach* with the current link and its `?tab=` filled in, looks up the tabs
+  straight away with the linked one preselected, and says what is linked now.
+  Picking the same tab disables the button; picking another turns it into
+  **Move link**.
+- **`cli.link_doc` retargets.** Linking a document the project already holds,
+  with a different tab, now moves the reference to that tab. The sync then
+  writes every tagged meeting into the new tab, and the old tab's blocks stay
+  where they are, the same way Unlink leaves them. It used to say "already
+  linked" and write nothing, and on `--new-tab` it did that *after* adding a
+  tab to the document. `referat project link-doc` picks this up too, since it
+  calls the same function.
+- Verified with a scratch script against a synthetic `projects.json`, with
+  gdocs stubbed: the same tab writes nothing, and another tab moves the link,
+  keeps `linked_at` and syncs. The page and the dialog were rendered offscreen.
+  Not yet done by hand: moving a real link, and clicking *Open* in the running
+  window.
+
 ## 2026-09-24 — A recap you can read
 
 The recap pane on the projects page shares a column with the description, the

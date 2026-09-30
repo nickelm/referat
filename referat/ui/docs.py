@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 
 from referat import gdocs
 from referat.config import Config
+from referat.ui import icons
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,15 @@ PASTE_HELP = (
     "Open the document, click the tab you want, and copy the address. A link with "
     "?tab= in it says which tab; otherwise pick one below."
 )
+
+CURRENT_HELP = (
+    "Linked now: {title}, tab {tab}. Pick another tab to move the link there -- "
+    "the blocks already in {tab} stay where they are. Paste another document's "
+    "link to add a second one."
+)
+
+ALREADY_HERE = "That is the tab this project is already linked to."
+MOVE_HERE = "Referat will move the link to the tab selected and write every meeting there."
 
 SAME_TAB_HELP = (
     "You can keep writing in the tab you choose. Each meeting is bracketed by a "
@@ -78,11 +88,22 @@ class LinkDocDialog(QDialog):
     looked_up = Signal(object, str)
     """`(tabs, complaint)` from the worker thread. `tabs` is `gdocs.tab_titles`'s."""
 
-    def __init__(self, config: Config, project_name: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        project_name: str,
+        parent: QWidget | None = None,
+        current: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Link a Google Doc to {project_name}")
+        self.setWindowTitle(
+            f"Google Doc for {project_name}" if current else f"Link a Google Doc to {project_name}"
+        )
+        self.setWindowIcon(icons.glyph("gdoc", icons.LINKED))
         self.setMinimumWidth(560)
         self._config = config
+        self._current = current or {}
+        """The doc row this project is already linked to, as `project_document` has it."""
         self._gdoc_id = ""
         self._tabs: list[tuple[str, str, int]] = []
         self._looking_up = False
@@ -133,6 +154,15 @@ class LinkDocDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout()
+        if current:
+            linked = QLabel(CURRENT_HELP.format(
+                title=current.get("doc_title") or current["gdoc_id"],
+                tab=current.get("tab_name") or current.get("tab_id") or "(no tab recorded)",
+            ))
+            linked.setWordWrap(True)
+            linked.setTextFormat(Qt.TextFormat.PlainText)
+            layout.addWidget(linked)
+            layout.addSpacing(8)
         layout.addWidget(self.create)
         layout.addWidget(self.created_title)
         layout.addSpacing(8)
@@ -150,7 +180,19 @@ class LinkDocDialog(QDialog):
         self.setLayout(layout)
 
         self.looked_up.connect(self._on_looked_up)
+        if current:
+            # **Opened on what is already there.** The link is the one the
+            # project holds, with its tab in `?tab=` so the existing rule that a
+            # tab in the link decides the tab preselects it, and the lookup runs
+            # at once so the combo shows the tabs rather than a button to press.
+            self.attach.setChecked(True)
+            url = gdocs.doc_url(current["gdoc_id"])
+            if current.get("tab_id"):
+                url += f"?tab={current['tab_id']}"
+            self.link.setText(url)
         self._on_mode()
+        if current:
+            self._lookup()
 
     # --- The mode ----------------------------------------------------------
 
@@ -266,9 +308,26 @@ class LinkDocDialog(QDialog):
 
     def _refresh_ok(self) -> None:
         ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setText("Link")
         if self.create.isChecked():
             ok.setEnabled(True)
             return
+        if self._current and self._gdoc_id == self._current["gdoc_id"]:
+            # The same document is a move to another tab, and the tab it is
+            # already in is nothing to do -- `link_doc` would say so and write
+            # nothing, so the button says it first by not being pressable.
+            ok.setText("Move link")
+            if (
+                not self.new_tab.isChecked()
+                and not self._looking_up
+                and self.tabs.currentIndex() >= 0
+                and self.tabs.currentData() == self._current.get("tab_id")
+            ):
+                ok.setEnabled(False)
+                self.status.setText(ALREADY_HERE)
+                return
+            if self.status.text() == ALREADY_HERE:
+                self.status.setText(MOVE_HERE)
         if self.new_tab.isChecked():
             # A new tab needs no choice from the combo -- there is nothing yet
             # to choose from.

@@ -23,10 +23,11 @@ process owns the recorder: a hung request on the GUI thread is a window somebody
 cannot stop a meeting from. The result comes back through a queued signal, which
 is the rule this project paid three heap corruptions for.
 
-**This dialog cannot authenticate and does not try.** Consent needs a terminal by
-construction — see :mod:`referat.gdocs` — so a machine that has never consented
-gets the sentence saying to run one command at a prompt, once. That is the
-failure mode phase 7 was designed around rather than one it ran into.
+**This dialog does not authenticate.** A lookup that finds no usable token shows
+the sentence :mod:`referat.gdocs` wrote, which since 2026-10-12 names the
+*Google sign-in...* button on the projects page — :mod:`referat.ui.consent` —
+rather than a command to run at a prompt. Signing in is its own dialog and is
+never started from inside this one.
 """
 
 from __future__ import annotations

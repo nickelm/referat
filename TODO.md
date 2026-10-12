@@ -1661,6 +1661,37 @@ and none of the doc buttons had a picture.
 - [ ] **Click *Open in Google Docs* in the running window** — offscreen
       renders cannot open a browser
 
+### Sign-in from the window, and a log you can copy from (2026-10-12)
+
+A token was rejected seven days after it was issued, the renewal needed a
+terminal, and the error could not be selected out of the Activity tab.
+
+- [x] **`gdocs.begin_consent` and `gdocs.finish_consent`**: the paste flow as
+      two functions, the first local and the second the network half.
+      `consent` (was `_consent`) is the two around `input()`; with no terminal
+      it still raises, so nothing starts a consent by itself
+- [x] **`gdocs.token_note`**: what is on file, without a network call, and why
+      the last refresh in this process was rejected
+- [x] **`referat/ui/consent.py`**, behind *Google sign-in...* on the projects
+      page: open the browser, paste the address back, save. Exchange on a
+      thread, queued signal back, not modal
+- [x] **`referat google`**, the same at a prompt, and the refusal names it and
+      the button instead of `project sync <project-id>`
+- [x] **The log pane keeps a selection**: redrawn only when the tail changed,
+      never while text is selected, and the label says it is holding
+- [x] **Copy by record**: `activity.entries`, *Copy this entry* on the context
+      menu, *Copy last error* as a button and a menu item. *Referat only*
+      filters whole records by their header
+- [x] `CLAUDE.md`, `SETUP.md` 13c and 13d, and three module docstrings no
+      longer say the window cannot authenticate
+- [x] **Sign in through the dialog for real** — the offscreen run stubbed the
+      browser and never reached Google. Reported working in the running window
+      the same day
+- [x] **Drag-select in the running Activity tab** — the offscreen run set the
+      selection through a cursor, not a mouse. Reported working the same day
+- [ ] **Set the OAuth app to *In production*** in the Google Cloud console
+      (SETUP.md 13b, step 5), or this comes back every seven days
+
 ### Left open
 
 - [ ] **Auto-sync has not yet run off a real `/cleanup` pass.** It was driven by

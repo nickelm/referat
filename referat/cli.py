@@ -226,6 +226,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subcommands.add_parser(
+        "google",
+        help="sign in to Google again, for the digests",
+        description=(
+            "Run the Google consent now and store the token every later sync uses. "
+            "For when a sync says the stored token was rejected - which, for an "
+            "OAuth app still in Testing in the Google Cloud console, is every seven "
+            "days. Opens your browser and asks you to paste back the address it "
+            "fails to load; nothing listens on a port. The command center's "
+            "Projects tab has the same thing as a button, Google sign-in..."
+        ),
+    )
+
+    subcommands.add_parser(
         "index",
         help="regenerate the meetings folder's INDEX.md dashboard",
         description=(
@@ -5288,6 +5301,28 @@ def run_probe() -> int:
     return 1
 
 
+def run_google(config: Config) -> int:
+    """`referat google`. Sign in to Google now, whatever the stored token says.
+
+    The verb a rejected token's refusal names. `project sync` used to stand in
+    for it, which is a verb about a document: it asks for a project id to renew
+    something that belongs to no project. :func:`referat.gdocs.consent` is the
+    flow and prints its own instructions; the command center's *Google
+    sign-in...* runs the same two halves with a line edit where this has
+    `input()`.
+    """
+    if (why := gdocs.available()):
+        print(f"referat google: {why}", file=sys.stderr)
+        return 1
+    print(gdocs.token_note(config))
+    try:
+        gdocs.consent(config)
+    except gdocs.GoogleError as exc:
+        print(f"referat google: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def run_devices(config: Config) -> int:
     """`referat devices`. What is plugged in, and what `[audio]` does with it."""
     import sounddevice as sd
@@ -5464,6 +5499,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "devices":
         return run_devices(config)
+
+    if args.command == "google":
+        return run_google(config)
 
     if args.command == "hotwords":
         return run_hotwords(config, as_json=args.as_json)

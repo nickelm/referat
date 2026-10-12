@@ -636,7 +636,7 @@ which reads its documents by calling the same functions rather than by spawning:
 `config`, `list`, `show <id>`,
 `transcript <id>`, `rerun <id>`,
 `label <id>`, `status`, `probe`,
-`devices`, `hotwords`, `people`, `person rename <id>`, `person merge <who> <into>`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
+`devices`, `google`, `hotwords`, `people`, `person rename <id>`, `person merge <who> <into>`, `actions [<verb>]`, `day [<date>]`, `notes`, `index`,
 `project <verb>`, `tag`, `untag`, `state`, `recap <project-id>`,
 `promote <id>`,
 `reflow [<id>]`, `relabel [<id>]`, `debleed [<id>]`, `denoise <id> --speaker
@@ -1116,9 +1116,10 @@ than a document id, fetches the document's tabs on a thread and shows them, and
 Defaulting to the first tab was written first and was wrong on the first real
 document, whose tabs are `Proposal` and `Meeting Notes & Writing Log`; a wrong
 default that is *visible* is still a wrong default, because the point of a dialog
-is that somebody clicks through it. The window **cannot authenticate**, which is
-a property of the paste flow rather than a limitation: consent needs a terminal,
-so a browser consent can never be started from the thread that owns the recorder.
+is that somebody clicks through it. The window **can sign in to Google since
+2026-10-12**, through *Google sign-in...* on the same row and
+`referat/ui/consent.py` — see the digests section for what that replaced and
+what it kept.
 Since 2026-09-30 the dialog **opens on the current link** when there is one — its
 `?tab=` preselects the tab by the same rule — and the page carries a doc line
 under the project heading with *Open in Google Docs*, because whether a project
@@ -1494,6 +1495,20 @@ promoted meeting that has a transcript and no notes, oldest first; a staged
 meeting is skipped, because `/cleanup` runs with cwd at the meetings folder and
 cannot reach one. Each id is announced to `progress` as *queued* the moment it
 is accepted, so the whole backlog is visible rather than only the job in flight.
+
+**The log pane may not cost a selection, and what is copied out of it is a
+record.** Until 2026-10-12 the timer replaced the whole pane every two seconds
+whether or not the file had grown, and replacing a document resets its cursor —
+so a drag across the last error was wiped mid-drag and the only selection fast
+enough to survive was *Select all*. The pane is now redrawn only when the tail
+changed and never while anything in it is selected, and says it is holding. The
+file is still *read* every tick, because *Copy last error* hands over the tail
+on disk rather than whatever a held pane shows. `activity.entries` splits the
+tail where `logging_setup.FORMAT` starts a record, so a traceback stays with its
+message — for *Copy this entry* on the context menu, for *Copy last error*, and
+for the *Referat only* filter, which is judged on a record's header: by line, it
+dropped the frames out of the middle of Referat's own traceback whenever they
+passed through `httpx`.
 
 **The Activity tab is two kinds of truth and neither is a copy.** The queue is
 live state out of `progress`; the log pane is the **real rotating log file**,
@@ -1981,13 +1996,32 @@ reach a doc, and the first thing to disagree with the tags.
 one.** The standard desktop OAuth flow is `InstalledAppFlow.run_local_server`,
 which starts an HTTP server on loopback to catch the redirect — and Conventions
 forbid exactly that, with the test stated as *whether something binds a socket*.
-Google's out-of-band flow was shut off in 2022, so `gdocs._consent` builds the
-consent URL, opens it, and reads back the address the browser fails to load; the
-code is in its query string. Ten lines instead of one, and no exception spent on
-a rule this codebase has been careful about. It bought a second property worth
-keeping: the flow needs a terminal, so **the command center can never
-authenticate**, and a window that popped a browser consent from the thread that
-owns the recorder is structurally impossible rather than merely avoided.
+Google's out-of-band flow was shut off in 2022, so the consent is a URL that is
+opened and an address the browser fails to load, read back; the code is in its
+query string. Ten lines instead of one, and no exception spent on a rule this
+codebase has been careful about.
+
+**The window can run that flow since 2026-10-12, and what it may not do is
+narrower than this file used to say.** It said *the command center can never
+authenticate*, because the flow read `input()` and the tray has no terminal, and
+it called that a property worth keeping. Then a token was rejected seven days
+after it was issued — the OAuth app was still in *Testing* — and the only way to
+renew it was a prompt, for a failure met in the window. So the flow is two
+functions with the person between them: `gdocs.begin_consent` builds the URL and
+touches no network, and `gdocs.finish_consent` exchanges what was pasted back
+and stores the token. At a prompt the middle is `input()`, in `gdocs.consent`
+and `referat google`; in the window it is a line edit in
+`referat/ui/consent.py`, behind *Google sign-in...* on the projects page. Still
+no socket. The two things the old sentence was actually protecting both hold:
+**nothing starts a consent by itself** — `gdocs.credentials` with no terminal
+raises a sentence naming the button, and a sync on a worker thread never opens
+a browser — and **the exchange is never on the GUI thread**. The dialog is not
+modal, for the reason the recap window is not: somebody signing in is in a
+browser for a minute, and a modal would hold the Stop button for that minute.
+`gdocs.token_note` is what it says before anything is pressed, without a
+network call: the reason the last refresh in this process was rejected is
+remembered, because the tray is one long-lived process and the sentence is
+produced on a sync's thread minutes before a dialog wants it.
 
 Two scopes and no more: `documents`, and `drive.metadata.readonly` for the *select
 existing doc* search, which returns names and ids and no file content.
@@ -2714,8 +2748,9 @@ disappeared, and nothing disappears here.
   the command center, or Markdown rendered in an editor. **Step 13 honoured this
   rather than taking an exception to it**: Google's desktop OAuth flow wants a
   loopback HTTP server, so Referat uses a paste flow that binds nothing — see the
-  digests section. The rule cost ten lines and bought the property that no window
-  can ever ask for consent.
+  digests section. The rule cost ten lines, and it still holds now that the
+  window can run that flow: the sign-in dialog pastes into a line edit what a
+  prompt pastes into `input()`, and nothing listens anywhere.
 - **No Anthropic API key, ever.** All LLM work goes through the official
   `claude` binary under the user's Claude Code subscription login. No module in
   this project may call the Anthropic API directly, no key belongs in

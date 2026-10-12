@@ -23,10 +23,19 @@ remaining option is the paste flow below: build the consent URL, open it, and
 read back the URL the browser fails to load. Ten lines instead of one, and no
 exception to a load-bearing rule.
 
-It has a second property worth keeping. It needs a terminal, so **the command
-center can never authenticate** -- a window that popped a browser consent from
-a GUI thread would be a network round trip on the thread that owns the recorder.
-Phase 7's failure mode is a sentence saying to run one command from a prompt.
+**The flow is two halves, and the window stands between them since 2026-10-12.**
+:func:`begin_consent` builds the URL and touches no network; :func:`finish_consent`
+exchanges what was pasted back and stores the token. At a prompt the thing in
+between is `input()`; in the command center it is a line edit in
+:mod:`referat.ui.consent`. This used to say *the command center can never
+authenticate*, on the reasoning that a window which popped a browser consent
+would be a network round trip on the thread that owns the recorder -- and then a
+token expired after seven days and the only renewal was a terminal. What that
+sentence was protecting is narrower than what it said, and both parts hold:
+**nothing here starts a consent by itself** -- `credentials` with no terminal
+still raises rather than asking -- and **the exchange is never on the GUI
+thread**, which is the caller's to arrange and is why the two halves are
+separate functions.
 """
 
 from __future__ import annotations
@@ -165,7 +174,8 @@ def credentials(config: Config) -> Any:
 
     Three states, in order: a cached token that is still valid; one that has
     expired but carries a refresh token, which is refreshed silently; and
-    nothing usable, which asks. Only the third needs a person, and on this
+    nothing usable, which asks at a terminal and raises where there is none --
+    see :func:`consent`. Only the third needs a person, and on this
     machine it should happen approximately once -- provided the OAuth app's
     publishing status is *In production* rather than *Testing*, because Google
     expires a testing app's refresh tokens after seven days and the consent
@@ -185,6 +195,8 @@ def credentials(config: Config) -> Any:
             log.warning("cannot read %s; asking for consent again", token_path, exc_info=True)
             creds = None
 
+    global _refused
+
     if creds is not None and creds.valid:
         return creds
     reason = ""
@@ -193,12 +205,42 @@ def credentials(config: Config) -> Any:
             creds.refresh(Request())
         except Exception as exc:  # noqa: BLE001 - any refresh failure means ask again
             log.warning("refreshing the Google token failed; asking for consent", exc_info=True)
-            reason = _refresh_reason(exc)
+            reason = _refused = _refresh_reason(exc)
         else:
+            _refused = ""
             _store(creds, token_path)
             return creds
 
-    return _consent(config, token_path, reason)
+    return consent(config, reason)
+
+
+_refused = ""
+"""Why the last refresh in this process was rejected, or `""`.
+
+Remembered because the sentence is produced on a sync's worker thread and wanted
+minutes later by a dialog: the tray is one long-lived process, so the reason a
+sync failed at 15:40 is still true when somebody opens *Google sign-in...* at
+15:42, and asking Google again just to find out would be a network call made to
+fill in a label. Cleared by a refresh or a consent that worked.
+"""
+
+
+def token_note(config: Config) -> str:
+    """One sentence about the stored token, **without touching the network**.
+
+    What a sign-in surface says before anybody has pressed anything. It cannot
+    say the token *works* -- only Google knows that -- so the third answer is
+    worded as what is on disk rather than as a verdict.
+    """
+    if _refused:
+        return f"You have signed in before, and {_refused}"
+    token_path = config.google_token_file()
+    if not token_path.exists():
+        return f"Nobody has signed in on this machine yet: there is no token at {token_path}."
+    return (
+        f"A token is on file at {token_path}. Signing in again replaces it; "
+        "delete that file to sign out."
+    )
 
 
 def _refresh_reason(exc: Exception) -> str:
@@ -226,12 +268,13 @@ def _refresh_reason(exc: Exception) -> str:
     )
 
 
-def _consent(config: Config, token_path: Any, reason: str = "") -> Any:
-    """The paste flow. Binds nothing, and needs a terminal by design.
+def begin_consent(config: Config) -> tuple[Any, str]:
+    """The first half of the paste flow: `(flow, url)`. **No network, no socket.**
 
-    `reason` is why a stored token is not being used, so a *second* consent
-    explains itself. Being asked twice with no explanation is how somebody
-    concludes they are going to be asked forever.
+    Reads the client secret and builds a URL, which is all local, so it is safe
+    on a GUI thread. The `flow` has to be handed back to :func:`finish_consent`
+    unchanged: it holds the PKCE verifier the exchange is checked against, so a
+    code from this URL is worthless to any other flow object.
     """
     from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -242,24 +285,66 @@ def _consent(config: Config, token_path: Any, reason: str = "") -> Any:
             "'Desktop app' in the Google Cloud console, download the JSON, and save it "
             "there -- SETUP.md section 13 has the walkthrough."
         )
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(secret), list(SCOPES), redirect_uri=REDIRECT_URI
+        )
+    except (OSError, ValueError) as exc:
+        raise GoogleError(f"cannot read the Google client secret at {secret}: {exc}") from exc
+    # `offline` is what mints a refresh token at all, and `consent` is what makes
+    # Google issue a new one rather than reusing a grant that has none attached.
+    url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+    return flow, url
+
+
+def finish_consent(config: Config, flow: Any, pasted: str) -> Any:
+    """The second half: exchange what was pasted back, and store the token.
+
+    **This is the network round trip**, so a window calls it on a worker thread.
+    Nothing is written unless Google accepts the code -- a refusal leaves
+    whatever token was on file exactly where it was.
+    """
+    global _refused
+
+    code = _code_from(pasted.strip())
+    if not code:
+        raise GoogleError("no authorization code in what was pasted; nothing was saved")
+    try:
+        flow.fetch_token(code=code)
+    except Exception as exc:  # noqa: BLE001
+        raise GoogleError(f"Google refused the authorization code: {exc}") from exc
+
+    _store(flow.credentials, config.google_token_file())
+    _refused = ""
+    return flow.credentials
+
+
+def consent(config: Config, reason: str = "") -> Any:
+    """The paste flow at a terminal. Binds nothing.
+
+    `reason` is why a stored token is not being used, so a *second* consent
+    explains itself. Being asked twice with no explanation is how somebody
+    concludes they are going to be asked forever.
+
+    With no terminal this raises rather than asking, which is the half of *the
+    command center can never authenticate* that is still true: a sync on a
+    worker thread never opens a browser on its own. The window signs in through
+    :func:`begin_consent` and :func:`finish_consent`, when somebody presses the
+    button.
+    """
+    flow, url = begin_consent(config)
     if not sys.stdin or not sys.stdin.isatty():
         # `reason` is carried into this sentence too, because the command center
         # is exactly where a weekly expiry is met: it used to be dropped here, so
         # a window said "consent once" to somebody who had, and pointed them at
-        # `link-doc`, which is a verb about a document rather than about a token.
+        # `project sync`, which is a verb about a document rather than a token.
         raise GoogleError(
-            (f"You have consented before, and {reason} " if reason else "")
-            + "Google consent has to be given at a terminal: run "
-            "`referat project sync <project-id>` from a prompt, and every later "
-            "sync -- from the command center included -- will use the stored token."
+            (f"You have signed in before, and {reason} " if reason else "")
+            + "Sign in to Google again: in the command center, Projects tab, "
+            "Google sign-in... -- or run `referat google` at a prompt. Every later "
+            "sync uses the token it stores."
         )
-
-    flow = InstalledAppFlow.from_client_secrets_file(
-        str(secret), list(SCOPES), redirect_uri=REDIRECT_URI
-    )
-    # `offline` is what mints a refresh token at all, and `consent` is what makes
-    # Google issue a new one rather than reusing a grant that has none attached.
-    url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+    token_path = config.google_token_file()
 
     print("\nReferat needs your permission to write its digests into Google Docs.")
     if reason:
@@ -281,20 +366,12 @@ def _consent(config: Config, token_path: Any, reason: str = "") -> Any:
         # which is what a piped or captured stdin looks like. Nothing was saved.
         raise GoogleError(
             "there is no terminal to read the authorization code from. Run "
-            "`referat project sync <project-id>` directly at a prompt. "
-            "Every later sync uses the token it stores."
+            "`referat google` directly at a prompt, or use Google sign-in... on the "
+            "command center's Projects tab. Every later sync uses the token it stores."
         ) from None
-    code = _code_from(pasted)
-    if not code:
-        raise GoogleError("no authorization code in what was pasted; nothing was saved")
-    try:
-        flow.fetch_token(code=code)
-    except Exception as exc:  # noqa: BLE001
-        raise GoogleError(f"Google refused the authorization code: {exc}") from exc
-
-    _store(flow.credentials, token_path)
+    creds = finish_consent(config, flow, pasted)
     print(f"\nSaved to {token_path}. Delete that file to sign out.\n")
-    return flow.credentials
+    return creds
 
 
 def _code_from(pasted: str) -> str:

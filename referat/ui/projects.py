@@ -48,10 +48,13 @@ go through :mod:`referat.progress`. This process owns the recorder, and a hung
 request on the GUI thread is a window somebody cannot stop a meeting from — the
 same reasoning that put the notes queue on a worker.
 
-**This page cannot authenticate and does not try.** Google consent needs a
-terminal by construction, so a machine that has never consented gets the sentence
-saying to run one command at a prompt, once. That is a property of the paste flow
-`referat.gdocs` chose rather than a limitation this page ran into.
+**Signing in to Google is here since 2026-10-12**, as *Google sign-in...* beside
+the three, opening :mod:`referat.ui.consent`. This paragraph used to say the page
+cannot authenticate and does not try; then a token expired after seven days and
+the only renewal was a terminal. What survives of that is the part that mattered:
+the page never starts a consent **by itself** -- a sync that finds no usable
+token still reports the sentence `referat.gdocs` wrote, which names this button
+-- and the dialog binds no socket and exchanges the code off the GUI thread.
 """
 
 from __future__ import annotations
@@ -88,6 +91,7 @@ from referat.config import Config
 from referat.projects import clean_terms
 from referat.ui import docs as docs_dialog
 from referat.ui import icons, lists, viewer
+from referat.ui.consent import SignInDialog
 from referat.ui.recap import RecapWindow
 
 log = logging.getLogger(__name__)
@@ -360,6 +364,16 @@ class ProjectsPage(QWidget):
         self.sync_button.setIcon(icons.glyph("sync", self._icon_color()))
         self.sync_button.setAutoDefault(False)
         self.sync_button.clicked.connect(self._on_sync)
+        # About the account rather than the selected project, so it is never
+        # disabled -- the moment it is wanted is the moment a sync has just
+        # failed, which may be with nothing selected at all.
+        self.sign_in_button = QPushButton("Google sign-in...")
+        self.sign_in_button.setToolTip(
+            "Sign in to Google again, for when a sync says the stored token was rejected."
+        )
+        self.sign_in_button.setAutoDefault(False)
+        self.sign_in_button.clicked.connect(self._on_sign_in)
+        self._sign_in_dialog: SignInDialog | None = None
 
         self.save_button = QPushButton("Save")
         self.save_button.setAutoDefault(False)
@@ -407,6 +421,7 @@ class ProjectsPage(QWidget):
         # into somebody's document. *Open* moved up to the doc line.
         docs_row = QHBoxLayout()
         docs_row.setContentsMargins(0, 0, 0, 0)
+        docs_row.addWidget(self.sign_in_button)
         docs_row.addStretch(1)
         docs_row.addWidget(self.link_button)
         docs_row.addWidget(self.unlink_button)
@@ -1387,6 +1402,22 @@ class ProjectsPage(QWidget):
         if not gdoc_id:
             return
         QDesktopServices.openUrl(QUrl(gdocs.doc_url(gdoc_id)))
+
+    def _on_sign_in(self) -> None:
+        """Open the sign-in dialog. One instance, raised if it is already open.
+
+        Not `exec()`: somebody signing in is in a browser for a minute, and a
+        modal would hold the window's Stop button for that minute. Kept on the
+        page rather than rebuilt, so a consent already open in the browser still
+        has the flow its code belongs to.
+        """
+        if (why := gdocs.available()):
+            self._complain(why)
+            return
+        if self._sign_in_dialog is None:
+            self._sign_in_dialog = SignInDialog(self.config, self)
+            self._sign_in_dialog.signed_in.connect(self._complain)
+        self._sign_in_dialog.present()
 
     def _on_link_doc(self) -> None:
         """Ask which document and which tab, then link and backfill on a thread."""

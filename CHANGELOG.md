@@ -2,6 +2,53 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-10-12 — Google sign-in from the window, and a log you can copy from
+
+A sync failed with `invalid_grant: Token has been expired or revoked` seven days
+after the last consent. Renewing it needed a terminal, and copying the error out
+of the Activity tab was not possible short of selecting the whole log.
+
+- **Google sign-in... on the projects page.** `referat/ui/consent.py` opens the
+  consent in the browser, takes back the `localhost` address the browser fails
+  to load, and stores the token. It is the same paste flow as before with a text
+  field where the prompt has `input()`: no socket is bound. The exchange runs on
+  a thread, and the dialog is not modal, so the window and its Stop button stay
+  usable while you are in the browser.
+- **`gdocs` split in two.** `begin_consent` builds the URL and touches no
+  network; `finish_consent` exchanges what was pasted and stores the token.
+  `consent` (was `_consent`) is those two around `input()`. `credentials` with
+  no terminal still raises rather than asking, so a sync never opens a browser
+  by itself. `token_note` says what is on file, and remembers why the last
+  refresh in this process was rejected.
+- **`referat google`** signs in at a prompt. The refusal used to say to run
+  `referat project sync <project-id>`, a verb about a document; it now names
+  the button and this verb.
+- **The log pane keeps a selection.** `ActivityPage._fill_log` replaced the
+  whole pane every two seconds whether or not the file had changed, which reset
+  the cursor and wiped a drag mid-drag. It now redraws only when the tail
+  changed and never while text is selected, and the label says it is holding.
+- **Copy by record.** *Copy last error* (a button, and on the context menu)
+  copies the newest warning or error with its traceback; *Copy this entry*
+  copies the record under the pointer. *Referat only* now hides a whole record
+  by its header — by line, it removed frames from the middle of a traceback
+  that passed through `httpx`.
+- `CLAUDE.md` said in three places that the command center can never
+  authenticate. Amended: what it may not do is start a consent by itself or
+  exchange a code on the GUI thread.
+- Verified with scratch scripts against a throwaway token path, never the real
+  one: the URL carries both scopes, `redirect_uri=http://localhost`, offline
+  access and a PKCE challenge; an empty paste and one with no `code` are
+  refused and write nothing; with no terminal `consent` raises before opening
+  anything. The dialog and the Activity page were driven offscreen with the
+  browser call stubbed: a selection survives a tick, the pane redraws on
+  release, an unchanged tail is not redrawn. A real sign-in through the dialog
+  and selecting in the running window were then reported working by hand. One
+  of those scripts opened a real consent tab in the browser by mistake; nothing
+  was saved.
+- The seven-day expiry itself is the OAuth app still being in *Testing*
+  (SETUP.md 13b, step 5). That is a setting in the Google Cloud console and is
+  unchanged by any of this.
+
 ## 2026-09-30 — A linked doc you can see and open
 
 Feedback on the projects page: you couldn't tell a project had a Google Doc,

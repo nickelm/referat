@@ -995,9 +995,18 @@ step 5 above: an OAuth app left in **Testing** has its refresh tokens expired by
 Google every seven days, which looks exactly like Referat asking every week. Set
 the publishing status to *In production* and it stops. The other causes -- access
 revoked at myaccount.google.com, the client deleted, a badly wrong system clock
--- are named in the message too. Because the flow needs a terminal, **the command center can never
-ask for consent** — do this once at a prompt and every later sync, from the
-window included, uses the stored token.
+-- are named in the message too.
+
+**Signing in again**, when it is needed, is the same flow from either place:
+
+```powershell
+.venv\Scripts\python.exe -m referat.cli google
+```
+
+or **Google sign-in...** on the command center's Projects tab, which opens the
+same consent in your browser and takes the address back in a text field instead
+of at a prompt. The window never starts this by itself: a sync that finds the
+token rejected says so and names the button.
 
 ### 13d. Linking, in the window
 
@@ -1008,9 +1017,10 @@ have; for the second, paste its link, press *Look up its tabs*, and pick the tab
 Nothing is preselected unless the link carried a `?tab=` or the document has a
 tab called `Meetings` — Referat will not choose a tab for you.
 
-The consent in 13c is the one thing the window cannot do, by design: it needs a
-terminal. Do that once at a prompt and the window uses the stored token from then
-on.
+**Google sign-in...** at the left of that row is the consent in 13c, from the
+window: press *Open Google in your browser*, approve, copy the `localhost`
+address the browser fails to load, paste it into the dialog and press *Save
+sign-in*. The dialog does not lock the window while you are in the browser.
 
 Each row shows the **document's** title with its tab in brackets, and
 double-clicking one opens it in your browser.

@@ -24,18 +24,34 @@ redraws because something happened; a log file grows with no event this process
 can see, and a tail that only updated when you switched tabs would be a tail of
 the past. It runs **only while this page is in front** and costs a read of the
 end of one file.
+
+**The tail may not cost a selection.** Until 2026-10-12 every tick replaced the
+whole pane whether or not the file had grown, and replacing a document resets
+its cursor — so a drag across the last error was wiped within two seconds and
+the only selection fast enough to survive was *Select all*. The pane is now
+left alone when nothing changed and while anything in it is selected, and says
+that it is holding.
+
+**And what gets copied out of a log is a record, not a line.** An error here is
+a header and a traceback, so :func:`entries` splits the tail where the
+formatter starts a record and *Copy this entry* and *Copy last error* hand over
+the whole of one.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -66,6 +82,54 @@ downloaded on every run: it logs one `GET .../revision/main` line per load,
 which is a metadata check against a model that is already cached on disk.
 """
 
+ENTRY_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (\w+)")
+"""Where a record starts: `logging_setup.FORMAT`'s timestamp, then the level.
+
+Every line that does not match belongs to the record above it, which is what
+keeps a traceback with the message it explains.
+"""
+
+PROBLEMS = ("WARNING", "ERROR", "CRITICAL")
+
+LOG = "Log"
+HELD = "Log (holding still while text is selected)"
+FLASH_MS = 4000
+
+
+def entries(text: str) -> list[str]:
+    """The log split into records, each a header line and whatever follows it.
+
+    Lines ahead of the first header are the end of a record the tail cut into;
+    they come back as a record of their own rather than being dropped, so the
+    records always join back into exactly the text they came from.
+    """
+    out: list[list[str]] = []
+    for line in text.split("\n"):
+        if ENTRY_RE.match(line) or not out:
+            out.append([line])
+        else:
+            out[-1].append(line)
+    return ["\n".join(record) for record in out]
+
+
+def last_problem(records: list[str]) -> str:
+    """The most recent warning or error, traceback included, or `""`."""
+    for record in reversed(records):
+        match = ENTRY_RE.match(record)
+        if match is not None and match.group(1) in PROBLEMS:
+            return record.rstrip()
+    return ""
+
+
+def entry_at(text: str, line: int) -> str:
+    """The record that line number `line` of `text` belongs to."""
+    seen = 0
+    for record in entries(text):
+        seen += record.count("\n") + 1
+        if line < seen:
+            return record.rstrip()
+    return ""
+
 
 class ActivityPage(QWidget):
     """The queue on top, the log beneath, refreshed while it is being looked at."""
@@ -74,6 +138,11 @@ class ActivityPage(QWidget):
         super().__init__(parent)
         self._log_path = paths.log_path()
         self._follow = True
+        self._tail = ""
+        """The tail as read, before *Referat only* narrows it. What a copy reads."""
+        self._shown: str | None = None
+        """The text last put in the pane, so an unchanged tail is not redrawn."""
+        self._flashing = False
 
         self.jobs = QTreeWidget()
         self.jobs.setColumnCount(4)
@@ -92,6 +161,8 @@ class ActivityPage(QWidget):
         # A monospace pane, because these are aligned timestamped records and
         # proportional text turns a scannable column into prose.
         self.log.setStyleSheet("font-family: Consolas, monospace;")
+        self.log.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.log.customContextMenuRequested.connect(self._on_menu)
 
         self.quiet = QCheckBox("Referat only")
         self.quiet.setChecked(True)
@@ -99,22 +170,35 @@ class ActivityPage(QWidget):
             "Hide library chatter - httpx, huggingface, faster_whisper. The httpx "
             "line is a cached-model revision check, not a download."
         )
-        self.quiet.toggled.connect(self._fill_log)
+        # Forced: somebody changing what the pane shows has asked for a redraw,
+        # selection or not.
+        self.quiet.toggled.connect(lambda _checked: self._fill_log(force=True))
 
         self.following = QCheckBox("Follow")
         self.following.setChecked(True)
         self.following.setToolTip("Scroll to the newest line as it arrives.")
 
+        self.copy_error_button = QPushButton("Copy last error")
+        self.copy_error_button.setToolTip(
+            "The most recent warning or error, with its traceback, onto the clipboard."
+        )
+        self.copy_error_button.setAutoDefault(False)
+        self.copy_error_button.setEnabled(False)
+        self.copy_error_button.clicked.connect(self._on_copy_error)
+
         self.open_button = QPushButton("Open log file")
         self.open_button.setAutoDefault(False)
         self.open_button.clicked.connect(self._on_open)
 
+        self.log_label = QLabel(LOG)
+
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
-        controls.addWidget(QLabel("Log"))
+        controls.addWidget(self.log_label)
         controls.addWidget(self.quiet)
         controls.addWidget(self.following)
         controls.addStretch(1)
+        controls.addWidget(self.copy_error_button)
         controls.addWidget(self.open_button)
 
         top = QVBoxLayout()
@@ -201,13 +285,19 @@ class ActivityPage(QWidget):
 
     # --- The log --------------------------------------------------------------
 
-    def _fill_log(self) -> None:
+    def _fill_log(self, force: bool = False) -> None:
         """Re-read the tail of the rotating log and show it.
 
         The whole visible text is replaced rather than appended to, which is the
         simple thing and is correct across a rotation — an append would need to
         track a file offset that a rollover invalidates, and would show the same
         lines twice the first time it happened.
+
+        **Replaced only when it changed, and never under a selection** unless
+        `force` says somebody asked. Replacing a document resets its cursor, so
+        a redraw every two seconds is a selection that lasts two seconds. The
+        file is still *read* every tick: what *Copy last error* hands over is
+        the tail on disk, not whatever the held pane happens to show.
 
         The scroll position is kept unless *Follow* is on, so reading something
         five minutes old is not interrupted every two seconds.
@@ -218,18 +308,96 @@ class ActivityPage(QWidget):
                 handle.seek(max(0, handle.tell() - TAIL_BYTES))
                 raw = handle.read().decode("utf-8", errors="replace")
         except OSError:
+            self._tail = ""
+            self.copy_error_button.setEnabled(False)
+            self._shown = None
             self.log.setPlainText(f"No log at {self._log_path} yet.")
             return
 
-        lines = raw.split("\n")[1:]  # the first is normally a partial line
+        # The first line is normally a partial one.
+        self._tail = raw.replace("\r\n", "\n").split("\n", 1)[-1]
+        records = entries(self._tail)
+        self.copy_error_button.setEnabled(bool(last_problem(records)))
         if self.quiet.isChecked():
-            lines = [line for line in lines if not any(n in line for n in NOISE)]
+            # Judged on a record's header and applied to the whole record: a
+            # traceback of Referat's own that passes through a library's frames
+            # names that library on every other line, and filtering by line
+            # dropped those lines out of the middle of it.
+            records = [
+                record
+                for record in records
+                if not any(n in record.split("\n", 1)[0] for n in NOISE)
+            ]
+        text = "\n".join(records).strip()
+
+        held = not force and self._selecting()
+        if not self._flashing:
+            self.log_label.setText(HELD if held else LOG)
+        if held or (text == self._shown and not force):
+            return
 
         bar = self.log.verticalScrollBar()
         at_bottom = self.following.isChecked() or bar.value() >= bar.maximum() - 4
         position = bar.value()
-        self.log.setPlainText("\n".join(lines).strip())
+        self.log.setPlainText(text)
+        self._shown = text
         bar.setValue(bar.maximum() if at_bottom else min(position, bar.maximum()))
+
+    def _selecting(self) -> bool:
+        """Whether a redraw now would take something out of somebody's hands.
+
+        A selection that exists, or one being started: a press has no selection
+        yet, and a redraw between the press and the first movement would move
+        the anchor the drag is measured from.
+        """
+        if self.log.textCursor().hasSelection():
+            return True
+        pressed = QApplication.mouseButtons() != Qt.MouseButton.NoButton
+        return pressed and self.log.underMouse()
+
+    # --- Copying out of it ----------------------------------------------------
+
+    def _on_menu(self, where: QPoint) -> None:
+        """Right-click: the selection, the record under the pointer, or the last error."""
+        line = self.log.cursorForPosition(where).blockNumber()
+        entry = entry_at(self.log.toPlainText(), line)
+        problem = last_problem(entries(self._tail))
+
+        menu = QMenu(self.log)
+        copy = menu.addAction("Copy")
+        copy.setEnabled(self.log.textCursor().hasSelection())
+        copy.triggered.connect(lambda _checked=False: self.log.copy())
+        this = menu.addAction("Copy this entry")
+        this.setEnabled(bool(entry))
+        this.triggered.connect(lambda _checked=False: self._copy(entry, "that entry"))
+        error = menu.addAction("Copy last error")
+        error.setEnabled(bool(problem))
+        error.triggered.connect(lambda _checked=False: self._on_copy_error())
+        menu.addSeparator()
+        menu.addAction("Select all").triggered.connect(
+            lambda _checked=False: self.log.selectAll()
+        )
+        menu.exec(self.log.viewport().mapToGlobal(where))
+
+    def _on_copy_error(self) -> None:
+        """The newest warning or error in the tail, whatever the filter is hiding."""
+        self._copy(last_problem(entries(self._tail)), "the last error")
+
+    def _copy(self, text: str, what: str) -> None:
+        """Put one record on the clipboard and say so where the eye already is."""
+        if not text:
+            return
+        QGuiApplication.clipboard().setText(text)
+        count = text.count("\n") + 1
+        self._flashing = True
+        self.log_label.setText(
+            f"Log - copied {what} ({count} line{'s' if count != 1 else ''})"
+        )
+        QTimer.singleShot(FLASH_MS, self._end_flash)
+
+    def _end_flash(self) -> None:
+        self._flashing = False
+        self.log_label.setText(HELD if self._selecting() else LOG)
 
     def _on_open(self) -> None:
         """Hand the log to the desktop, for when the tail is not enough."""

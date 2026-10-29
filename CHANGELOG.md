@@ -2,6 +2,48 @@
 
 Newest first. One entry per work session; small changes are grouped.
 
+## 2026-10-29 — Every output is looped back, after a call lost its far end
+
+`2026-10-28_1400`, a 28-minute Zoom call, was transcribed as the owner alone.
+The loopback was `Speakers (Realtek(R) Audio)`, the Windows default because no
+headphones were plugged in, and it delivered 4.5 s of packets in the whole
+meeting (`1666.7s of it padded silence`). The call played through the Jabra
+SPEAK 510's own speaker instead. Zoom's logs are encrypted, so that is inferred,
+but nothing else fits both channels. The Jabra's echo cancellation keeps its
+playback out of its microphone, so the mic held none of the far end either.
+Both WAVs were released at 14:33 because a voiceless loopback passes the gate,
+so **the far end of that meeting is gone and cannot be recovered**. Every
+earlier call that worked had looped back `Headphones (Realtek(R) Audio)`.
+
+- **`recorder.resolve_loopback_devices`**: with `[audio].loopback_device` empty,
+  every WASAPI loopback endpoint, the default first. A pinned key is still one
+  endpoint. `resolve_loopback_device` is its first element.
+- **One `Channel` per endpoint**, written as `system.part<N>.wav` and padded
+  against the one recording clock, so the parts are aligned by construction.
+  An endpoint that will not open is skipped. The system channel is missing only
+  when none opens.
+- **`recorder.mix_loopback_parts`** on stop. No active part: the default's is
+  renamed. One: renamed, nothing read. Several: summed in 10 s blocks, exact for
+  int16, with a part at another rate resampled. Parts are deleted only after
+  `system.wav` is in place. A failed mix keeps the most active part.
+  `audio.system.device` names the endpoints that went in.
+- **`meeting.reconcile_interrupted`** mixes the parts a killed recorder left,
+  deciding by a non-zero-sample scan, and takes `ended_at` from the parts'
+  mtimes rather than the mixed file's.
+- **`transcribe.promote_meeting` refuses any top-level WAV**, not just `mic.wav`
+  and `system.wav`, so a part left by a failed mix cannot reach Dropbox.
+- **`referat/resample.py`**: the resampler moved out of `transcribe.py` so the
+  base-install recorder can use it. `resample_chunks` is the old chunk loop as a
+  generator. The output is byte-identical to the old code at 48 kHz and 44.1 kHz.
+- **`referat devices`** marks every loopback that will be recorded `<- recorded`.
+- `CLAUDE.md`, and `SETUP.md` §4 and §4a. §4a recommended the Jabra for call
+  audio, which was the routing that lost the meeting. It is safe advice now.
+- Verified: offline checks of the rename, scan, exact-sum and mixed-rate paths
+  and of a killed recording's close-out, and a live 8 s recording with tones
+  played on the Jabra and the laptop speakers. Both endpoints landed in
+  `system.wav`, the two silent ones were left out, no part was left behind, and
+  the mix took 0.1 s.
+
 ## 2026-10-12 — Google sign-in from the window, and a log you can copy from
 
 A sync failed with `invalid_grant: Token has been expired or revoked` seven days

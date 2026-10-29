@@ -7,6 +7,25 @@ Two independent channels are written for every meeting:
   device's native mix rate and downmixed to mono. Everyone else, and it works
   through headphones, which is the whole point of using loopback.
 
+**Every output is looped back, not just the default — since 2026-10-29.** A
+loopback hears one render endpoint, and a call can play through any of them.
+On 2026-10-28 a 28-minute Zoom call played through the Jabra SPEAK 510's own
+speaker while the recorder listened to the laptop's, which was the Windows
+default because no headphones were plugged in. The loopback delivered 4.5
+seconds of packets in the whole meeting. The Jabra cancels its own playback out
+of its microphone, so the mic held none of the far end either, and the meeting
+was transcribed as the owner talking to nobody. The audio was released on
+schedule, since a voiceless loopback is clean for every in-person meeting, and
+the far end was never on disk to recover.
+
+So with `[audio].loopback_device` empty, every endpoint gets its own stream and
+its own :class:`Channel`, writing `system.part<N>.wav`. Each part is padded
+against the one recording clock exactly as a single `system.wav` always was, so
+the parts are aligned sample for sample, and :func:`mix_loopback_parts` combines
+them into `system.wav` when recording stops. Nothing past the recorder ever sees
+a part. A pinned `loopback_device` records the one endpoint straight into
+`system.wav`, as before.
+
 **Silence padding.** Windows stops handing out loopback packets when the render
 endpoint is idle: measured on this machine, four seconds of silence produced
 exactly zero frames. Written naively, `system.wav` would hold only the noisy
@@ -29,9 +48,13 @@ import datetime as dt
 import logging
 import os
 import queue
+import re
 import struct
 import threading
 import time
+import wave
+from collections.abc import Iterator
+from contextlib import ExitStack
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -40,6 +63,7 @@ import numpy as np
 
 from referat.config import Config
 from referat.meeting import ChannelAudio, Meeting, MeetingStatus, Pause
+from referat.resample import resample_chunks, to_mono_float
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +83,15 @@ MIC_BLOCKSIZE = 1600
 """0.1 s at 16 kHz."""
 
 LOOPBACK_BLOCKSIZE = 1024
+
+LOOPBACK_PART_RE = re.compile(r"^system\.part(\d+)\.wav$")
+"""One endpoint's share of `system.wav` while a meeting records. See :func:`part_path`."""
+
+MIX_BLOCK_SECONDS = 10.0
+"""How much of each loopback part :func:`mix_loopback_parts` holds at once."""
+
+ACTIVE_MIN_SECONDS = 0.5
+"""Delivered audio, beyond padding, that makes a loopback part worth mixing in."""
 
 
 class RecorderError(RuntimeError):
@@ -215,6 +248,128 @@ class WavWriter:
             self.sync()
         finally:
             self._file.close()
+
+
+# --- Loopback parts -----------------------------------------------------------
+
+
+def part_path(folder: Path, number: int) -> Path:
+    """Where loopback endpoint `number` (1-based, in the order opened) is recorded."""
+    return folder / f"system.part{number}.wav"
+
+
+def loopback_parts(folder: Path) -> list[Path]:
+    """The loopback parts in a meeting folder, in the order their endpoints opened.
+
+    Numerically rather than by name, so a machine with ten outputs does not put
+    `part10` ahead of `part2` and mix at the wrong endpoint's rate.
+    """
+    found = []
+    for path in folder.glob("system.part*.wav"):
+        match = LOOPBACK_PART_RE.match(path.name)
+        if match:
+            found.append((int(match.group(1)), path))
+    return [path for _, path in sorted(found)]
+
+
+def _has_sound(path: Path) -> bool:
+    """Whether a part holds any non-zero sample: the test when no counters survive."""
+    with wave.open(str(path), "rb") as wav:
+        step = int(MIX_BLOCK_SECONDS * wav.getframerate())
+        while raw := wav.readframes(step):
+            if np.frombuffer(raw, dtype=np.int16).any():
+                return True
+    return False
+
+
+def _float_blocks(path: Path, rate: int) -> Iterator[np.ndarray]:
+    """A part as mono float32 at `rate`, a block at a time, resampling if it must."""
+    with wave.open(str(path), "rb") as wav:
+        own, channels, frames = wav.getframerate(), wav.getnchannels(), wav.getnframes()
+        if own != rate:
+            yield from resample_chunks(wav, frames, channels, own, rate)
+            return
+        step = int(MIX_BLOCK_SECONDS * rate)
+        while raw := wav.readframes(step):
+            yield to_mono_float(raw, channels)
+
+
+def mix_loopback_parts(
+    target: Path, parts: list[Path], active: list[bool] | None = None
+) -> list[int]:
+    """Combine aligned loopback parts into `target`, delete them, and say which counted.
+
+    `parts` is in the order the endpoints opened, so the first is the default
+    output, and its rate is the mix rate. `active` says which parts carried
+    sound. The recorder knows that from its counters. After a crash nothing
+    does, so `None` means scan each part for a non-zero sample.
+
+    Three cases, cheapest first. If no part carried sound, the first is renamed
+    into place: it is silent, which is true of the meeting. If exactly one did,
+    which is the ordinary call, that one is renamed and nothing is read or
+    copied. If two or more did, they are summed a block at a time and clipped
+    back to 16 bits. A part at a different rate is resampled with the same
+    resampler transcription uses. Summing is exact for the int16 values
+    involved, so a mix of one loud part and one silent one reproduces the loud
+    one sample for sample.
+
+    The mix is written beside `target` and renamed over it, and the parts are
+    deleted only once `target` is in place: an exception leaves every part on
+    disk. Returns the indices of the parts that went into `target`.
+    """
+    if not parts:
+        raise ValueError("no loopback parts to mix")
+    if active is None:
+        active = [_has_sound(path) for path in parts]
+    chosen = [i for i, on in enumerate(active) if on]
+
+    if len(chosen) <= 1:
+        used = chosen or [0]
+        os.replace(parts[used[0]], target)
+    else:
+        used = chosen
+        with wave.open(str(parts[0]), "rb") as wav:
+            rate = wav.getframerate()
+        mixing = target.with_name(target.name + ".mixing")
+        block = int(MIX_BLOCK_SECONDS * rate)
+        writer = WavWriter(mixing, rate)
+        with ExitStack() as stack:
+            try:
+                sources: list[Iterator[np.ndarray] | None] = []
+                for i in chosen:
+                    source = _float_blocks(parts[i], rate)
+                    stack.callback(source.close)
+                    sources.append(source)
+                buffers = [np.empty(0, dtype=np.float32) for _ in chosen]
+                while True:
+                    for n, source in enumerate(sources):
+                        while source is not None and buffers[n].size < block:
+                            piece = next(source, None)
+                            if piece is None:
+                                sources[n] = source = None
+                            else:
+                                buffers[n] = np.concatenate((buffers[n], piece))
+                    take = max(min(b.size, block) for b in buffers)
+                    if take == 0:
+                        break
+                    out = np.zeros(take, dtype=np.float32)
+                    for n, buffered in enumerate(buffers):
+                        count = min(buffered.size, take)
+                        out[:count] += buffered[:count]
+                        buffers[n] = buffered[count:]
+                    out *= 32768.0
+                    writer.write(np.clip(np.rint(out), -32768, 32767).astype(np.int16).tobytes())
+            finally:
+                writer.close()
+        os.replace(mixing, target)
+
+    for path in parts:
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                log.warning("could not delete loopback part %s", path.name, exc_info=True)
+    return used
 
 
 # --- One channel ------------------------------------------------------------
@@ -412,11 +567,16 @@ def resolve_mic_device(wanted: str) -> int | None:
     return first
 
 
-def resolve_loopback_device(audio: object, wanted: str) -> dict:
-    """The WASAPI loopback device info matching `wanted`, else the default output's.
+def resolve_loopback_devices(audio: object, wanted: str) -> list[dict]:
+    """Every WASAPI loopback endpoint to record, the default output's first.
 
-    `audio` is a live `pyaudiowpatch.PyAudio`. Raises :class:`RecorderError`
-    when Windows exposes no loopback device at all.
+    `audio` is a live `pyaudiowpatch.PyAudio`. With `wanted` empty that is every
+    endpoint Windows exposes, because a call plays wherever its application
+    sends it, and the default output is only where *Windows* sends things. See
+    the module docstring for the meeting that cost. With `wanted` set it is the
+    one endpoint matching it, or the default when nothing matches, as it always
+    was. Raises :class:`RecorderError` when Windows exposes no loopback device
+    at all.
     """
     try:
         candidates = list(audio.get_loopback_device_info_generator())  # type: ignore[attr-defined]
@@ -427,17 +587,29 @@ def resolve_loopback_device(audio: object, wanted: str) -> dict:
         for info in candidates:
             if _matches(str(info["name"]), wanted):
                 log.info("loopback device: %s", info["name"])
-                return info
+                return [info]
         log.warning("no loopback device matching %r; using the default output", wanted)
 
     try:
-        info = audio.get_default_wasapi_loopback()  # type: ignore[attr-defined]
-    except Exception as exc:
-        raise RecorderError(f"no default WASAPI loopback device: {exc}") from exc
-    if info is None:
-        raise RecorderError("no default WASAPI loopback device")
-    log.info("loopback device: %s", info["name"])
-    return info
+        default = audio.get_default_wasapi_loopback()  # type: ignore[attr-defined]
+    except Exception:
+        log.warning("Windows named no default output", exc_info=True)
+        default = None
+    if wanted.strip() or not candidates:
+        if default is None:
+            raise RecorderError("no default WASAPI loopback device")
+        log.info("loopback device: %s", default["name"])
+        return [default]
+
+    if default is not None:
+        candidates.sort(key=lambda info: info["index"] != default["index"])
+    log.info("loopback devices: %s", ", ".join(str(info["name"]) for info in candidates))
+    return candidates
+
+
+def resolve_loopback_device(audio: object, wanted: str) -> dict:
+    """The first of :func:`resolve_loopback_devices`: the default, or the pinned one."""
+    return resolve_loopback_devices(audio, wanted)[0]
 
 
 # --- The recorder -----------------------------------------------------------
@@ -456,9 +628,13 @@ class Recorder:
         self.meeting: Meeting | None = None
         self.clock = RecordingClock()
         self._mic: Channel | None = None
-        self._system: Channel | None = None
+        self._systems: list[Channel] = []
+        """One per loopback endpoint that opened, the default output's first."""
         self._mic_stream: object | None = None
-        self._loopback_stream: object | None = None
+        self._loopback_streams: list[object] = []
+        self._system_parts = False
+        """Whether the loopback is being written as parts, to be mixed on stop."""
+        self._system_used: list[int] = []
         self._audio: object | None = None
         self.missing_channels: list[str] = []
         """Channels that would not open this run: read by the tray for its toast."""
@@ -483,7 +659,7 @@ class Recorder:
         except Exception:
             log.exception("system audio capture unavailable")
 
-        if self._mic is None and self._system is None:
+        if self._mic is None and not self._systems:
             meeting.status = MeetingStatus.FAILED
             meeting.ended_at = started_at
             meeting.save()
@@ -500,8 +676,8 @@ class Recorder:
         # how somebody finds out in time to do something about it.
         self.missing_channels = [
             name
-            for name, channel in (("mic", self._mic), ("system", self._system))
-            if channel is None
+            for name, opened in (("mic", self._mic is not None), ("system", bool(self._systems)))
+            if not opened
         ]
         meeting.missing_channels = list(self.missing_channels)
         meeting.save()
@@ -509,7 +685,7 @@ class Recorder:
             "recording %s (mic=%s, system=%s)",
             meeting.id,
             "on" if self._mic else "off",
-            "on" if self._system else "off",
+            f"{len(self._systems)} output(s)" if self._systems else "off",
         )
         if self._mic is None:
             # Loud, because for a meeting held in a room the microphone *is* the
@@ -593,34 +769,63 @@ class Recorder:
         return stream
 
     def _start_system(self, meeting: Meeting) -> None:
+        """Open a loopback on every endpoint :func:`resolve_loopback_devices` names.
+
+        One endpoint is written straight into `system.wav`. Several are written
+        as parts and mixed on stop. An endpoint that will not open is logged and
+        skipped. The channel is missing only when none opens, because any one
+        of them may be the one the call is playing through.
+        """
         import pyaudiowpatch as pyaudio
 
         audio = pyaudio.PyAudio()
         self._audio = audio
-        info = resolve_loopback_device(audio, self.config.audio.loopback_device)
+        infos = resolve_loopback_devices(audio, self.config.audio.loopback_device)
+        self._system_parts = len(infos) > 1
+        failures: list[str] = []
+        for info in infos:
+            name = str(info["name"])
+            path = (
+                part_path(meeting.dir, len(self._systems) + 1)
+                if self._system_parts
+                else meeting.system_path
+            )
+            try:
+                self._open_loopback(pyaudio, audio, info, path)
+            except Exception as exc:
+                failures.append(f"{name}: {exc}")
+                log.warning("loopback %s would not open: %s", name, exc)
+        if not self._systems:
+            raise RecorderError("no loopback could be opened; tried " + "; ".join(failures))
+
+    def _open_loopback(self, pyaudio: ModuleType, audio: object, info: dict, path: Path) -> None:
         rate = int(info["defaultSampleRate"])
         channels = int(info["maxInputChannels"])
-
-        channel = Channel(
-            "system", meeting.system_path, rate, self.clock, device=str(info["name"])
-        )
-        self._system = channel
+        channel = Channel("system", path, rate, self.clock, device=str(info["name"]))
 
         def callback(in_data, frame_count, time_info, status):  # noqa: ANN001
             if in_data:
                 channel.submit(_downmix(in_data, channels))
             return (None, pyaudio.paContinue)
 
-        stream = audio.open(
-            format=pyaudio.paInt16,
-            channels=channels,
-            rate=rate,
-            input=True,
-            input_device_index=int(info["index"]),
-            frames_per_buffer=LOOPBACK_BLOCKSIZE,
-            stream_callback=callback,
-        )
-        self._loopback_stream = stream
+        try:
+            stream = audio.open(  # type: ignore[attr-defined]
+                format=pyaudio.paInt16,
+                channels=channels,
+                rate=rate,
+                input=True,
+                input_device_index=int(info["index"]),
+                frames_per_buffer=LOOPBACK_BLOCKSIZE,
+                stream_callback=callback,
+            )
+        except Exception:
+            # The writer opened the file already; a part nobody will feed is
+            # one more WAV for the mix to read, so it goes now.
+            channel.writer.close()
+            path.unlink(missing_ok=True)
+            raise
+        self._systems.append(channel)
+        self._loopback_streams.append(stream)
         channel.start()
         stream.start_stream()
 
@@ -668,7 +873,8 @@ class Recorder:
                 meeting.pauses[-1].end = at
 
         self._close_stream(self._mic_stream, "mic")
-        self._close_stream(self._loopback_stream, "system")
+        for stream in self._loopback_streams:
+            self._close_stream(stream, "system")
         for channel in self._channels():
             try:
                 channel.close()
@@ -680,23 +886,66 @@ class Recorder:
             except Exception:
                 log.exception("could not terminate PyAudio")
 
+        for channel in self._channels():
+            log.info(
+                "%s: %.1fs captured (%.1fs of it padded silence)%s",
+                channel.name,
+                channel.writer.frames / channel.samplerate,
+                channel.padded_frames / channel.samplerate,
+                f" from {channel.device}" if self._system_parts and channel.name == "system" else "",
+            )
         if meeting is None:
             return None
+        if self._system_parts:
+            self._mix_system(meeting)
 
         meeting.ended_at = dt.datetime.now()
         meeting.duration_seconds = (meeting.ended_at - meeting.started_at).total_seconds()
         meeting.audio = self._audio_info()
         meeting.status = MeetingStatus.RECORDED
         meeting.save()
-        for channel in self._channels():
-            log.info(
-                "%s: %.1fs captured (%.1fs of it padded silence)",
-                channel.name,
-                channel.writer.frames / channel.samplerate,
-                channel.padded_frames / channel.samplerate,
-            )
         log.info("stopped %s after %.1fs", meeting.id, meeting.duration_seconds)
         return meeting
+
+    def _mix_system(self, meeting: Meeting) -> None:
+        """Turn the loopback parts into `system.wav`, by the counters the channels kept.
+
+        A part is active when its endpoint delivered sound beyond the padding,
+        which is what Windows does only while something is playing there. If the
+        mix fails, the most active part becomes `system.wav` so the meeting still
+        has a loopback, and the rest stay on disk in staging. Promotion refuses a
+        folder with a WAV in it, so they cannot reach the meetings folder.
+        """
+        parts = [channel.writer.path for channel in self._systems]
+        delivered = [
+            (channel.writer.frames - channel.padded_frames) / channel.samplerate
+            for channel in self._systems
+        ]
+        active = [seconds > ACTIVE_MIN_SECONDS for seconds in delivered]
+        started = time.monotonic()
+        try:
+            self._system_used = mix_loopback_parts(meeting.system_path, parts, active)
+        except Exception:
+            log.exception("%s: could not mix the loopback parts", meeting.id)
+            best = max(range(len(parts)), key=lambda i: delivered[i])
+            try:
+                os.replace(parts[best], meeting.system_path)
+                self._system_used = [best]
+                log.error(
+                    "%s: kept %s alone as system.wav; the other parts are still in %s",
+                    meeting.id,
+                    self._systems[best].device,
+                    meeting.dir,
+                )
+            except OSError:
+                log.exception("%s: no system.wav; the parts are still in %s", meeting.id, meeting.dir)
+            return
+        log.info(
+            "%s: system.wav is %s (%.1fs)",
+            meeting.id,
+            " + ".join(self._systems[i].device for i in self._system_used),
+            time.monotonic() - started,
+        )
 
     @staticmethod
     def _close_stream(stream: object | None, name: str) -> None:
@@ -714,16 +963,35 @@ class Recorder:
     # --- Helpers -------------------------------------------------------------
 
     def _channels(self) -> list[Channel]:
-        return [c for c in (self._mic, self._system) if c is not None]
+        return ([self._mic] if self._mic is not None else []) + self._systems
 
     def _audio_info(self) -> dict[str, ChannelAudio]:
+        """The `audio` block. With parts, `system` describes the mix.
+
+        Before the stop, that is every endpoint opened, and the frames are the
+        default output's. After it, it is the endpoints that went into
+        `system.wav` and that file's real length.
+        """
         from referat import paths
 
         info: dict[str, ChannelAudio] = {}
         if self._mic is not None:
             info["mic"] = self._mic.audio_info(paths.MIC_WAV)
-        if self._system is not None:
-            info["system"] = self._system.audio_info(paths.SYSTEM_WAV)
+        if self._systems:
+            system = self._systems[0].audio_info(paths.SYSTEM_WAV)
+            if self._system_parts:
+                used = [self._systems[i] for i in self._system_used] or self._systems
+                system.device = " + ".join(channel.device for channel in used)
+                if self._system_used and self.meeting is not None:
+                    try:
+                        # From the file, because a part renamed into place
+                        # keeps its own endpoint's rate.
+                        with wave.open(str(self.meeting.system_path), "rb") as wav:
+                            system.samplerate = wav.getframerate()
+                            system.frames = wav.getnframes()
+                    except (OSError, wave.Error):
+                        log.warning("could not read back system.wav", exc_info=True)
+            info["system"] = system
         return info
 
 

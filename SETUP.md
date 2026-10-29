@@ -338,8 +338,10 @@ meetings_dir = 'C:\Users\you\Dropbox\Research\Meetings'
 .venv\Scripts\python.exe -m referat.cli devices
 ```
 
-This lists every input device and every WASAPI loopback source, and marks the one
-`[audio]` currently resolves to with `<- config`.
+This lists every input device and every WASAPI loopback source. It marks the
+microphone `[audio]` resolves to with `<- config`, and every loopback that will
+be recorded with `<- recorded`, which is all of them while `loopback_device` is
+empty.
 
 **Name your microphone even when it is already the default.** Two reasons, and
 both are quiet failures:
@@ -368,14 +370,17 @@ mic_device = "Jabra"
 loopback_device = ""
 ```
 
-**Leave `loopback_device` empty on purpose.** Empty means "loopback of whatever
-the current default output device is", so system audio follows whatever is
-actually playing — which is what you want when you move between headphones and
-speakers mid-day. Pinning it to a device name is the obvious-looking hardening
-and it is a **trap**: the loopback decides where Referat *listens*, not where the
-sound *comes out*, so a pinned loopback that disagrees with what the call is
-actually playing through records silence and loses the far end completely. That
-is a worse failure than the one section 4a is about.
+**Leave `loopback_device` empty on purpose.** Empty means "loopback of every
+output device", mixed into one `system.wav` when the recording stops. A call is
+captured whether it plays through headphones, the laptop speakers, the Jabra or
+a monitor, and whether or not that is the Windows default. Until 2026-10-29
+empty meant *the default output only*, and a Zoom call that played through the
+Jabra while the default was the laptop speakers lost its whole far end. Pinning
+it to a device name is the obvious-looking hardening and it is a **trap**: the
+loopback decides where Referat *listens*, not where the sound *comes out*, so a
+pinned loopback that disagrees with what the call is actually playing through
+records silence and loses the far end completely. That is a worse failure than
+the one section 4a is about.
 
 ---
 
@@ -392,6 +397,13 @@ from the loopback, clean, and once off the air, degraded.
 does hardware echo cancellation and will not feed its own playback back into its
 own capture, which is exactly what it is for. Anything else in the room — laptop
 speakers, a monitor, a television over HDMI — will.
+
+That same echo cancellation means the Jabra's microphone never holds the far end
+at all, so the loopback is the only copy of it. Before 2026-10-29 the loopback
+listened only to the Windows default output, and this advice lost a meeting:
+the call went to the Jabra, the default was the laptop speakers, and the far end
+was recorded nowhere. Referat now loops back every output, so the advice is
+safe to follow.
 
 **The trap is that setting the Windows default output is not enough.** Zoom and
 Teams each keep their *own* speaker selection, independent of the system default,

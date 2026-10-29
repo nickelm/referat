@@ -564,8 +564,10 @@ def reconcile_interrupted(config: Config) -> list[Meeting]:
 
 def _close_out_killed_recording(meeting: Meeting) -> bool:
     """Finish a meeting whose recorder died. True when it was written back as `recorded`."""
+    import wave
+
     from referat import status
-    from referat.recorder import seal_wav
+    from referat.recorder import loopback_parts, mix_loopback_parts, seal_wav
     from referat.state import State
 
     live = status.read_status()
@@ -578,18 +580,44 @@ def _close_out_killed_recording(meeting: Meeting) -> bool:
         return False
 
     last_write: dt.datetime | None = None
+
+    # A recorder looping back several outputs writes them as parts and mixes
+    # them on stop, which a killed one never reached. So the mix happens here,
+    # by scanning for sound, since the counters died with the process. The
+    # parts' own mtimes say when capture ended; the mixed file's says when this ran.
+    parts = loopback_parts(meeting.dir)
+    for part in parts:
+        written = dt.datetime.fromtimestamp(part.stat().st_mtime)
+        try:
+            seal_wav(part)
+        except (OSError, ValueError):
+            log.exception("%s: could not seal %s", meeting.id, part.name)
+            continue
+        last_write = written if last_write is None else max(last_write, written)
+    if parts:
+        try:
+            used = mix_loopback_parts(meeting.system_path, parts)
+            log.info("%s: mixed loopback parts %s into system.wav", meeting.id, used)
+        except Exception:
+            log.exception("%s: could not mix the loopback parts", meeting.id)
+
     for channel in meeting.audio.values():
         path = meeting.dir / channel.file
         if not path.exists():
             continue
+        mixed = bool(parts) and channel.file == paths.SYSTEM_WAV
         # Read before sealing: the seal rewrites the header and moves the mtime.
         written = dt.datetime.fromtimestamp(path.stat().st_mtime)
         try:
             channel.frames = seal_wav(path)
-        except (OSError, ValueError):
+            if mixed:
+                with wave.open(str(path), "rb") as wav:
+                    channel.samplerate = wav.getframerate()
+        except (OSError, ValueError, wave.Error):
             log.exception("%s: could not seal %s", meeting.id, channel.file)
             continue
-        last_write = written if last_write is None else max(last_write, written)
+        if not mixed:
+            last_write = written if last_write is None else max(last_write, written)
 
     meeting.ended_at = last_write if last_write is not None else meeting.started_at
     meeting.duration_seconds = max(0.0, (meeting.ended_at - meeting.started_at).total_seconds())

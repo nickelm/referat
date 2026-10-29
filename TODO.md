@@ -1692,6 +1692,41 @@ terminal, and the error could not be selected out of the Activity tab.
 - [ ] **Set the OAuth app to *In production*** in the Google Cloud console
       (SETUP.md 13b, step 5), or this comes back every seven days
 
+### Every output is looped back (2026-10-29)
+
+`2026-10-28_1400`, a Zoom call, lost its far end. The call played through the
+Jabra's speaker, and the recorder looped back only the default output, which
+was the laptop speakers. The Jabra's echo cancellation kept the mic clean of it
+too, and the audio was released. Not recoverable.
+
+- [x] **`resolve_loopback_devices`**: every endpoint when the key is empty,
+      default first; one when pinned
+- [x] **A `Channel` per endpoint**, writing `system.part<N>.wav`; an endpoint
+      that will not open is skipped
+- [x] **`mix_loopback_parts`** on stop: rename for zero or one active part, an
+      exact block-wise sum otherwise, resampling a part at another rate; parts
+      deleted only once `system.wav` exists; a failed mix keeps the most active
+- [x] **`reconcile_interrupted`** mixes a killed recorder's parts, by scanning
+- [x] **`promote_meeting` refuses any top-level WAV**
+- [x] **`referat/resample.py`**, moved verbatim out of `transcribe.py`;
+      byte-identical at 48 kHz and 44.1 kHz
+- [x] **`referat devices`** marks every recorded loopback
+- [x] Offline checks of every mix path and the crash close-out; a live 8 s
+      recording with tones on the Jabra and laptop speakers
+- [ ] **Record a real call through the Jabra speaker from the tray**, with no
+      headphones plugged in, and confirm the transcript has the far end. The
+      live check drove `Recorder` directly and played tones, not speech
+- [ ] **Kill the tray mid-recording once** and confirm the restart mixes the
+      parts and transcribes the meeting. Checked offline against a synthetic
+      folder, never against a real killed process
+- [ ] **Measure the stop-time mix on an hour-long two-endpoint meeting.** If it
+      holds the window or the hotkey thread for long, move the mix onto the
+      transcription thread before the pipeline reads `system.wav`
+- [ ] **Should a call with an empty loopback say so?** A Zoom or Teams process
+      running while every endpoint delivers nothing would be worth a live
+      notification. Not built: capturing every output removes the case that
+      prompted it, and detecting the call means asking Windows about processes
+
 ### Left open
 
 - [ ] **Auto-sync has not yet run off a real `/cleanup` pass.** It was driven by
@@ -5701,11 +5736,14 @@ would make the rest of it answerable.
       has to survive until it is, which is what `keep_audio` is for. A wrong name
       is worse than no name, so any loosening is measured against the near-misses
       rather than argued
-- [ ] **The loopback device is the Realtek headphones**, not the Jabra, because
+- [x] **The loopback device is the Realtek headphones**, not the Jabra, because
       `[audio].loopback_device` is empty and takes the Windows default. Harmless
       for a meeting held wholly in person; if somebody dials in and comes out of
       the Jabra speaker, that audio is not captured at all. Decide whether the
-      loopback should follow the mic when the mic is a speakerphone
+      loopback should follow the mic when the mic is a speakerphone.
+      **It happened on 2026-10-28 and cost a call's whole far end.** Answered by
+      looping back every output rather than following the mic — see "Every
+      output is looped back" below
 - [ ] **A speaker only ever heard in overlap gets no label at all.** `diarize`
       reads `exclusive_speaker_diarization`, and `assign` is winner-take-all per
       Whisper segment, so a cluster that never dominates a segment receives no

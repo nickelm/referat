@@ -113,7 +113,42 @@ thing that makes sure a meeting does not stay untagged.
   assumption merged an entire two-person meeting into a single `ME`.
 - System audio output via WASAPI loopback (`PyAudioWPatch`), captured at the
   device's native mix rate and downmixed to mono, so Zoom calls are captured
-  even through headphones. This channel is everyone else.
+  even through headphones. This channel is everyone else. **It is a loopback of
+  every output, not just the default**, since 2026-10-29: each render endpoint
+  gets its own stream and writes `system.part<N>.wav`, and the recorder mixes
+  the parts into `system.wav` on stop. Nothing past the recorder ever sees a
+  part.
+
+**A loopback hears one endpoint, and a call plays wherever its application
+sends it.** On 2026-10-28 a 28-minute Zoom call played through the Jabra SPEAK
+510's own speaker while the recorder looped back the laptop's speakers, which
+were the Windows default because no headphones were plugged in. That endpoint
+delivered 4.5 seconds of packets in the whole meeting. The Jabra cancels its own
+playback out of its microphone, which is what a speakerphone is for, so the mic
+held none of the far end either. The meeting was transcribed as the owner
+talking to nobody, and the audio was released on schedule, because a voiceless
+loopback is clean for every in-person meeting. Nothing could be recovered.
+TODO.md had predicted this exact failure on 2026-09-02, and SETUP.md §4a was
+recommending the Jabra as the place to send call audio.
+
+The mix is cheap where it matters. A part is *active* when its endpoint
+delivered sound beyond the padding, which Windows does only while something
+plays there. No active part means the default's silent part is renamed into
+place. One active part is the ordinary call and is a rename, with nothing read.
+Two or more are summed a block at a time, resampled with the same
+`referat/resample.py` transcription uses if their rates differ. Summing is
+exact, so one loud part plus silence reproduces the loud part sample for
+sample. Each part is padded against the one recording clock, exactly as a
+single `system.wav` always was, so they are aligned by construction. A
+recorder killed mid-meeting leaves parts, which `reconcile_interrupted` mixes
+by scanning for a non-zero sample, since the counters died with the process. A
+failed mix keeps the most active part as `system.wav` and leaves the rest in
+staging, and `promote_meeting` refuses **any** top-level WAV, so a stray part
+can never reach the meetings folder. Two risks are accepted rather than
+engineered around: the same stream rendered to two endpoints at once is summed
+twice with a small offset, and a doubled far end beats a missing one; and the
+mix runs on whichever thread called `stop()`, measured at 0.1 s for a short
+two-endpoint recording and expected to be seconds for an hour.
 
 Windows stops delivering loopback packets while nothing is playing, so both
 channels are written against a recording clock and padded with silence when they
@@ -177,8 +212,11 @@ Prevention is a routing habit and cannot be a config knob. `[audio].loopback_dev
 stays empty: it decides where Referat *listens*, not where sound *comes out*, so
 pinning it to a headset while the call plays through a television records silence
 and loses the far end entirely — a worse failure than the one it would be
-mitigating. SETUP.md section 4a is the habit, and `transcription.bleed` in
-`meta.json` is how you find out the habit lapsed.
+mitigating. Since 2026-10-29 an empty key listens to every output, so routing
+no longer decides whether the far end is *captured*. It still decides whether
+it is captured *twice*, which is all the habit is about now. SETUP.md section 4a
+is the habit, and `transcription.bleed` in `meta.json` is how you find out it
+lapsed.
 
 **Sleep prevention** — hold `SetThreadExecutionState(ES_CONTINUOUS |
 ES_SYSTEM_REQUIRED)` through `ctypes` while the recorder is in any state but

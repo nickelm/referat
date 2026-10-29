@@ -4142,7 +4142,13 @@ def _input_section(sd: ModuleType, recorder: ModuleType, wanted: str) -> str:
 
 
 def _loopback_section(recorder: ModuleType, wanted: str) -> str:
-    """The WASAPI loopback sources, with the one `loopback_device` resolves to marked.
+    """The WASAPI loopback sources, with every one the recorder will open marked.
+
+    With `loopback_device` empty that is all of them, since 2026-10-29: a call
+    plays wherever its application sends it, and the default output is only
+    where Windows sends things. The marks come from
+    :func:`referat.recorder.resolve_loopback_devices` itself, so this listing
+    cannot disagree with what gets recorded.
 
     Deliberately without an index column: PyAudio numbers its devices in its own
     namespace, and printing that next to sounddevice's would invite setting one
@@ -4150,30 +4156,42 @@ def _loopback_section(recorder: ModuleType, wanted: str) -> str:
     """
     import pyaudiowpatch as pyaudio
 
-    lines = [_setting("loopback_device", wanted)]
+    if wanted.strip():
+        lines = [_setting("loopback_device", wanted)]
+    else:
+        lines = ['[audio].loopback_device = ""  (every output, mixed into system.wav)']
     audio = pyaudio.PyAudio()
     try:
         try:
-            selected = recorder.resolve_loopback_device(audio, wanted)
+            chosen = recorder.resolve_loopback_devices(audio, wanted)
         except recorder.RecorderError as exc:
             return "\n".join([*lines, f"no loopback available: {exc}"])
+        try:
+            default = audio.get_default_wasapi_loopback()
+        except Exception:
+            default = None
         # `_matches` rather than a substring test written out again here: the
-        # question is whether the *recorder* considers this a match. Unlike the
-        # mic resolver, this one has no way of saying "I fell back" — it returns
-        # the default output's loopback either way — so ask afterwards.
-        matched = bool(wanted.strip()) and recorder._matches(str(selected["name"]), wanted)
+        # question is whether the *recorder* considers this a match. A pin that
+        # matches nothing falls back to the default output, silently but for a
+        # log line, so ask afterwards.
+        matched = bool(wanted.strip()) and recorder._matches(str(chosen[0]["name"]), wanted)
         if wanted.strip() and not matched:
             lines.append(f"nothing matches {wanted!r} - the default output will be recorded")
+        recorded = {info["index"] for info in chosen}
 
         rows: list[tuple[str, ...]] = []
         for info in audio.get_loopback_device_info_generator():
-            resolved = info["index"] == selected["index"]
+            marks = []
+            if info["index"] in recorded:
+                marks.append("<- config" if matched else "<- recorded")
+            if default is not None and info["index"] == default["index"]:
+                marks.append("(default)")
             rows.append(
                 (
                     str(info["name"]),
                     str(info["maxInputChannels"]),
                     str(int(info["defaultSampleRate"])),
-                    _marker(resolved and matched, resolved and not matched),
+                    " ".join(marks),
                 )
             )
     finally:
